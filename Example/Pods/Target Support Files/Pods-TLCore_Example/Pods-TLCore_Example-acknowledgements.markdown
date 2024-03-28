@@ -675,7 +675,7 @@ SOFTWARE.
 
 ## TLCore
 
-Copyright (c) 2024 zhanqijie <jasonjie.zhan@tron.network>
+Copyright (c) 2024 TronLink
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

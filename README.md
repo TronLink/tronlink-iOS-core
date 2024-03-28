@@ -1,15 +1,10 @@
 # tronlink-iOS-core
 
-[![CI Status](https://img.shields.io/travis/zhanqijie/TLCore.svg?style=flat)](https://travis-ci.org/zhanqijie/TLCore)
-[![Version](https://img.shields.io/cocoapods/v/TLCore.svg?style=flat)](https://cocoapods.org/pods/TLCore)
-[![License](https://img.shields.io/cocoapods/l/TLCore.svg?style=flat)](https://cocoapods.org/pods/TLCore)
-[![Platform](https://img.shields.io/cocoapods/p/TLCore.svg?style=flat)](https://cocoapods.org/pods/TLCore)
+TronLink Wallet is a decentralized non-custodial wallet.TronLink-Core is the core module of TronLink Wallet wallet, which provides core functions such as Create Wallet, Get Address, and Sign Transaction.
 
 ## Example
 
 To run the example project, clone the repo, and run `pod install` from the Example directory first.
-
-## Requirements
 
 ## Installation
 
@@ -20,10 +15,8 @@ it, simply add the following line to your Podfile:
 pod 'TLCore'
 ```
 
-## Author
+## Demo
 
-TLCore
-
-## License
-
-TLCore is available under the MIT license. See the LICENSE file for more info.
+- [Create wallet](./Example/TLCore/ViewController.swift)
+- [Sign transaction](./Example/TLCore/ViewController.swift)
+- [Sign message](./Example/TLCore/ViewController.swift)
