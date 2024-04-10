@@ -17,6 +17,6 @@ pod 'TLCore'
 
 ## Demo
 
-- [Create wallet](./Example/TLCore/ViewController.swift)
-- [Sign transaction](./Example/TLCore/ViewController.swift)
-- [Sign message](./Example/TLCore/ViewController.swift)
+- [Create wallet](./Example/Tests/Tests.swift)
+- [Sign transaction](./Example/Tests/Tests.swift)
+- [Sign message](./Example/Tests/Tests.swift)
