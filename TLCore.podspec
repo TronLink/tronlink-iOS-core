@@ -65,9 +65,9 @@ TODO: Add long description of the pod here.
    s.dependency '!ProtoCompiler', '3.21.5'
    s.dependency '!ProtoCompiler-gRPCPlugin', '1.49.0'
    
-   s.dependency 'TronWeb3Swift', '0.5.0'
-   s.dependency 'TronCore', '0.2.0'
-   s.dependency 'TronKeystore', '0.2.0'
+   s.dependency 'TronWeb3Swift', '1.0.2'
+   s.dependency 'TronCore', '1.0.0'
+   s.dependency 'TronKeystore', '1.0.0'
 
    s.subspec 'no-arc' do |sp|
        sp.source_files  = "TLCore/Classes/gRPC/core/contract/SmartContract.pbobjc.{h,m}",
