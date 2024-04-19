@@ -25,3 +25,5 @@ pod 'tronlink-iOS-core'
 - [Create wallet](./Example/Tests/Tests.swift)
 - [Sign transaction](./Example/Tests/Tests.swift)
 - [Sign message](./Example/Tests/Tests.swift)
+- [Export PrivateKey](./Example/Tests/Tests.swift)
+- [Export Mnemonic](./Example/Tests/Tests.swift)
