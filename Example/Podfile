@@ -6,22 +6,7 @@ use_frameworks!
 platform :ios, '11.0'
 
 target 'TLCore_Example' do
-#  use_frameworks!
   pod 'TLCore', :path => '../'
-  
-#  pod 'gRPC', '1.49.0'
-#  pod 'Protobuf', '3.22.0'
-#  pod 'gRPC-Core', '1.49.0'
-#  pod 'gRPC-ProtoRPC', '1.49.0'
-#  pod 'gRPC-RxLibrary', '1.49.0'
-#  pod '!ProtoCompiler', '3.21.5'
-#  pod '!ProtoCompiler-gRPCPlugin', '1.49.0'
-  
-#  pod 'TrustKeystore', :git => 'https://github.com/TRON-US/TrustKeystore', :branch => 'TrustKeystore_0.4.0'
-#  pod 'TrustCore', :git => 'https://github.com/TRON-US/TrustCore', :branch => 'TrustCore_0.0.7'
-#  pod 'TrezorCrypto', :git => 'https://github.com/TRON-US/trezor-crypto-ios', inhibit_warnings: true
-#  pod 'CryptoSwift', :git => 'https://github.com/TRON-US/CryptoSwift', :branch => 'stack'
-#  pod 'web3swift.pod', :git => 'https://github.com/TRON-US/web3swift', :branch => 'master'
 
   target 'TLCore_Tests' do
     inherit! :search_paths
@@ -35,11 +20,6 @@ post_install do |installer|
         target.build_configurations.each do |config|
             config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '11.0'
         end
-#        if ['gRPC-gRPCCertificates'].include? target.name
-#            target.build_configurations.each do |config|
-#                fix_config(config)
-#            end
-#        end
         if ['TrustKeystore'].include? target.name
             target.build_configurations.each do |config|
                 config.build_settings['SWIFT_OPTIMIZATION_LEVEL'] = '-O'
@@ -68,9 +48,5 @@ post_install do |installer|
         end
       end
     end
-    
-#    installer.pods_project.build_configurations.each do |config|
-#      config.build_settings["EXCLUDED_ARCHS[sdk=iphonesimulator*]"] = "arm64"
-#    end
 end
 

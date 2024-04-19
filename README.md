@@ -6,6 +6,11 @@ TronLink Wallet is a decentralized non-custodial wallet.TronLink-Core is the cor
 
 To run the example project, clone the repo, and run `pod install` from the Example directory first.
 
+## Requirements
+
+- iOS 10.0+
+- Swift 4.2
+
 ## Installation
 
 TLCore is available through [CocoaPods](https://cocoapods.org). To install
