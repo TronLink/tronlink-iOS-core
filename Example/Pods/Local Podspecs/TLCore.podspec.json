@@ -1,18 +1,19 @@
 {
-  "name": "TLCore",
+  "name": "tronlink-iOS-core",
   "version": "0.1.0",
-  "summary": "TLCore is repo of TronLink",
+  "summary": "tronlink-iOS-core is repo of TronLink",
+  "module_name": "TLCore",
   "description": "TODO: Add long description of the pod here.",
-  "homepage": "https://github.com/ttwork/TLCore",
+  "homepage": "https://github.com/TronLink/tronlink-iOS-core",
   "license": {
-    "type": "MIT",
+    "type": "Apache",
     "file": "LICENSE"
   },
   "authors": {
     "TronLink": ""
   },
   "source": {
-    "git": "https://github.com/ttwork/TLCore.git",
+    "git": "https://github.com/TronLink/tronlink-iOS-core.git",
     "tag": "0.1.0"
   },
   "platforms": {
@@ -43,13 +44,13 @@
     "!ProtoCompiler-gRPCPlugin": [
       "1.49.0"
     ],
-    "TronWeb3Swift": [
+    "TronWalletWeb3Swift": [
 
     ],
-    "TronCore": [
+    "TronWalletABI": [
 
     ],
-    "TronKeystore": [
+    "TronWalletKeystore": [
 
     ]
   },

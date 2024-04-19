@@ -7,9 +7,10 @@
 #
 
 Pod::Spec.new do |s|
-  s.name             = 'TLCore'
+  s.name             = 'tronlink-iOS-core'
   s.version          = '0.1.0'
-  s.summary          = 'TLCore is repo of TronLink'
+  s.summary          = 'tronlink-iOS-core is repo of TronLink'
+  s.module_name      = 'TLCore'
 
 # This description is used to generate tags and improve search results.
 #   * Think: What does it do? Why did you write it? What is the focus?

@@ -6,7 +6,7 @@ use_frameworks!
 platform :ios, '11.0'
 
 target 'TLCore_Example' do
-  pod 'TLCore', :path => '../'
+  pod 'tronlink-iOS-core', :path => '../'
 
   target 'TLCore_Tests' do
     inherit! :search_paths

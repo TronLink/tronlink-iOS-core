@@ -673,7 +673,7 @@ SOFTWARE.
     otherwise be required by Sections 4(a), 4(b) and 4(d) of the License.
 
 
-## TLCore
+## tronlink-iOS-core
 
 Copyright (c) 2024 TronLink
 

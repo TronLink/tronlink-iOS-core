@@ -13,11 +13,11 @@ To run the example project, clone the repo, and run `pod install` from the Examp
 
 ## Installation
 
-TLCore is available through [CocoaPods](https://cocoapods.org). To install
+tronlink-iOS-core is available through [CocoaPods](https://cocoapods.org). To install
 it, simply add the following line to your Podfile:
 
 ```ruby
-pod 'TLCore'
+pod 'tronlink-iOS-core'
 ```
 
 ## Demo
