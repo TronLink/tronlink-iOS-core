@@ -573,7 +573,7 @@ PODS:
   - BoringSSL-GRPC/Implementation (0.0.24):
     - BoringSSL-GRPC/Interface (= 0.0.24)
   - BoringSSL-GRPC/Interface (0.0.24)
-  - CryptoSwift (1.8.1)
+  - CryptoSwift (1.8.2)
   - FBSnapshotTestCase (2.1.4):
     - FBSnapshotTestCase/SwiftSupport (= 2.1.4)
   - FBSnapshotTestCase/Core (2.1.4)
@@ -657,41 +657,41 @@ PODS:
   - scrypt.c (0.1.1)
   - secp256k1.c (0.1.2)
   - SipHash (1.2.2)
-  - SwiftProtobuf (1.25.2)
-  - TLCore (0.1.0):
-    - "!ProtoCompiler (= 3.21.5)"
-    - "!ProtoCompiler-gRPCPlugin (= 1.49.0)"
-    - gRPC (= 1.49.0)
-    - gRPC-Core (= 1.49.0)
-    - gRPC-ProtoRPC (= 1.49.0)
-    - gRPC-RxLibrary (= 1.49.0)
-    - Protobuf (= 3.22.0)
-    - TLCore/no-arc (= 0.1.0)
-    - TronCore
-    - TronKeystore
-    - TronWeb3Swift
-  - TLCore/no-arc (0.1.0):
-    - "!ProtoCompiler (= 3.21.5)"
-    - "!ProtoCompiler-gRPCPlugin (= 1.49.0)"
-    - gRPC (= 1.49.0)
-    - gRPC-Core (= 1.49.0)
-    - gRPC-ProtoRPC (= 1.49.0)
-    - gRPC-RxLibrary (= 1.49.0)
-    - Protobuf (= 3.22.0)
-    - TronCore
-    - TronKeystore
-    - TronWeb3Swift
+  - SwiftProtobuf (1.26.0)
   - TrezorCrypto (0.0.9)
-  - TronCore (0.2.0):
+  - tronlink-iOS-core (0.1.0):
+    - "!ProtoCompiler (= 3.21.5)"
+    - "!ProtoCompiler-gRPCPlugin (= 1.49.0)"
+    - gRPC (= 1.49.0)
+    - gRPC-Core (= 1.49.0)
+    - gRPC-ProtoRPC (= 1.49.0)
+    - gRPC-RxLibrary (= 1.49.0)
+    - Protobuf (= 3.22.0)
+    - tronlink-iOS-core/no-arc (= 0.1.0)
+    - TronWalletABI
+    - TronWalletKeystore
+    - TronWalletWeb3Swift
+  - tronlink-iOS-core/no-arc (0.1.0):
+    - "!ProtoCompiler (= 3.21.5)"
+    - "!ProtoCompiler-gRPCPlugin (= 1.49.0)"
+    - gRPC (= 1.49.0)
+    - gRPC-Core (= 1.49.0)
+    - gRPC-ProtoRPC (= 1.49.0)
+    - gRPC-RxLibrary (= 1.49.0)
+    - Protobuf (= 3.22.0)
+    - TronWalletABI
+    - TronWalletKeystore
+    - TronWalletWeb3Swift
+  - TronWalletABI (1.0.0):
     - BigInt
     - SwiftProtobuf (~> 1.0)
     - TrezorCrypto (~> 0.0.8)
-  - TronKeystore (0.2.0):
+  - TronWalletKeystore (1.0.1):
     - BigInt
     - CryptoSwift
     - TrezorCrypto
-    - TronCore
-  - TronWeb3Swift (0.3.0):
+    - TronWalletABI
+  - TronWalletWeb3Swift (1.0.0):
     - BigInt (~> 3.1)
     - keccak.c (~> 0.1)
     - PromiseKit (~> 6.4)
@@ -700,7 +700,7 @@ PODS:
 
 DEPENDENCIES:
   - FBSnapshotTestCase (~> 2.1.4)
-  - TLCore (from `../`)
+  - tronlink-iOS-core (from `../`)
 
 SPEC REPOS:
   https://github.com/CocoaPods/Specs.git:
@@ -723,12 +723,12 @@ SPEC REPOS:
     - SipHash
     - SwiftProtobuf
     - TrezorCrypto
-    - TronCore
-    - TronKeystore
-    - TronWeb3Swift
+    - TronWalletABI
+    - TronWalletKeystore
+    - TronWalletWeb3Swift
 
 EXTERNAL SOURCES:
-  TLCore:
+  tronlink-iOS-core:
     :path: "../"
 
 SPEC CHECKSUMS:
@@ -737,7 +737,7 @@ SPEC CHECKSUMS:
   abseil: 926fb7a82dc6d2b8e1f2ed7f3a718bce691d1e46
   BigInt: 76b5dfdfa3e2e478d4ffdf161aeede5502e2742f
   BoringSSL-GRPC: 3175b25143e648463a56daeaaa499c6cb86dad33
-  CryptoSwift: b9c701d6f5011df23794dbf7f2e480a77835d83d
+  CryptoSwift: c63a805d8bb5e5538e88af4e44bb537776af11ea
   FBSnapshotTestCase: 094f9f314decbabe373b87cc339bea235a63e07a
   gRPC: 64f36d689b2ecd99c4351f74e6f91347cdc65d9f
   gRPC-Core: 3a9fdb5967d42211e875826f3f6fc163ea02c2a1
@@ -749,13 +749,13 @@ SPEC CHECKSUMS:
   scrypt.c: b42ae06183251329d2b2c620c226fb541a4a3592
   secp256k1.c: db47b726585d80f027423682eb369729e61b3b20
   SipHash: fad90a4683e420c52ef28063063dbbce248ea6d4
-  SwiftProtobuf: 407a385e97fd206c4fbe880cc84123989167e0d1
-  TLCore: 7e29b634f8529a04cb4840c97ec5f90a108b1995
+  SwiftProtobuf: 5e8349171e7c2f88f5b9e683cb3cb79d1dc780b3
   TrezorCrypto: bfeea47a052dca2c77d4a39e1e183865e52de14d
-  TronCore: d66f073a7dcc614f45ebdfa936aaaee2be4250fa
-  TronKeystore: db801d55ff046a910fe7e4826b858cac9267bccd
-  TronWeb3Swift: 4436255a85b1491149c63b12ad18790561a13699
+  tronlink-iOS-core: eb020079eb6c8f1ea7c60110deed6c558775650f
+  TronWalletABI: 29b9dfcec8037f385d3fa760862bea823a37f47b
+  TronWalletKeystore: 03294bf6c37d36c8e60318f0d56e5cb4edb07e87
+  TronWalletWeb3Swift: 04d1cce8242ac949c1ebced2f675ede8ecb08927
 
-PODFILE CHECKSUM: a5ca306662137e7bb8d2ed6364a99bf8612f0fd6
+PODFILE CHECKSUM: 642ac3781ad21fc6e7b559bf2812fe0b10733f19
 
-COCOAPODS: 1.11.3
+COCOAPODS: 1.14.3

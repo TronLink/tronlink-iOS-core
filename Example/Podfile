@@ -5,10 +5,10 @@ use_frameworks!
 
 platform :ios, '11.0'
 
-target 'TLCore_Example' do
+target 'tronlink-iOS-core_Example' do
   pod 'tronlink-iOS-core', :path => '../'
 
-  target 'TLCore_Tests' do
+  target 'tronlink-iOS-core_Tests' do
     inherit! :search_paths
 
     pod 'FBSnapshotTestCase' , '~> 2.1.4'

@@ -1,5 +1,5 @@
 #
-# Be sure to run `pod lib lint TLCore.podspec' to ensure this is a
+# Be sure to run `pod lib lint tronlink-iOS-core.podspec' to ensure this is a
 # valid spec before submitting.
 #
 # Any lines starting with a # are optional, but their use is encouraged
@@ -33,7 +33,7 @@ TODO: Add long description of the pod here.
   s.ios.deployment_target = '10.0'
   s.swift_versions = '4.2'
 
-  s.source_files = 'TLCore/Classes/**/*'
+  s.source_files = 'tronlink-iOS-core/Classes/**/*'
   s.requires_arc = true
 
   # s.resource_bundles = {
@@ -71,13 +71,13 @@ TODO: Add long description of the pod here.
    s.dependency 'TronWalletKeystore'
 
    s.subspec 'no-arc' do |sp|
-       sp.source_files  = "TLCore/Classes/gRPC/core/contract/SmartContract.pbobjc.{h,m}",
-       "TLCore/Classes/gRPC/google/api/Annotations.pbobjc.{h,m}",
-       "TLCore/Classes/gRPC/core/Tron.pbobjc.{h,m}",
-       "TLCore/Classes/gRPC/core/contract/Common.pbobjc.{h,m}",
-       "TLCore/Classes/gRPC/api/Zksnark.pbobjc.{h,m}",
-       "TLCore/Classes/gRPC/google/protobuf/Descriptor.pbobjc.{h,m}",
-       "TLCore/Classes/gRPC/api/Api_Tron.pbobjc.{h,m}"
+       sp.source_files  = "tronlink-iOS-core/Classes/gRPC/core/contract/SmartContract.pbobjc.{h,m}",
+       "tronlink-iOS-core/Classes/gRPC/google/api/Annotations.pbobjc.{h,m}",
+       "tronlink-iOS-core/Classes/gRPC/core/Tron.pbobjc.{h,m}",
+       "tronlink-iOS-core/Classes/gRPC/core/contract/Common.pbobjc.{h,m}",
+       "tronlink-iOS-core/Classes/gRPC/api/Zksnark.pbobjc.{h,m}",
+       "tronlink-iOS-core/Classes/gRPC/google/protobuf/Descriptor.pbobjc.{h,m}",
+       "tronlink-iOS-core/Classes/gRPC/api/Api_Tron.pbobjc.{h,m}"
        sp.requires_arc = false
    end
 

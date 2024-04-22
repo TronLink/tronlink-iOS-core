@@ -1,6 +1,0 @@
-framework module TronCore {
-  umbrella header "TronCore-umbrella.h"
-
-  export *
-  module * { export * }
-}
