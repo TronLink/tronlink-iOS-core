@@ -1,0 +1,6 @@
+framework module Pods_tronlink_iOS_core_Tests {
+  umbrella header "Pods-tronlink-iOS-core_Tests-umbrella.h"
+
+  export *
+  module * { export * }
+}
