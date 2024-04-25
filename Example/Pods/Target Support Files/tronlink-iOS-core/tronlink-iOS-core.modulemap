@@ -1,0 +1,6 @@
+framework module TLCore {
+  umbrella header "tronlink-iOS-core-umbrella.h"
+
+  export *
+  module * { export * }
+}

@@ -1,0 +1,6 @@
+framework module TronCore {
+  umbrella header "TronWalletABI-umbrella.h"
+
+  export *
+  module * { export * }
+}
