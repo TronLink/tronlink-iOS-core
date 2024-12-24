@@ -31,13 +31,6 @@
 #import "Annotations.pbobjc.h"
 #import "HTTP.pbobjc.h"
 #import "Descriptor.pbobjc.h"
-#import "SmartContract.pbobjc.h"
-#import "Annotations.pbobjc.h"
-#import "Tron.pbobjc.h"
-#import "Common.pbobjc.h"
-#import "Zksnark.pbobjc.h"
-#import "Descriptor.pbobjc.h"
-#import "Api_Tron.pbobjc.h"
 
 FOUNDATION_EXPORT double TLCoreVersionNumber;
 FOUNDATION_EXPORT const unsigned char TLCoreVersionString[];
