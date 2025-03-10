@@ -52,6 +52,8 @@ CF_EXTERN_C_BEGIN
 @class GPBSourceCodeInfo_Location;
 @class GPBUninterpretedOption;
 @class GPBUninterpretedOption_NamePart;
+#include <libkern/OSAtomicDeprecated.h>
+
 
 NS_ASSUME_NONNULL_BEGIN
 
