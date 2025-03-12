@@ -1,4 +1,3 @@
-
 Pod::Spec.new do |s|
   s.name             = 'tronlink-iOS-core'
   s.version          = '1.0.0'
@@ -14,11 +13,11 @@ Pod::Spec.new do |s|
 
   s.source_files = 'tronlink-iOS-core/Classes/**/*'
 
-  s.dependency 'gRPC', '1.68.1'
+  s.dependency 'gRPC', '1.71.0'
   s.dependency 'Protobuf', '~> 3.0'
-  s.dependency 'gRPC-Core', '1.68.1'
-  s.dependency 'gRPC-ProtoRPC', '1.68.1'
-  s.dependency 'gRPC-RxLibrary', '1.68.1'
+  s.dependency 'gRPC-Core', '1.71.0'
+  s.dependency 'gRPC-ProtoRPC', '1.71.0'
+  s.dependency 'gRPC-RxLibrary', '1.71.0'
    
    s.dependency 'TronWalletWeb3Swift', '1.0.0'
    s.dependency 'TronWalletABI', '1.0.0'
