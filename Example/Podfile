@@ -1,9 +1,8 @@
-
 source 'https://github.com/CocoaPods/Specs'
 
 use_frameworks!
 
-platform :ios, '11.0'
+platform :ios, '12.0'
 
 target 'tronlink-iOS-core_Example' do
   pod 'tronlink-iOS-core', :path => '../'
@@ -18,18 +17,7 @@ end
 post_install do |installer|
     installer.pods_project.targets.each do |target|
         target.build_configurations.each do |config|
-            config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '11.0'
-        end
-        if ['TrustKeystore'].include? target.name
-            target.build_configurations.each do |config|
-                config.build_settings['SWIFT_OPTIMIZATION_LEVEL'] = '-O'
-            end
-        end
-        
-        if ['TrustCore'].include? target.name
-          target.build_configurations.each do |config|
-            config.build_settings['SWIFT_OPTIMIZATION_LEVEL'] = '-O'
-          end
+            config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '12.0'
         end
     end
 

@@ -1120,7 +1120,7 @@ PODS:
   - BoringSSL-GRPC/Implementation (0.0.37):
     - BoringSSL-GRPC/Interface (= 0.0.37)
   - BoringSSL-GRPC/Interface (0.0.37)
-  - CryptoSwift (1.8.3)
+  - CryptoSwift (1.8.4)
   - FBSnapshotTestCase (2.1.4):
     - FBSnapshotTestCase/SwiftSupport (= 2.1.4)
   - FBSnapshotTestCase/Core (2.1.4)
@@ -1219,11 +1219,11 @@ PODS:
     - PromiseKit/CorePromise
   - PromiseKit/UIKit (6.18.1):
     - PromiseKit/CorePromise
-  - Protobuf (3.29.2)
+  - Protobuf (3.29.3)
   - scrypt.c (0.1.1)
   - secp256k1.c (0.1.2)
   - SipHash (1.2.2)
-  - SwiftProtobuf (1.28.2)
+  - SwiftProtobuf (1.29.0)
   - TrezorCrypto (0.0.9)
   - tronlink-iOS-core (1.0.0):
     - gRPC (= 1.68.1)
@@ -1285,7 +1285,7 @@ SPEC CHECKSUMS:
   abseil: a05cc83bf02079535e17169a73c5be5ba47f714b
   BigInt: 76b5dfdfa3e2e478d4ffdf161aeede5502e2742f
   BoringSSL-GRPC: dded2a44897e45f28f08ae87a55ee4bcd19bc508
-  CryptoSwift: 967f37cea5a3294d9cce358f78861652155be483
+  CryptoSwift: e64e11850ede528a02a0f3e768cec8e9d92ecb90
   FBSnapshotTestCase: 094f9f314decbabe373b87cc339bea235a63e07a
   gRPC: dca4234a026a22a357684c24ae001b516bf42a7c
   gRPC-Core: 62f92cec51210b4d5a222159e825bcf9bc815451
@@ -1293,17 +1293,17 @@ SPEC CHECKSUMS:
   gRPC-RxLibrary: b19f8b95ff1542eb9710f644a8b927eb899f55e2
   keccak.c: 859583afdaccb4e4fcc0f0096064d101580313f4
   PromiseKit: 49d70c53d5d20e346beaea4b276b5dd2ab446bb4
-  Protobuf: ba5d83b2201386fec27d484c099cac510ea5c169
+  Protobuf: e2de96d939c642ce8da186343ff8929b35223212
   scrypt.c: b42ae06183251329d2b2c620c226fb541a4a3592
   secp256k1.c: db47b726585d80f027423682eb369729e61b3b20
   SipHash: fad90a4683e420c52ef28063063dbbce248ea6d4
-  SwiftProtobuf: 4dbaffec76a39a8dc5da23b40af1a5dc01a4c02d
+  SwiftProtobuf: b7aa08087e2ab6d162862d143020091254095f69
   TrezorCrypto: bfeea47a052dca2c77d4a39e1e183865e52de14d
-  tronlink-iOS-core: 258c655101132151e3a228ee424c6e1c33a85bb9
+  tronlink-iOS-core: e0fd9986487de96f365a9115a18c7e3dcdaefca9
   TronWalletABI: 29b9dfcec8037f385d3fa760862bea823a37f47b
   TronWalletKeystore: 03294bf6c37d36c8e60318f0d56e5cb4edb07e87
   TronWalletWeb3Swift: 04d1cce8242ac949c1ebced2f675ede8ecb08927
 
-PODFILE CHECKSUM: 642ac3781ad21fc6e7b559bf2812fe0b10733f19
+PODFILE CHECKSUM: 6b212bac4f4a91253fc0df1bb0eba8fda46f954b
 
 COCOAPODS: 1.15.0
