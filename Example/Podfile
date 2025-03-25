@@ -2,7 +2,7 @@ source 'https://github.com/CocoaPods/Specs'
 
 use_frameworks!
 
-platform :ios, '12.0'
+platform :ios, '13.0'
 
 target 'tronlink-iOS-core_Example' do
   pod 'tronlink-iOS-core', :path => '../'
