@@ -1,7 +1,6 @@
-
 Pod::Spec.new do |s|
   s.name             = 'tronlink-iOS-core'
-  s.version          = '1.0.0'
+  s.version          = '1.0.1'
   s.summary          = 'tronlink-iOS-core is repo of TronLink'
   s.module_name      = 'TLCore'
 
@@ -9,7 +8,7 @@ Pod::Spec.new do |s|
   s.license          = { :type => 'Apache', :file => 'LICENSE' }
   s.author           = 'tronlinkdev'
   s.source           = { :git => 'https://github.com/TronLink/tronlink-iOS-core.git', :tag => s.version.to_s }
-  s.ios.deployment_target = '10.0'
+  s.platform = :ios, '13.0'
   s.swift_versions = '4.2'
 
   s.source_files = 'tronlink-iOS-core/Classes/**/*'
@@ -20,9 +19,8 @@ Pod::Spec.new do |s|
   s.dependency 'gRPC-ProtoRPC', '1.68.1'
   s.dependency 'gRPC-RxLibrary', '1.68.1'
    
-   s.dependency 'TronWalletWeb3Swift', '1.0.0'
-   s.dependency 'TronWalletABI', '1.0.0'
-   s.dependency 'TronWalletKeystore', '1.0.1'
+   s.dependency 'TronWalletWeb3Swift', '~> 1.0.1'
+   s.dependency 'TronWalletKeystore', '~> 1.0.3'
    
    s.requires_arc = false
    s.requires_arc = [       "tronlink-iOS-core/Classes/gRPC/google/api/HTTP.pbobjc.m",
