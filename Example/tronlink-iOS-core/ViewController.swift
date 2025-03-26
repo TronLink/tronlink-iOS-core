@@ -1,7 +1,6 @@
 //
 
 import UIKit
-import TLCore
 
 class ViewController: UIViewController {
 
