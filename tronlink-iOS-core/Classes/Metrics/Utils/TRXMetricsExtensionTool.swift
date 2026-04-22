@@ -13,7 +13,7 @@ extension Date {
 
 extension String {
     func tronCore_isPureNumber() -> Bool {
-        let pattern = "^[0-9]+(\\.[0-9]+)?$"
+        let pattern = "^[-]?[0-9]+(\\.[0-9]+)?$"
         let predicate = NSPredicate(format: "SELF MATCHES %@", pattern)
         return predicate.evaluate(with: self)
     }
