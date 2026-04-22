@@ -22,7 +22,7 @@ class Tests: XCTestCase {
         // 18.206.50.220:50051
         // 47.90.214.183:50051
         let fullNode = "18.206.50.220:50051"
-        GRPCCall.useInsecureConnections(forHost: fullNode)
+//        GRPCCall.useInsecureConnections(forHost: fullNode)
         let tWallet = TWallet.init(host: fullNode)
         return tWallet
     }()

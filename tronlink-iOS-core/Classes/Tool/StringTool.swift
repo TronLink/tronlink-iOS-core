@@ -4,6 +4,9 @@ import BigInt
 
 //Sign
 public extension String {
+    private static let hexOnlyRegex = try! NSRegularExpression(pattern: "^[A-Fa-f0-9]+$")
+    private static let hex0xRegex   = try! NSRegularExpression(pattern: "^0x[0-9A-Fa-f]*$")
+
     var length: Int {
         return utf16.count
     }
@@ -35,12 +38,12 @@ public extension String {
     }
     
     var hex: String {
-        let data = self.data(using: .utf8)!
+        let data = self.data(using: .utf8) ?? Data()
         return data.map { String(format: "%02x", $0) }.joined()
     }
-    
+
     var hexEncoded: String {
-        let data = self.data(using: .utf8)!
+        let data = self.data(using: .utf8) ?? Data()
         return data.hexEncoded
     }
     
@@ -48,8 +51,7 @@ public extension String {
         guard starts(with: "0x") else {
             return false
         }
-        let regex = try! NSRegularExpression(pattern: "^0x[0-9A-Fa-f]*$")
-        if regex.matches(in: self, range: NSRange(self.startIndex..., in: self)).isEmpty {
+        if String.hex0xRegex.matches(in: self, range: NSRange(self.startIndex..., in: self)).isEmpty {
             return false
         }
         return true
@@ -58,14 +60,12 @@ public extension String {
     var signStringHexEncoded: String {
         if self.starts(with: "0x") {
             let judgeString = self.substring(from: 2)
-            let regex = try! NSRegularExpression(pattern: "^[A-Fa-f0-9]+$")
-            if regex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
+            if String.hexOnlyRegex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
                 return judgeString.hexEncoded.drop0x
             }
             return judgeString
         } else {
-            let regex = try! NSRegularExpression(pattern: "^[A-Fa-f0-9]+$")
-            if regex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
+            if String.hexOnlyRegex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
                 return self.hexEncoded.drop0x
             }
             return self
@@ -75,14 +75,12 @@ public extension String {
     var isSignStringHexEncoded: Bool {
         if self.starts(with: "0x") {
             let judgeString = self.substring(from: 2)
-            let regex = try! NSRegularExpression(pattern: "^[A-Fa-f0-9]+$")
-            if regex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
+            if String.hexOnlyRegex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
                 return false
             }
             return true
         } else {
-            let regex = try! NSRegularExpression(pattern: "^[A-Fa-f0-9]+$")
-            if regex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
+            if String.hexOnlyRegex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
                 return false
             }
             return true

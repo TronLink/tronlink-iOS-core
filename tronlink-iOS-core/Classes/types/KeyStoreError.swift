@@ -54,7 +54,7 @@ public enum KeystoreError: LocalizedError {
         case .invalidMnemonicPhrase:
             return "Invalid mnemonic phrase"
         case .successToImport:
-            return "sucess to import"
+            return "Success to import"
         case .invalidKeystore:
             return "Invalid keystore"
         case .invalidObserver:

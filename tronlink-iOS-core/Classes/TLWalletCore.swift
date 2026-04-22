@@ -1,5 +1,4 @@
 
-import UIKit
 import TronKeystore
 import TronCore
 import web3swift
