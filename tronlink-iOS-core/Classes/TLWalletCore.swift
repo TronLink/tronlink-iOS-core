@@ -36,6 +36,9 @@ public class TLWalletCore: NSObject {
                     }
                     return .success(data)
                 } catch _ {
+                    #if DEBUG
+                    print("KeystoreError: failedToSignTransaction")
+                    #endif
                     return .failure(KeystoreError.failedToSignTransaction)
                 }
             }
@@ -72,6 +75,9 @@ public class TLWalletCore: NSObject {
                             }
                             transaction.signatureArray.add(data as Any)
                         } catch _ {
+                            #if DEBUG
+                            print("KeystoreError: failedToSignTransaction")
+                            #endif
                             return .failure(KeystoreError.failedToSignTransaction)
                         }
                     }
@@ -110,7 +116,11 @@ extension TLWalletCore {
                         privateKey = Data()
                     }
                     return privateKey.hexString
-                } catch _ {}
+                } catch _ {
+                    #if DEBUG
+                    print("privateKey: export failed")
+                    #endif
+                }
             }
         }
         return ""
@@ -127,7 +137,11 @@ extension TLWalletCore {
                         mnemonic = ""
                     }
                     return mnemonic
-                } catch _ {}
+                } catch _ {
+                    #if DEBUG
+                    print("mnemonic: export failed")
+                    #endif
+                }
             }
         }
         return ""
