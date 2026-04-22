@@ -71,11 +71,11 @@ public class TLWalletCore: NSObject {
                                 data[64] -= 27
                             }
                             transaction.signatureArray.add(data as Any)
-                            return .success(transaction)
                         } catch _ {
                             return .failure(KeystoreError.failedToSignTransaction)
                         }
                     }
+                    return .success(transaction)
                 } else {
                     return .failure(KeystoreError.failedToParseJSON)
                 }
@@ -182,7 +182,7 @@ extension TLWalletCore {
 
         var sha3Data =  TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
         if signType == .SIGN_MESSAGE_V2 {
-            sha3Data = TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString)
+            sha3Data = TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
         }
         do {
             var signature = try keyStore.signHash(sha3Data, account: account, password: password)
