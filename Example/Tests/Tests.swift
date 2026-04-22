@@ -3,8 +3,13 @@ import TLCore
 import TronKeystore
 
 class Tests: XCTestCase {
-    private let password: String = "Aa123456"
     
+    private static let uppercaseChars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    private static let lowercaseChars = Array("abcdefghijklmnopqrstuvwxyz")
+    private static let digitChars = Array("0123456789")
+    
+    private let password: String = Tests.randomPassword()
+
     private let datadir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0]
     private let keysSubfolder: String = "/keystore"
     
@@ -26,6 +31,21 @@ class Tests: XCTestCase {
         let tWallet = TWallet.init(host: fullNode)
         return tWallet
     }()
+
+    private static func randomPassword() -> String {
+        var generator = SystemRandomNumberGenerator()
+
+        var chars: [Character] = []
+        chars.reserveCapacity(8)
+        chars.append(uppercaseChars[Int.random(in: 0..<uppercaseChars.count, using: &generator)])
+        chars.append(lowercaseChars[Int.random(in: 0..<lowercaseChars.count, using: &generator)])
+        for _ in 0..<6 {
+            chars.append(digitChars[Int.random(in: 0..<digitChars.count, using: &generator)])
+        }
+
+        chars.shuffle(using: &generator)
+        return String(chars)
+    }
     
     override func setUp() {
         super.setUp()
