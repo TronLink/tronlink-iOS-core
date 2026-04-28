@@ -189,7 +189,6 @@ class Tests: XCTestCase {
                 XCTAssert(walletAddress.count > 0)
                 
                 let privatekey = TLWalletCore.walletExportPrivateKey(keyStore: self.keyStore, password: self.password, address: walletAddress)
-                print("privatekey: \(privatekey)")
                 XCTAssert(privatekey.count > 0)
 
                 break
@@ -211,7 +210,6 @@ class Tests: XCTestCase {
                 XCTAssert(walletAddress.count > 0)
                 
                 let mnemonic = TLWalletCore.walletExportMnemonic(keyStore: self.keyStore, password: self.password, address: walletAddress)
-                print("mnemonic: \(mnemonic)")
                 XCTAssert(mnemonic.count > 0)
 
                 break

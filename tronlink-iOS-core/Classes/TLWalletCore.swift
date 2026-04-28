@@ -227,8 +227,8 @@ extension TLWalletCore {
 
         //sh3
         let sha3 = SHA3(variant: .keccak256)
-        let Sh3Data =  Data(bytes: sha3.calculate(for: apendData.bytesT))
-        return Sh3Data
+        let sha3Data = Data(sha3.calculate(for: apendData.bytesT))
+        return sha3Data
     }
     
     /**
@@ -249,7 +249,7 @@ extension TLWalletCore {
                     byteList.append(value)
                 }
             }
-            persondata = Data.init(bytes:byteList)
+            persondata = Data(byteList)
         }else if case .SIGN_MESSAGE_V2_STRING = messageType { //String
             persondata = unSignedString.data(using: .utf8) ?? Data()
         }else if case .SIGN_MESSAGE_V2_HASHSTRING = messageType { //HexStringType
@@ -265,8 +265,8 @@ extension TLWalletCore {
 
         //sh3
         let sha3 = SHA3(variant: .keccak256)
-        let Sh3Data =  Data(bytes: sha3.calculate(for: apendData.bytesT))
-        return Sh3Data
+        let sha3Data = Data(sha3.calculate(for: apendData.bytesT))
+        return sha3Data
     }
     
 }
