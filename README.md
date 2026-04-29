@@ -2,53 +2,13 @@
 
 TronLink Wallet is a decentralized non-custodial wallet.TronLink-Core is the core module of TronLink Wallet, which provides core functions such as Create Wallet, Get Address and Sign Transaction.
 
-## Analytics Module (Privacy-First Design)
+## Privacy
 
-The `Metrics` module collects aggregated usage data only. **Wallet addresses, keys, mnemonics, transaction hashes, counter-parties, and device identifiers are never transmitted.** The backend receives only opaque UUIDs and same-day aggregated buckets; individual transactions are not reconstructible.
+TronLink iOS only transmits aggregated, anonymized usage statistics. **Wallet addresses, private keys, mnemonics, transaction hashes, counter-parties, IPs, and device identifiers are never transmitted.** The backend receives only opaque per-address UUIDs minted on-device, plus same-day aggregated counts and 9-bucket logarithmic amount histograms — individual transactions cannot be reconstructed.
 
-### Address → UUID Anonymization
+Reporting is gated by an in-app **Basic Mode** toggle in TronLink iOS Settings, plus automatic suppression for watch-only wallets, the Shasta test network, and non-release environments. When Basic Mode is **on**, no payload is built and no request is made.
 
-Each address is mapped to a random UUID stored **locally only** (FMDB, with migration from legacy `UserDefaults`). The backend never sees the address, and the same user's two wallets appear as two independent UUIDs (no server-side linkage).
-
-```swift
-// TRXAddressMapManager.swift — local-only address → uuid mapping
-public func id(for address: String) -> String {
-    let normalized = Self.normalizeAddress(address)
-    var existing: String?
-    queue.sync { existing = mapping[normalized] }
-    if let v = existing { return v }
-
-    var result = ""
-    var needsSave = false
-    queue.sync(flags: .barrier) {
-        if let v = self.mapping[normalized] { result = v; return }
-        var candidate = Self.generateUUIDFull()            // UUID().uuidString
-        while self.usedIds.contains(candidate) { candidate = Self.generateUUIDFull() }
-        self.mapping[normalized] = candidate
-        self.usedIds.insert(candidate)
-        result = candidate
-        needsSave = true
-    }
-    if needsSave {
-        DispatchQueue.global(qos: .utility).async {
-            TRXMetricsDBManager.shared.saveAddressMappings(self.allMappings()) // on-device only
-        }
-    }
-    return result
-}
-```
-
-### What Is Uploaded
-
-Records are merged locally per `(uid, actionType, tokenAddress, day)` before upload, and raw amounts are replaced with a 9-bucket logarithmic histogram (`A1..A9`).
-
-Never collected, never transmitted:
-
- • Wallet addresses , Public keys, Mnemonic phrases, Private keys.
-
- • Transaction hashes , Contract call parameters.
-
- • IP, device fingerprint,  any identifier derived from the host browser.
+For full details — what is collected, what is never collected, how anonymization / aggregation / encryption work, retention, and your controls — see [PRIVACY-POLICY.md](./PRIVACY-POLICY.md).
 
 
 ## Example
