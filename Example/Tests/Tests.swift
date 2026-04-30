@@ -162,13 +162,23 @@ class Tests: XCTestCase {
                 // sign v1
                 let result1 = TLWalletCore.signString(keyStore: self.keyStore, unSignedString: unSignedString, password: self.password, address: walletAddress)
                 print("sign v1: \(result1)")
-                XCTAssert(result1.count > 0)
+                switch result1 {
+                case .success(let signature):
+                    XCTAssert(signature.count > 0)
+                case .failure(let error):
+                    XCTFail("sign v1 failed: \(error.localizedDescription)")
+                }
                 
                 // sign v2
                 let messageSignV2: TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING
                 let result2 = TLWalletCore.signStringV2(keyStore: self.keyStore, unSignedString: unSignedString, password: self.password, address: walletAddress, messageSignV2)
                 print("sign v2: \(result2)")
-                XCTAssert(result2.count > 0)
+                switch result2 {
+                case .success(let signature):
+                    XCTAssert(signature.count > 0)
+                case .failure(let error):
+                    XCTFail("sign v2 failed: \(error.localizedDescription)")
+                }
 
                 break
             case .failure(let error):
@@ -188,8 +198,13 @@ class Tests: XCTestCase {
                 print("createWallet: \(walletAddress)")
                 XCTAssert(walletAddress.count > 0)
                 
-                let privatekey = TLWalletCore.walletExportPrivateKey(keyStore: self.keyStore, password: self.password, address: walletAddress)
-                XCTAssert(privatekey.count > 0)
+                let result = TLWalletCore.walletExportPrivateKey(keyStore: self.keyStore, password: self.password, address: walletAddress)
+                switch result {
+                case .success(let privateKey):
+                    XCTAssert(privateKey.count > 0)
+                case .failure(let error):
+                    XCTFail("export private key failed: \(error.localizedDescription)")
+                }
 
                 break
             case .failure(let error):
@@ -209,8 +224,13 @@ class Tests: XCTestCase {
                 print("createWallet: \(walletAddress)")
                 XCTAssert(walletAddress.count > 0)
                 
-                let mnemonic = TLWalletCore.walletExportMnemonic(keyStore: self.keyStore, password: self.password, address: walletAddress)
-                XCTAssert(mnemonic.count > 0)
+                let result = TLWalletCore.walletExportMnemonic(keyStore: self.keyStore, password: self.password, address: walletAddress)
+                switch result {
+                case .success(let mnemonic):
+                    XCTAssert(mnemonic.count > 0)
+                case .failure(let error):
+                    XCTFail("export mnemonic failed: \(error.localizedDescription)")
+                }
 
                 break
             case .failure(let error):
