@@ -275,6 +275,7 @@ public class TRXStatisticalUploadManager: NSObject {
                 } else {
                 }
             } failure: {
+                NSLog("upload failure")
             }
         }
     }

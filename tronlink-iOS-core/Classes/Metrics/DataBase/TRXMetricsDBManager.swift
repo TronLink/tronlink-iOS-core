@@ -47,7 +47,12 @@ public class TRXMetricsDBManager: NSObject {
         }
 
         // Fall back to in-memory DB if the file-based queue fails (e.g. disk permission error)
-        dataBaseQueue = FMDatabaseQueue(path: dbURL.path) ?? FMDatabaseQueue(path: ":memory:")
+        if let queue = FMDatabaseQueue(path: dbURL.path) {
+            dataBaseQueue = queue
+        } else {
+            NSLog("[TRXMetricsDBManager] Failed to open database at %@, falling back to in-memory database. Metrics will not persist.", dbURL.path)
+            dataBaseQueue = FMDatabaseQueue(path: ":memory:")
+        }
         // Set backup exclusion after FMDB creates the file, so the flag is applied on
         // first launch too (setResourceValue requires the file to already exist).
         try? (dbURL as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
