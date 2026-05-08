@@ -31,6 +31,9 @@ public class TLWalletCore: NSObject {
                 }
                 do {
                     var data = try keyStore.signHash(newHash, account: account, password: password)
+                    guard data.count >= 65 else {
+                        return .failure(KeystoreError.failedToSignTransaction)
+                    }
                     if data[64] >= 27 {
                         data[64] -= 27
                     }
@@ -67,6 +70,9 @@ public class TLWalletCore: NSObject {
                         }
                         do {
                             var data = try keyStore.signHash(newHash, account: account, password: password)
+                            guard data.count >= 65 else {
+                                return .failure(KeystoreError.failedToSignTransaction)
+                            }
                             if data[64] >= 27 {
                                 data[64] -= 27
                             }
@@ -189,6 +195,9 @@ extension TLWalletCore {
         }
         do {
             var signature = try keyStore.signHash(sha3Data, account: account, password: password)
+            guard signature.count >= 65 else {
+                return ""
+            }
             if signature[64] >= 27 {
                 signature[64] -= 27
             }
