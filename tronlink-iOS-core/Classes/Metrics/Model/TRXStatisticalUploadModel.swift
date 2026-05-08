@@ -2,7 +2,7 @@
 import Foundation
 
 
-public class TRXAssetSyncModel: NSObject, Codable {
+public class TRXAssetSyncModel: NSObject {
     public var uId: String?     // Encrypted account address
     public var idType: Int?     // Address type, watch wallet does not upload data
     public var trxBalance: String?
@@ -29,7 +29,7 @@ public class TRXAssetSyncModel: NSObject, Codable {
  A8=(1m, 10m]
  A9=(10m, +∞)
  */
-public class TRXTransactionSyncModel: NSObject, Codable {
+public class TRXTransactionSyncModel: NSObject {
     public var uId: String?
     public var idType: Int?
     public var actionType: Int?
