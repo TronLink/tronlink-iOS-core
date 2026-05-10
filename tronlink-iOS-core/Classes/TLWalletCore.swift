@@ -196,7 +196,7 @@ extension TLWalletCore {
         do {
             var signature = try keyStore.signHash(sha3Data, account: account, password: password)
             guard signature.count >= 65 else {
-                return ""
+                return .failure(.failedToSignMessage)
             }
             if signature[64] >= 27 {
                 signature[64] -= 27
