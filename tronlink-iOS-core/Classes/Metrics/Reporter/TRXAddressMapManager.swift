@@ -42,11 +42,14 @@ public final class TRXAddressMapManager {
                     changed = true
                 }
             }
-            if changed {
-                self.saveToDisk()
-            }
+            let snapshot = changed ? self.mapping : nil
             if let cb = completion {
                 DispatchQueue.main.async { cb() }
+            }
+            if let snap = snapshot {
+                DispatchQueue.global(qos: .utility).async {
+                    TRXMetricsDBManager.shared.saveAddressMappings(snap)
+                }
             }
         }
     }
@@ -86,9 +89,11 @@ public final class TRXAddressMapManager {
     public func removeMapping(for address: String) {
         let normalized = Self.normalizeAddress(address)
         queue.async(flags: .barrier) {
-            if let id = self.mapping.removeValue(forKey: normalized) {
-                self.usedIds.remove(id)
-                self.saveToDisk()
+            guard let id = self.mapping.removeValue(forKey: normalized) else { return }
+            self.usedIds.remove(id)
+            let snapshot = self.mapping
+            DispatchQueue.global(qos: .utility).async {
+                TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
             }
         }
     }
@@ -97,7 +102,10 @@ public final class TRXAddressMapManager {
         queue.async(flags: .barrier) {
             self.mapping.removeAll()
             self.usedIds.removeAll()
-            self.saveToDisk()
+            let snapshot = self.mapping
+            DispatchQueue.global(qos: .utility).async {
+                TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
+            }
         }
     }
 
@@ -106,11 +114,6 @@ public final class TRXAddressMapManager {
         var snap: [String: String] = [:]
         queue.sync { snap = self.mapping }
         return snap
-    }
-
-    // MARK: - save
-    private func saveToDisk() {
-        TRXMetricsDBManager.shared.saveAddressMappings(self.mapping)
     }
 
     private static func generateUUIDFull() -> String {

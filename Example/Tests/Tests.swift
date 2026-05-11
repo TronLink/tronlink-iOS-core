@@ -3,8 +3,13 @@ import TLCore
 import TronKeystore
 
 class Tests: XCTestCase {
-    private let password: String = "Aa123456"
     
+    private static let uppercaseChars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    private static let lowercaseChars = Array("abcdefghijklmnopqrstuvwxyz")
+    private static let digitChars = Array("0123456789")
+    
+    private let password: String = Tests.randomPassword()
+
     private let datadir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0]
     private let keysSubfolder: String = "/keystore"
     
@@ -26,6 +31,21 @@ class Tests: XCTestCase {
         let tWallet = TWallet.init(host: fullNode)
         return tWallet
     }()
+
+    private static func randomPassword() -> String {
+        var generator = SystemRandomNumberGenerator()
+
+        var chars: [Character] = []
+        chars.reserveCapacity(8)
+        chars.append(uppercaseChars[Int.random(in: 0..<uppercaseChars.count, using: &generator)])
+        chars.append(lowercaseChars[Int.random(in: 0..<lowercaseChars.count, using: &generator)])
+        for _ in 0..<6 {
+            chars.append(digitChars[Int.random(in: 0..<digitChars.count, using: &generator)])
+        }
+
+        chars.shuffle(using: &generator)
+        return String(chars)
+    }
     
     override func setUp() {
         super.setUp()
@@ -51,6 +71,7 @@ class Tests: XCTestCase {
     
     // create new wallet
     func testCreateWallet() {
+        let exp = expectation(description: "testCreateWallet")
         TLWalletCore.createWalletAccount(keyStore: self.keyStore, password: self.password) {  result in
             switch result {
             case .success(let account):
@@ -63,7 +84,9 @@ class Tests: XCTestCase {
                 XCTAssert(false)
                 break
             }
+            exp.fulfill()
         }
+        wait(for: [exp], timeout: 60)
     }
     
     // Sign Transaction
@@ -131,24 +154,35 @@ class Tests: XCTestCase {
     
     // Sign String
     func testSignMessage() {
+        let exp = expectation(description: "testSignMessage")
         TLWalletCore.createWalletAccount(keyStore: self.keyStore, password: self.password) {  result in
             switch result {
             case .success(let account):
                 let walletAddress = String(base58CheckEncoding: account.address.data)
                 print("createWallet: \(walletAddress)")
                 XCTAssert(walletAddress.count > 0)
-                
+
                 let unSignedString = "abcd"
                 // sign v1
                 let result1 = TLWalletCore.signString(keyStore: self.keyStore, unSignedString: unSignedString, password: self.password, address: walletAddress)
                 print("sign v1: \(result1)")
-                XCTAssert(result1.count > 0)
+                switch result1 {
+                case .success(let signature):
+                    XCTAssert(signature.count > 0)
+                case .failure(let error):
+                    XCTFail("sign v1 failed: \(error.localizedDescription)")
+                }
                 
                 // sign v2
                 let messageSignV2: TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING
                 let result2 = TLWalletCore.signStringV2(keyStore: self.keyStore, unSignedString: unSignedString, password: self.password, address: walletAddress, messageSignV2)
                 print("sign v2: \(result2)")
-                XCTAssert(result2.count > 0)
+                switch result2 {
+                case .success(let signature):
+                    XCTAssert(signature.count > 0)
+                case .failure(let error):
+                    XCTFail("sign v2 failed: \(error.localizedDescription)")
+                }
 
                 break
             case .failure(let error):
@@ -156,11 +190,14 @@ class Tests: XCTestCase {
                 XCTAssert(false)
                 break
             }
+            exp.fulfill()
         }
+        wait(for: [exp], timeout: 60)
     }
     
     // Export PrivateKey
     func testExportPrivateKey() {
+        let exp = expectation(description: "testExportPrivateKey")
         TLWalletCore.createWalletAccount(keyStore: self.keyStore, password: self.password) {  result in
             switch result {
             case .success(let account):
@@ -168,9 +205,13 @@ class Tests: XCTestCase {
                 print("createWallet: \(walletAddress)")
                 XCTAssert(walletAddress.count > 0)
                 
-                let privatekey = TLWalletCore.walletExportPrivateKey(keyStore: self.keyStore, password: self.password, address: walletAddress)
-                print("privatekey: \(privatekey)")
-                XCTAssert(privatekey.count > 0)
+                let result = TLWalletCore.walletExportPrivateKey(keyStore: self.keyStore, password: self.password, address: walletAddress)
+                switch result {
+                case .success(let privateKey):
+                    XCTAssert(privateKey.count > 0)
+                case .failure(let error):
+                    XCTFail("export private key failed: \(error.localizedDescription)")
+                }
 
                 break
             case .failure(let error):
@@ -178,11 +219,14 @@ class Tests: XCTestCase {
                 XCTAssert(false)
                 break
             }
+            exp.fulfill()
         }
+        wait(for: [exp], timeout: 60)
     }
 
     // Export Mnemonic
     func testExportMnemonic() {
+        let exp = expectation(description: "testExportMnemonic")
         TLWalletCore.createWalletAccount(keyStore: self.keyStore, password: self.password) {  result in
             switch result {
             case .success(let account):
@@ -190,9 +234,13 @@ class Tests: XCTestCase {
                 print("createWallet: \(walletAddress)")
                 XCTAssert(walletAddress.count > 0)
                 
-                let mnemonic = TLWalletCore.walletExportMnemonic(keyStore: self.keyStore, password: self.password, address: walletAddress)
-                print("mnemonic: \(mnemonic)")
-                XCTAssert(mnemonic.count > 0)
+                let result = TLWalletCore.walletExportMnemonic(keyStore: self.keyStore, password: self.password, address: walletAddress)
+                switch result {
+                case .success(let mnemonic):
+                    XCTAssert(mnemonic.count > 0)
+                case .failure(let error):
+                    XCTFail("export mnemonic failed: \(error.localizedDescription)")
+                }
 
                 break
             case .failure(let error):
@@ -200,7 +248,9 @@ class Tests: XCTestCase {
                 XCTAssert(false)
                 break
             }
+            exp.fulfill()
         }
+        wait(for: [exp], timeout: 60)
     }
 
 }
