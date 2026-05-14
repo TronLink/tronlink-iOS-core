@@ -8,6 +8,7 @@ public final class TRXAddressMapManager {
     private var usedIds: Set<String> = []        // Quick duplicate check
     private let queue = DispatchQueue(label: "com.tron.wallet.AddressMapManager", attributes: .concurrent)
     private let persistenceQueue = DispatchQueue(label: "com.tron.wallet.AddressMapManager.persistence")
+    private var pendingMappingsSnapshot: [String: String]?
 
     private init() {
         // Migrate legacy UserDefaults data to FMDB on first launch after upgrade.
@@ -49,7 +50,7 @@ public final class TRXAddressMapManager {
             }
             if let snap = snapshot {
                 self.persistenceQueue.async {
-                    TRXMetricsDBManager.shared.saveAddressMappings(snap)
+                    self.persistMapping(snap)
                 }
             }
         }
@@ -63,7 +64,6 @@ public final class TRXAddressMapManager {
         if let v = existing { return v }
 
         var result = Self.generateUUIDFull()
-        var needsSave = false
         // Only mutate in-memory state inside the sync barrier (fast, no I/O).
         // The queue lock is released as soon as the barrier block returns.
         queue.sync(flags: .barrier) {
@@ -71,14 +71,9 @@ public final class TRXAddressMapManager {
             while self.usedIds.contains(result) { result = Self.generateUUIDFull() }
             self.mapping[normalized] = result
             self.usedIds.insert(result)
-            needsSave = true
-        }
-        // Persist asynchronously on a serial queue so DB writes keep the same
-        // order as the in-memory mutations.
-        if needsSave {
-            let uuid = result
-            persistenceQueue.async {
-                TRXMetricsDBManager.shared.upsertAddressMapping(address: normalized, uuid: uuid)
+            let snapshot = self.mapping
+            self.persistenceQueue.async {
+                self.persistMapping(snapshot)
             }
         }
         return result
@@ -92,7 +87,7 @@ public final class TRXAddressMapManager {
             self.usedIds.remove(id)
             let snapshot = self.mapping
             self.persistenceQueue.async {
-                TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
+                self.persistMapping(snapshot)
             }
         }
     }
@@ -103,7 +98,7 @@ public final class TRXAddressMapManager {
             self.usedIds.removeAll()
             let snapshot = self.mapping
             self.persistenceQueue.async {
-                TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
+                self.persistMapping(snapshot)
             }
         }
     }
@@ -126,5 +121,18 @@ public final class TRXAddressMapManager {
             return lowercased.drop0x
         }
         return trimmed
+    }
+
+    private func persistMapping(_ snapshot: [String: String]) {
+        if let pending = pendingMappingsSnapshot {
+            NSLog("[AddressMap] retrying save, %d entries pending", pending.count)
+        }
+
+        if TRXMetricsDBManager.shared.saveAddressMappings(snapshot) {
+            pendingMappingsSnapshot = nil
+        } else {
+            pendingMappingsSnapshot = snapshot
+            NSLog("[AddressMap] save failed, %d entries pending", pendingMappingsSnapshot?.count ?? 0)
+        }
     }
 }
