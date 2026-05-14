@@ -6,55 +6,56 @@ public class TRXMetricsDBManager: NSObject {
     
     public static let shared = TRXMetricsDBManager()
     
-    private var dataBaseQueue: FMDatabaseQueue?
+    private let dataBaseQueue: FMDatabaseQueue?
     
     private static let kMigrationDoneKeyPrefix = "TRXMetricsMigrationDone_"
     private static let kDBPathMigrationKey = "TRXMetricsDBPathMigrationDone"
 
     private override init() {
+        let queue: FMDatabaseQueue?
+        let dbURLForBackupExclusion: URL?
+
+        if let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+            let dbURL = appSupportDir.appendingPathComponent("TronLinkMetrics.sqlite")
+
+            // Migrate legacy DB from Documents to ApplicationSupport.
+            // Uses a flag so failed attempts retry on next launch instead of being silently skipped.
+            if !UserDefaults.standard.bool(forKey: TRXMetricsDBManager.kDBPathMigrationKey) {
+                if let legacyURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+                    .appendingPathComponent("TronLinkMetrics.sqlite"),
+                   FileManager.default.fileExists(atPath: legacyURL.path) {
+                    // Remove any empty/partial DB left by a previous failed attempt, then retry
+                    try? FileManager.default.removeItem(at: dbURL)
+                    do {
+                        try FileManager.default.moveItem(at: legacyURL, to: dbURL)
+                        UserDefaults.standard.set(true, forKey: TRXMetricsDBManager.kDBPathMigrationKey)
+                    } catch {
+                        // Move failed; old file preserved in Documents; will retry next launch
+                    }
+                } else {
+                    // New user or no legacy DB; mark done so this block is never entered again
+                    UserDefaults.standard.set(true, forKey: TRXMetricsDBManager.kDBPathMigrationKey)
+                }
+            }
+
+            // Fall back to in-memory DB if the file-based queue fails (e.g. disk permission error)
+            queue = FMDatabaseQueue(path: dbURL.path) ?? FMDatabaseQueue(path: ":memory:")
+            dbURLForBackupExclusion = dbURL
+        } else {
+            // Should never happen on a real iOS device; fall back to in-memory DB so the app keeps running
+            queue = FMDatabaseQueue(path: ":memory:")
+            dbURLForBackupExclusion = nil
+        }
+
+        dataBaseQueue = queue
         super.init()
 
-        guard let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            // Should never happen on a real iOS device; fall back to in-memory DB so the app keeps running
-            dataBaseQueue = FMDatabaseQueue(path: ":memory:")
-            createAddressMapTable()
-            createAssetSyncTable()
-            createTransactionSyncTable()
-            return
-        }
-
-        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
-        let dbURL = appSupportDir.appendingPathComponent("TronLinkMetrics.sqlite")
-
-        // Migrate legacy DB from Documents to ApplicationSupport.
-        // Uses a flag so failed attempts retry on next launch instead of being silently skipped.
-        if !UserDefaults.standard.bool(forKey: TRXMetricsDBManager.kDBPathMigrationKey) {
-            if let legacyURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-                .appendingPathComponent("TronLinkMetrics.sqlite"),
-               FileManager.default.fileExists(atPath: legacyURL.path) {
-                // Remove any empty/partial DB left by a previous failed attempt, then retry
-                try? FileManager.default.removeItem(at: dbURL)
-                do {
-                    try FileManager.default.moveItem(at: legacyURL, to: dbURL)
-                    UserDefaults.standard.set(true, forKey: TRXMetricsDBManager.kDBPathMigrationKey)
-                } catch {
-                    // Move failed; old file preserved in Documents; will retry next launch
-                }
-            } else {
-                // New user or no legacy DB; mark done so this block is never entered again
-                UserDefaults.standard.set(true, forKey: TRXMetricsDBManager.kDBPathMigrationKey)
-            }
-        }
-
-        // Fall back to in-memory DB if the file-based queue fails (e.g. disk permission error)
-        if let queue = FMDatabaseQueue(path: dbURL.path) {
-            dataBaseQueue = queue
-        } else {
-            dataBaseQueue = FMDatabaseQueue(path: ":memory:")
-        }
         // Set backup exclusion after FMDB creates the file, so the flag is applied on
         // first launch too (setResourceValue requires the file to already exist).
-        try? (dbURL as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
+        if let dbURL = dbURLForBackupExclusion {
+            try? (dbURL as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
+        }
 
         createAddressMapTable()
         createAssetSyncTable()
