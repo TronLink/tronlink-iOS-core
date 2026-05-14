@@ -7,6 +7,7 @@ public final class TRXAddressMapManager {
     private var mapping: [String: String] = [:]   // address -> id (UUID string)
     private var usedIds: Set<String> = []        // Quick duplicate check
     private let queue = DispatchQueue(label: "com.tron.wallet.AddressMapManager", attributes: .concurrent)
+    private let persistenceQueue = DispatchQueue(label: "com.tron.wallet.AddressMapManager.persistence")
 
     private init() {
         // Migrate legacy UserDefaults data to FMDB on first launch after upgrade.
@@ -47,7 +48,7 @@ public final class TRXAddressMapManager {
                 DispatchQueue.main.async { cb() }
             }
             if let snap = snapshot {
-                DispatchQueue.global(qos: .utility).async {
+                self.persistenceQueue.async {
                     TRXMetricsDBManager.shared.saveAddressMappings(snap)
                 }
             }
@@ -74,12 +75,12 @@ public final class TRXAddressMapManager {
             result = candidate
             needsSave = true
         }
-        // Persist asynchronously on a background queue so the caller's thread
-        // (potentially main) is never blocked by FMDB I/O, and the mapping queue
-        // remains available to other readers/writers during the disk write.
+        // Persist asynchronously on a serial queue so DB writes keep the same
+        // order as the in-memory mutations.
         if needsSave {
-            DispatchQueue.global(qos: .utility).async {
-                TRXMetricsDBManager.shared.saveAddressMappings(self.allMappings())
+            let uuid = result
+            persistenceQueue.async {
+                TRXMetricsDBManager.shared.upsertAddressMapping(address: normalized, uuid: uuid)
             }
         }
         return result
@@ -92,7 +93,7 @@ public final class TRXAddressMapManager {
             guard let id = self.mapping.removeValue(forKey: normalized) else { return }
             self.usedIds.remove(id)
             let snapshot = self.mapping
-            DispatchQueue.global(qos: .utility).async {
+            self.persistenceQueue.async {
                 TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
             }
         }
@@ -103,7 +104,7 @@ public final class TRXAddressMapManager {
             self.mapping.removeAll()
             self.usedIds.removeAll()
             let snapshot = self.mapping
-            DispatchQueue.global(qos: .utility).async {
+            self.persistenceQueue.async {
                 TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
             }
         }
@@ -123,7 +124,7 @@ public final class TRXAddressMapManager {
     private static func normalizeAddress(_ addr: String) -> String {
         let trimmed = addr.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = trimmed.lowercased()
-        if lowercased.hasPrefix("0x") {
+        if lowercased.hasPrefix("0x") || lowercased.hasPrefix("41") {
             return lowercased.drop0x
         }
         return trimmed

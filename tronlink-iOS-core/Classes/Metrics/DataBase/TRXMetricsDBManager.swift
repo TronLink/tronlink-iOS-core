@@ -621,6 +621,18 @@ public class TRXMetricsDBManager: NSObject {
         return result
     }
 
+    @discardableResult
+    public func upsertAddressMapping(address: String, uuid: String) -> Bool {
+        var result = false
+        dataBaseQueue?.inDatabase { db in
+            result = db.executeUpdate(
+                "INSERT OR REPLACE INTO AddressMapTable (address, uuid) VALUES (?, ?)",
+                withArgumentsIn: [address, uuid]
+            )
+        }
+        return result
+    }
+
     public func loadAllAddressMappings() -> [String: String] {
         var result: [String: String] = [:]
         dataBaseQueue?.inDatabase { db in
