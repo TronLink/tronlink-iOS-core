@@ -121,6 +121,11 @@ public final class TRXAddressMapManager {
     }
 
     private static func normalizeAddress(_ addr: String) -> String {
-        return addr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = addr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+        if lowercased.hasPrefix("0x") {
+            return lowercased.drop0x
+        }
+        return trimmed
     }
 }
