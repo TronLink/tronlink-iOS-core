@@ -137,6 +137,19 @@ public class TRXMetricsDBManager: NSObject {
     }
     
     // MARK: - ASSET SYNC TABLE METHODS
+    private func copyAssetSyncModel(_ model: TRXAssetSyncModel, updated: Bool) -> TRXAssetSyncModel {
+        let copiedModel = TRXAssetSyncModel()
+        copiedModel.uId = model.uId
+        copiedModel.idType = model.idType
+        copiedModel.trxBalance = model.trxBalance
+        copiedModel.usdtBalance = model.usdtBalance
+        copiedModel.usdBalance = model.usdBalance
+        copiedModel.date = model.date
+        copiedModel.chain = model.chain
+        copiedModel.updated = updated
+        return copiedModel
+    }
+
     private func insertAssetSyncTable_internal(db: FMDatabase, model: TRXAssetSyncModel) -> Bool {
         let uId = model.uId ?? ""
         let idTypeArg: Any = model.idType != nil ? model.idType! : NSNull()
@@ -241,8 +254,7 @@ public class TRXMetricsDBManager: NSObject {
             var success = false
             do {
                 if callBackUpdate {
-                    let m = model
-                    m.updated = false
+                    let m = self.copyAssetSyncModel(model, updated: false)
                     let checkSql = "SELECT COUNT(1) AS cnt FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ?"
                     let rs = try db.executeQuery(checkSql, values: [chain, uId, date])
                     var exists = false
@@ -265,16 +277,14 @@ public class TRXMetricsDBManager: NSObject {
                         let newTrxClean = (model.trxBalance ?? "").tronCore_removeFloatSuffixZero()
                         let newUsdtClean = (model.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
 
-                        let m = model
                         if (oldTrxClean.count > 0 && newTrxClean.count > 0 && oldTrxClean != newTrxClean) ||
                             (oldUsdtClean.count > 0 && newUsdtClean.count > 0 && oldUsdtClean != newUsdtClean) {
-                            m.updated = true
+                            let m = self.copyAssetSyncModel(model, updated: true)
                             success = self.updateAssetSync_internal(db: db, chain: chain, uId: uId, idType: idType, date: date, trxBalance: m.trxBalance, usdtBalance: m.usdtBalance, usdBalance: m.usdBalance, updated: m.updated)
                         }
                     } else {
                         rs.close()
-                        let m = model
-                        m.updated = true
+                        let m = self.copyAssetSyncModel(model, updated: true)
                         success = self.insertAssetSyncTable_internal(db: db, model: m)
                     }
                 }
