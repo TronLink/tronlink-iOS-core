@@ -62,17 +62,15 @@ public final class TRXAddressMapManager {
         queue.sync { existing = mapping[normalized] }
         if let v = existing { return v }
 
-        var result = ""
+        var result = Self.generateUUIDFull()
         var needsSave = false
         // Only mutate in-memory state inside the sync barrier (fast, no I/O).
         // The queue lock is released as soon as the barrier block returns.
         queue.sync(flags: .barrier) {
             if let v = self.mapping[normalized] { result = v; return }
-            var candidate = Self.generateUUIDFull()
-            while self.usedIds.contains(candidate) { candidate = Self.generateUUIDFull() }
-            self.mapping[normalized] = candidate
-            self.usedIds.insert(candidate)
-            result = candidate
+            while self.usedIds.contains(result) { result = Self.generateUUIDFull() }
+            self.mapping[normalized] = result
+            self.usedIds.insert(result)
             needsSave = true
         }
         // Persist asynchronously on a serial queue so DB writes keep the same
