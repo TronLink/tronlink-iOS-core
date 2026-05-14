@@ -189,11 +189,14 @@ extension TLWalletCore {
             return .failure(.accountNotFound)
         }
 
-        var sha3Data =  TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
-        if signType == .SIGN_MESSAGE_V2 {
-            sha3Data = TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
-        }
         do {
+            var sha3Data = try TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
+            if signType == .SIGN_MESSAGE_V2 {
+                sha3Data = try TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
+            }
+            guard sha3Data.count == 32 else {
+                return .failure(.invalidSignInput)
+            }
             var signature = try keyStore.signHash(sha3Data, account: account, password: password)
             guard signature.count >= 65 else {
                 return .failure(.failedToSignMessage)
@@ -202,6 +205,8 @@ extension TLWalletCore {
                 signature[64] -= 27
             }
             return .success(signature.toHexString().add0x)
+        } catch KeystoreError.invalidSignInput {
+            return .failure(.invalidSignInput)
         } catch {
             return .failure(.failedToSignMessage)
         }
@@ -213,14 +218,14 @@ extension TLWalletCore {
      * @param unSignedString The string to be signed
      * @return The converted SHA3 data
      */
-    public static func convertSignStringToSha3Data(unSignedString: String) -> Data {
+    public static func convertSignStringToSha3Data(unSignedString: String) throws -> Data {
         let signString = unSignedString.signStringHexEncoded
         let persondata = Data.init(hex: signString)
-        guard !persondata.isEmpty else { return Data() }
+        guard !persondata.isEmpty else { throw KeystoreError.invalidSignInput }
 
         var apendData = Data()
         let prefix = "\u{19}TRON Signed Message:\n32"
-        guard let prefixData = prefix.data(using: .ascii) else { return Data() }
+        guard let prefixData = prefix.data(using: .ascii) else { throw KeystoreError.invalidSignInput }
         apendData.append(prefixData)
         apendData.append(persondata)
 
@@ -237,7 +242,7 @@ extension TLWalletCore {
      * @param messageType Message type, defaults to SIGN_MESSAGE_V2_STRING
      * @return The converted SHA3 data
      */
-    public static func convertSignStringV2ToSha3Data(unSignedString: String, messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> Data {
+    public static func convertSignStringV2ToSha3Data(unSignedString: String, messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) throws -> Data {
         
         var persondata = Data.init(hex: unSignedString)
         if case .SIGN_MESSAGE_V2_ARRAY = messageType { //bytes
@@ -245,20 +250,23 @@ extension TLWalletCore {
             var byteList:[UInt8] = [UInt8]()
             for item in list {
                 guard let value = UInt8(String(item)) else {
-                    return Data()
+                    throw KeystoreError.invalidSignInput
                 }
                 byteList.append(value)
             }
             persondata = Data(byteList)
         }else if case .SIGN_MESSAGE_V2_STRING = messageType { //String
-            persondata = unSignedString.data(using: .utf8) ?? Data()
+            guard let data = unSignedString.data(using: .utf8) else {
+                throw KeystoreError.invalidSignInput
+            }
+            persondata = data
         }else if case .SIGN_MESSAGE_V2_HASHSTRING = messageType { //HexStringType
             persondata = Data.init(hex: unSignedString)
-            guard !persondata.isEmpty else { return Data() }
+            guard !persondata.isEmpty else { throw KeystoreError.invalidSignInput }
         }
 
         let prefix = "\u{19}TRON Signed Message:\n\(persondata.count)"
-        guard let prefixData = prefix.data(using: .ascii) else { return Data() }
+        guard let prefixData = prefix.data(using: .ascii) else { throw KeystoreError.invalidSignInput }
 
         var apendData = Data()
         apendData.append(prefixData)
