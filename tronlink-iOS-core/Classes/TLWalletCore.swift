@@ -245,27 +245,7 @@ extension TLWalletCore {
      * @return The converted SHA3 data
      */
     public static func convertSignStringV2ToSha3Data(unSignedString: String, messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) throws -> Data {
-        
-        var persondata = Data.init(hex: unSignedString)
-        if case .SIGN_MESSAGE_V2_ARRAY = messageType { //bytes
-            let list = unSignedString.split(separator: ",")
-            var byteList:[UInt8] = [UInt8]()
-            for item in list {
-                guard let value = UInt8(String(item)) else {
-                    throw KeystoreError.invalidSignInput
-                }
-                byteList.append(value)
-            }
-            persondata = Data(byteList)
-        }else if case .SIGN_MESSAGE_V2_STRING = messageType { //String
-            guard let data = unSignedString.data(using: .utf8) else {
-                throw KeystoreError.invalidSignInput
-            }
-            persondata = data
-        }else if case .SIGN_MESSAGE_V2_HASHSTRING = messageType { //HexStringType
-            persondata = Data.init(hex: unSignedString)
-        }
-        guard !persondata.isEmpty else { throw KeystoreError.invalidSignInput }
+        let persondata = try parseBytes(unSignedString, type: messageType)
 
         let prefix = "\u{19}TRON Signed Message:\n\(persondata.count)"
         guard let prefixData = prefix.data(using: .ascii) else { throw KeystoreError.invalidSignInput }
@@ -278,6 +258,31 @@ extension TLWalletCore {
         let sha3 = SHA3(variant: .keccak256)
         let sha3Data = Data(sha3.calculate(for: apendData.bytesT))
         return sha3Data
+    }
+
+    private static func parseBytes(_ string: String, type: TLMessageSignV2Type) throws -> Data {
+        switch type {
+        case .SIGN_MESSAGE_V2_ARRAY:
+            let parts = string.split(separator: ",")
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(parts.count)
+            for part in parts {
+                guard let value = UInt8(String(part)) else {
+                    throw KeystoreError.invalidSignInput
+                }
+                bytes.append(value)
+            }
+            return Data(bytes)
+        case .SIGN_MESSAGE_V2_HASHSTRING:
+            let data = Data(hex: string)
+            if data.isEmpty { throw KeystoreError.invalidSignInput }
+            return data
+        case .SIGN_MESSAGE_V2_STRING:
+            guard let data = string.data(using: .utf8) else {
+                throw KeystoreError.invalidSignInput
+            }
+            return data
+        }
     }
     
 }
