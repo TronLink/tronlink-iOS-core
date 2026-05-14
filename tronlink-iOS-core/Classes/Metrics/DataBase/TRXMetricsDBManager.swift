@@ -50,7 +50,6 @@ public class TRXMetricsDBManager: NSObject {
         if let queue = FMDatabaseQueue(path: dbURL.path) {
             dataBaseQueue = queue
         } else {
-            NSLog("[TRXMetricsDBManager] Failed to open database at %@, falling back to in-memory database. Metrics will not persist.", dbURL.path)
             dataBaseQueue = FMDatabaseQueue(path: ":memory:")
         }
         // Set backup exclusion after FMDB creates the file, so the flag is applied on

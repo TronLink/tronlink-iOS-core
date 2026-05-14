@@ -264,8 +264,8 @@ extension TLWalletCore {
             persondata = data
         }else if case .SIGN_MESSAGE_V2_HASHSTRING = messageType { //HexStringType
             persondata = Data.init(hex: unSignedString)
-            guard !persondata.isEmpty else { throw KeystoreError.invalidSignInput }
         }
+        guard !persondata.isEmpty else { throw KeystoreError.invalidSignInput }
 
         let prefix = "\u{19}TRON Signed Message:\n\(persondata.count)"
         guard let prefixData = prefix.data(using: .ascii) else { throw KeystoreError.invalidSignInput }
