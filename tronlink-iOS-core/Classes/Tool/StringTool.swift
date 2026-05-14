@@ -22,18 +22,18 @@ public extension String {
         return "0x" + self
     }
     
-    func index(from: Int) -> Index {
-        return self.index(startIndex, offsetBy: from)
+    func index(from: Int) -> Index? {
+        return self.index(startIndex, offsetBy: from, limitedBy: endIndex)
     }
     
     func substring(from: Int) -> String {
-        let fromIndex = index(from: from)
+        guard let fromIndex = index(from: from) else { return "" }
         return String(self[fromIndex...])
     }
     
     func substring(with r: Range<Int>) -> String {
-        let startIndex = index(from: r.lowerBound)
-        let endIndex = index(from: r.upperBound)
+        guard let startIndex = index(from: r.lowerBound),
+              let endIndex = index(from: r.upperBound) else { return "" }
         return String(self[startIndex..<endIndex])
     }
     
