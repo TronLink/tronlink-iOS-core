@@ -14,13 +14,13 @@ Pod::Spec.new do |s|
   s.source_files = 'tronlink-iOS-core/Classes/**/*'
 
   s.dependency 'gRPC', '1.68.1'
-  s.dependency 'Protobuf', '~> 3.0'
+  s.dependency 'Protobuf', '3.29.6'
   s.dependency 'gRPC-Core', '1.68.1'
   s.dependency 'gRPC-ProtoRPC', '1.68.1'
   s.dependency 'gRPC-RxLibrary', '1.68.1'
    
-   s.dependency 'TronWalletWeb3Swift', '1.1.0'
-   s.dependency 'TronWalletKeystore', '~> 1.0.3'
+   s.dependency 'TronWalletWeb3Swift', '1.1.1'
+   s.dependency 'TronWalletKeystore', '1.0.4'
    s.dependency 'FMDB', '2.7.5'
    
    s.requires_arc = false
