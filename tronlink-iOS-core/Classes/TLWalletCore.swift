@@ -60,6 +60,7 @@ public class TLWalletCore: NSObject {
         for account in keyStore.accounts {
             if address == account.address.data.addressString {
                 if let hash: Data = transaction.rawData.data()?.sha256T(), let list = transaction.rawData.contractArray, list.count > 0 {
+                    var collectedSignatures: [Data] = []
                     for _ in list {
                         var newHash: Data = hash
                         if !dappChainId.isEmpty {
@@ -76,11 +77,12 @@ public class TLWalletCore: NSObject {
                             if data[64] >= 27 {
                                 data[64] -= 27
                             }
-                            transaction.signatureArray.add(data as Any)
+                            collectedSignatures.append(data)
                         } catch _ {
                             return .failure(KeystoreError.failedToSignTransaction)
                         }
                     }
+                    collectedSignatures.forEach { transaction.signatureArray.add($0 as Any) }
                     return .success(transaction)
                 } else {
                     return .failure(KeystoreError.failedToParseJSON)
