@@ -4,6 +4,27 @@ let Metrics_Statistical_Upload_Visible_Key = "TRXStatisticalUploadVisibleKey"
 
 public class TRXStatisticalUploadManager: NSObject {
     @objc public static let shared = TRXStatisticalUploadManager()
+    private static let amountBuckets: [(threshold: NSDecimalNumber, idx: Int)] = [
+        (NSDecimalNumber(string: "1"), 0),
+        (NSDecimalNumber(string: "10"), 1),
+        (NSDecimalNumber(string: "100"), 2),
+        (NSDecimalNumber(string: "1000"), 3),
+        (NSDecimalNumber(string: "10000"), 4),
+        (NSDecimalNumber(string: "100000"), 5),
+        (NSDecimalNumber(string: "1000000"), 6),
+        (NSDecimalNumber(string: "10000000"), 7)
+    ]
+    private static let bucketKeyPaths: [WritableKeyPath<TRXTransactionSyncModel, Int?>] = [
+        \TRXTransactionSyncModel.A1,
+        \TRXTransactionSyncModel.A2,
+        \TRXTransactionSyncModel.A3,
+        \TRXTransactionSyncModel.A4,
+        \TRXTransactionSyncModel.A5,
+        \TRXTransactionSyncModel.A6,
+        \TRXTransactionSyncModel.A7,
+        \TRXTransactionSyncModel.A8,
+        \TRXTransactionSyncModel.A9
+    ]
     
     /// Dedicated serial background queue for all DB and upload operations.
     private let metricsQueue = DispatchQueue(label: "com.tronlink.metrics", qos: .utility)
@@ -156,7 +177,7 @@ public class TRXStatisticalUploadManager: NSObject {
     
     func makeTransactionSyncModel(actionType:Int, count:Int, tokenAddress:String, tokenAmount:String, totalTokenAmount:String,
                                   energy:String, bandwidth:String, burn:String, updated:Bool, localModel:TRXTransactionSyncModel) -> TRXTransactionSyncModel {
-        let model = TRXTransactionSyncModel()
+        var model = TRXTransactionSyncModel()
         let address = dataConfig?.walletAddress ?? ""
         model.uId = TRXAddressMapManager.shared.id(for: address)
         model.idType = dataConfig?.uploadWalletType ?? 0
@@ -171,26 +192,11 @@ public class TRXStatisticalUploadManager: NSObject {
         model.chain = dataConfig?.environmentKey ?? ""
         model.updated = updated
         if tokenAddress == "_" || tokenAddress == dataConfig?.usdtContractAddress {
-            let localA1 = localModel.A1 ?? 0
-            let localA2 = localModel.A2 ?? 0
-            let localA3 = localModel.A3 ?? 0
-            let localA4 = localModel.A4 ?? 0
-            let localA5 = localModel.A5 ?? 0
-            let localA6 = localModel.A6 ?? 0
-            let localA7 = localModel.A7 ?? 0
-            let localA8 = localModel.A8 ?? 0
-            let localA9 = localModel.A9 ?? 0
-            let localHierarchyArr = [localA1,localA2,localA3,localA4,localA5,localA6,localA7,localA8,localA9]
+            let localHierarchyArr = Self.bucketKeyPaths.map { localModel[keyPath: $0] ?? 0 }
             let arr = self.distributionTokenAmount(forTokenAmount: tokenAmount, localHierarchyArr:localHierarchyArr)
-            model.A1 = arr[0]
-            model.A2 = arr[1]
-            model.A3 = arr[2]
-            model.A4 = arr[3]
-            model.A5 = arr[4]
-            model.A6 = arr[5]
-            model.A7 = arr[6]
-            model.A8 = arr[7]
-            model.A9 = arr[8]
+            zip(Self.bucketKeyPaths, arr).forEach { keyPath, value in
+                model[keyPath: keyPath] = value
+            }
         }
         return model
     }
@@ -202,26 +208,14 @@ public class TRXStatisticalUploadManager: NSObject {
         // NSDecimalNumber(string:) returns notANumber for unparseable strings
         guard amount != .notANumber else { return res }
         let zero = NSDecimalNumber.zero
-        let thresholds: [NSDecimalNumber] = [
-            NSDecimalNumber(string: "1"),
-            NSDecimalNumber(string: "10"),
-            NSDecimalNumber(string: "100"),
-            NSDecimalNumber(string: "1000"),
-            NSDecimalNumber(string: "10000"),
-            NSDecimalNumber(string: "100000"),
-            NSDecimalNumber(string: "1000000"),
-            NSDecimalNumber(string: "10000000")
-        ]
         // amount must be > 0
         guard amount.compare(zero) == .orderedDescending else { return res }
-        // Find the bucket: amount > thresholds[i-1] && amount <= thresholds[i]
-        for i in 0..<thresholds.count {
-            if amount.compare(thresholds[i]) != .orderedDescending {
-                res[i] += 1
+        for (threshold, idx) in Self.amountBuckets {
+            if amount.compare(threshold) != .orderedDescending {
+                res[idx] += 1
                 return res
             }
         }
-        // amount > 10_000_000
         res[8] += 1
         return res
     }
