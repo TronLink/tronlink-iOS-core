@@ -57,15 +57,19 @@ public extension String {
         return true
     }
     
-    var signStringHexEncoded: String {
+    func signStringHexEncoded() throws -> String {
         if self.starts(with: "0x") {
             let judgeString = self.substring(from: 2)
-            if String.hexOnlyRegex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
-                return judgeString.hexEncoded.drop0x
+            guard !judgeString.isEmpty,
+                  judgeString.length % 2 == 0,
+                  !String.hexOnlyRegex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty else {
+                throw KeystoreError.invalidSignInput
             }
             return judgeString
         } else {
-            if String.hexOnlyRegex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
+            if self.isEmpty ||
+                self.length % 2 != 0 ||
+                String.hexOnlyRegex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
                 return self.hexEncoded.drop0x
             }
             return self
@@ -75,12 +79,16 @@ public extension String {
     var isSignStringHexEncoded: Bool {
         if self.starts(with: "0x") {
             let judgeString = self.substring(from: 2)
-            if String.hexOnlyRegex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
+            if judgeString.isEmpty ||
+                judgeString.length % 2 != 0 ||
+                String.hexOnlyRegex.matches(in: judgeString, range: NSMakeRange(0, judgeString.length)).isEmpty {
                 return false
             }
             return true
         } else {
-            if String.hexOnlyRegex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
+            if self.isEmpty ||
+                self.length % 2 != 0 ||
+                String.hexOnlyRegex.matches(in: self, range: NSMakeRange(0, self.length)).isEmpty {
                 return false
             }
             return true

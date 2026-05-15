@@ -221,7 +221,7 @@ extension TLWalletCore {
      * @return The converted SHA3 data
      */
     public static func convertSignStringToSha3Data(unSignedString: String) throws -> Data {
-        let signString = unSignedString.signStringHexEncoded
+        let signString = try unSignedString.signStringHexEncoded()
         let persondata = Data.init(hex: signString)
         guard !persondata.isEmpty else { throw KeystoreError.invalidSignInput }
 
