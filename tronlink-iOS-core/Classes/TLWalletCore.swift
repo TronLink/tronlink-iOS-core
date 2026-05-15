@@ -278,7 +278,10 @@ extension TLWalletCore {
     private static func parseBytes(_ string: String, type: TLMessageSignV2Type) throws -> Data {
         switch type {
         case .array:
-            let parts = string.split(separator: ",")
+            let parts = string.split(separator: ",", omittingEmptySubsequences: false)
+            guard !parts.isEmpty else {
+                throw KeystoreError.invalidSignInput
+            }
             var bytes: [UInt8] = []
             bytes.reserveCapacity(parts.count)
             for part in parts {
@@ -289,10 +292,16 @@ extension TLWalletCore {
             }
             return Data(bytes)
         case .hashString:
+            guard string.isSignStringHexEncoded else {
+                throw KeystoreError.invalidSignInput
+            }
             let data = Data(hex: string)
             if data.isEmpty { throw KeystoreError.invalidSignInput }
             return data
         case .string:
+            guard !string.isEmpty else {
+                throw KeystoreError.invalidSignInput
+            }
             guard let data = string.data(using: .utf8) else {
                 throw KeystoreError.invalidSignInput
             }
