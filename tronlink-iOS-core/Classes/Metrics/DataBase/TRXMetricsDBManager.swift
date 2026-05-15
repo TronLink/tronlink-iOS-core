@@ -6,7 +6,7 @@ public class TRXMetricsDBManager: NSObject {
     
     public static let shared = TRXMetricsDBManager()
     
-    private var dataBaseQueue: FMDatabaseQueue!
+    private var dataBaseQueue: FMDatabaseQueue?
     
     private static let kMigrationDoneKeyPrefix = "TRXMetricsMigrationDone_"
     private static let kDBPathMigrationKey = "TRXMetricsDBPathMigrationDone"
@@ -47,7 +47,12 @@ public class TRXMetricsDBManager: NSObject {
         }
 
         // Fall back to in-memory DB if the file-based queue fails (e.g. disk permission error)
-        dataBaseQueue = FMDatabaseQueue(path: dbURL.path) ?? FMDatabaseQueue(path: ":memory:")
+        if let queue = FMDatabaseQueue(path: dbURL.path) {
+            dataBaseQueue = queue
+        } else {
+            NSLog("[TRXMetricsDBManager] Failed to open database at %@, falling back to in-memory database. Metrics will not persist.", dbURL.path)
+            dataBaseQueue = FMDatabaseQueue(path: ":memory:")
+        }
         // Set backup exclusion after FMDB creates the file, so the flag is applied on
         // first launch too (setResourceValue requires the file to already exist).
         try? (dbURL as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
@@ -101,7 +106,7 @@ public class TRXMetricsDBManager: NSObject {
     
     // MARK: - ASSET SYNC TABLE CREATION
     public func createAssetSyncTable() {
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             do {
                 if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["AssetSyncTable"]) {
                     var tableExist = false
@@ -172,7 +177,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func deleteAssetsBeforeToday(forChain chain: String) {
         let today = Date().tronCore_getCurrentYMD_UTC()
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "DELETE FROM AssetSyncTable WHERE chain = ? AND date < ?"
             db.executeUpdate(sql, withArgumentsIn: [chain, today])
         }
@@ -180,7 +185,7 @@ public class TRXMetricsDBManager: NSObject {
     
     public func getUpdatedAssetSyncModels(forChain chain: String) -> [TRXAssetSyncModel] {
         var results = [TRXAssetSyncModel]()
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND updated = 1"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
@@ -204,7 +209,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func getAssetSyncModel(chain: String, uId: String, date: String) -> TRXAssetSyncModel? {
         var model: TRXAssetSyncModel? = nil
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ? LIMIT 1"
             if let rs = try? db.executeQuery(sql, values: [chain, uId, date]) {
                 if rs.next() {
@@ -232,7 +237,7 @@ public class TRXMetricsDBManager: NSObject {
         let date = model.date ?? ""
         let idType = model.idType ?? 0
 
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             db.beginTransaction()
             var success = false
             do {
@@ -290,7 +295,7 @@ public class TRXMetricsDBManager: NSObject {
         let idType = model.idType ?? 0
         var result = false
 
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             db.beginTransaction()
             do {
                 let checkSql = "SELECT COUNT(1) AS cnt FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ?"
@@ -323,7 +328,7 @@ public class TRXMetricsDBManager: NSObject {
     
     public func getAllAssetSyncModels(forChain chain: String) -> [TRXAssetSyncModel] {
         var results = [TRXAssetSyncModel]()
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ?"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
@@ -347,7 +352,7 @@ public class TRXMetricsDBManager: NSObject {
     
     // MARK: - TRANSACTION SYNC TABLE CREATION
     public func createTransactionSyncTable() {
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             do {
                 if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["TransactionSyncTable"]) {
                     var tableExist = false
@@ -459,7 +464,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func deleteTransactionSyncBeforeToday(forChain chain: String) {
         let today = Date().tronCore_getCurrentYMD_UTC()
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "DELETE FROM TransactionSyncTable WHERE chain = ? AND date < ?"
             db.executeUpdate(sql, withArgumentsIn: [chain, today])
         }
@@ -467,7 +472,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func getUpdatedTransactionSyncModels(forChain chain: String) -> [TRXTransactionSyncModel] {
         var results = [TRXTransactionSyncModel]()
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND updated = 1"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
@@ -503,7 +508,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func getAllTransactionSyncModels(forChain chain: String) -> [TRXTransactionSyncModel] {
         var results = [TRXTransactionSyncModel]()
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ?"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
@@ -539,7 +544,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func getTransactionSyncModel(chain: String, uId: String, actionType: Int, tokenAddress: String, date: String) -> TRXTransactionSyncModel? {
         var result: TRXTransactionSyncModel? = nil
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ? LIMIT 1"
             if let rs = try? db.executeQuery(sql, values: [chain, uId, actionType, tokenAddress, date]) {
                 if rs.next() {
@@ -576,7 +581,7 @@ public class TRXMetricsDBManager: NSObject {
     // MARK: - ADDRESS MAP TABLE
 
     public func createAddressMapTable() {
-        dataBaseQueue.inDatabase { db in
+        dataBaseQueue?.inDatabase { db in
             let sql = """
             CREATE TABLE IF NOT EXISTS AddressMapTable (
                 address TEXT PRIMARY KEY,
@@ -591,7 +596,7 @@ public class TRXMetricsDBManager: NSObject {
     @discardableResult
     public func saveAddressMappings(_ mapping: [String: String]) -> Bool {
         var result = false
-        dataBaseQueue.inDatabase { db in
+        dataBaseQueue?.inDatabase { db in
             db.beginTransaction()
             guard db.executeUpdate("DELETE FROM AddressMapTable", withArgumentsIn: []) else {
                 db.rollback()
@@ -619,7 +624,7 @@ public class TRXMetricsDBManager: NSObject {
 
     public func loadAllAddressMappings() -> [String: String] {
         var result: [String: String] = [:]
-        dataBaseQueue.inDatabase { db in
+        dataBaseQueue?.inDatabase { db in
             if let rs = try? db.executeQuery("SELECT address, uuid FROM AddressMapTable", values: nil) {
                 while rs.next() {
                     if let addr = rs.string(forColumn: "address"),
@@ -644,7 +649,7 @@ public class TRXMetricsDBManager: NSObject {
         let dateVal = model.date ?? ""
 
         var result = false
-        self.dataBaseQueue.inDatabase { db in
+        self.dataBaseQueue?.inDatabase { db in
             db.beginTransaction()
             do {
                 let checkSql = "SELECT COUNT(1) AS cnt FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ?"

@@ -25,7 +25,7 @@ public extension String {
         answer.append(contentsOf: prefix)
         answer.reverse()
 
-        self = String(bytes: answer, encoding: String.Encoding.utf8)!
+        self = String(decoding: answer, as: UTF8.self)
     }
     
     init(base58CheckEncoding bytes: Data, alphabet: [UInt8] = Base58String.btcAlphabet) {
@@ -48,7 +48,7 @@ public extension Data {
         let byteString = [UInt8](string.utf8)
 
         for ch in byteString.reversed() {
-            if let index = alphabet.index(of: ch) {
+            if let index = alphabet.firstIndex(of: ch) {
                 answer = answer + (j * BigUInt(index))
                 j *= radix
             } else {
@@ -77,4 +77,3 @@ public extension Data {
     }
 
 }
-

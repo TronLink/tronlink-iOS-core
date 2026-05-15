@@ -15,6 +15,7 @@ public enum KeystoreError: LocalizedError {
     case failedToSignMessage
     case failedToSignTypedMessage
     case failedToExportPrivateKey
+    case failedToExportMnemonic
     case invalidMnemonicPhrase
     case successToImport
     case invalidKeystore
@@ -51,6 +52,8 @@ public enum KeystoreError: LocalizedError {
             return "Failed to sign typed message"
         case .failedToExportPrivateKey:
             return "Failed to export private key"
+        case .failedToExportMnemonic:
+            return "Failed to export mnemonic"
         case .invalidMnemonicPhrase:
             return "Invalid mnemonic phrase"
         case .successToImport:

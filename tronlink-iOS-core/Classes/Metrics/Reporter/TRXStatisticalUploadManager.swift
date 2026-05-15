@@ -198,26 +198,31 @@ public class TRXStatisticalUploadManager: NSObject {
     
     func distributionTokenAmount(forTokenAmount tokenAmount: String, localHierarchyArr:Array<Int>) -> [Int] {
         var res = localHierarchyArr
-        let amount = tokenAmount.tronCore_doubleValue
-        if amount > 0 && amount <= 1 {
-            res[0] += 1
-        } else if amount > 1 && amount <= 10 {
-            res[1] += 1
-        } else if amount > 10 && amount <= 100 {
-            res[2] += 1
-        } else if amount > 100 && amount <= 1_000 {
-            res[3] += 1
-        } else if amount > 1_000 && amount <= 10_000 {
-            res[4] += 1
-        } else if amount > 10_000 && amount <= 100_000 {
-            res[5] += 1
-        } else if amount > 100_000 && amount <= 1_000_000 {
-            res[6] += 1
-        } else if amount > 1_000_000 && amount <= 10_000_000 {
-            res[7] += 1
-        } else if amount > 10_000_000 {
-            res[8] += 1
+        let amount = NSDecimalNumber(string: tokenAmount)
+        // NSDecimalNumber(string:) returns notANumber for unparseable strings
+        guard amount != .notANumber else { return res }
+        let zero = NSDecimalNumber.zero
+        let thresholds: [NSDecimalNumber] = [
+            NSDecimalNumber(string: "1"),
+            NSDecimalNumber(string: "10"),
+            NSDecimalNumber(string: "100"),
+            NSDecimalNumber(string: "1000"),
+            NSDecimalNumber(string: "10000"),
+            NSDecimalNumber(string: "100000"),
+            NSDecimalNumber(string: "1000000"),
+            NSDecimalNumber(string: "10000000")
+        ]
+        // amount must be > 0
+        guard amount.compare(zero) == .orderedDescending else { return res }
+        // Find the bucket: amount > thresholds[i-1] && amount <= thresholds[i]
+        for i in 0..<thresholds.count {
+            if amount.compare(thresholds[i]) != .orderedDescending {
+                res[i] += 1
+                return res
+            }
         }
+        // amount > 10_000_000
+        res[8] += 1
         return res
     }
 
@@ -270,6 +275,7 @@ public class TRXStatisticalUploadManager: NSObject {
                 } else {
                 }
             } failure: {
+                NSLog("upload failure")
             }
         }
     }

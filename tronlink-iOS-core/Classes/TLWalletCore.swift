@@ -31,6 +31,9 @@ public class TLWalletCore: NSObject {
                 }
                 do {
                     var data = try keyStore.signHash(newHash, account: account, password: password)
+                    guard data.count >= 65 else {
+                        return .failure(KeystoreError.failedToSignTransaction)
+                    }
                     if data[64] >= 27 {
                         data[64] -= 27
                     }
@@ -67,15 +70,18 @@ public class TLWalletCore: NSObject {
                         }
                         do {
                             var data = try keyStore.signHash(newHash, account: account, password: password)
+                            guard data.count >= 65 else {
+                                return .failure(KeystoreError.failedToSignTransaction)
+                            }
                             if data[64] >= 27 {
                                 data[64] -= 27
                             }
                             transaction.signatureArray.add(data as Any)
-                            return .success(transaction)
                         } catch _ {
                             return .failure(KeystoreError.failedToSignTransaction)
                         }
                     }
+                    return .success(transaction)
                 } else {
                     return .failure(KeystoreError.failedToParseJSON)
                 }
@@ -100,37 +106,40 @@ extension TLWalletCore {
 
 //MARK: - Export
 extension TLWalletCore {
-    public static func walletExportPrivateKey(keyStore: KeyStore, password: String, address: String) -> String{
-        
-        for account in keyStore.accounts {
-            if address == account.address.data.addressString {
-                do {
-                    var privateKey = try keyStore.exportPrivateKey(account: account, password: password)
-                    defer {
-                        privateKey = Data()
-                    }
-                    return privateKey.hexString
-                } catch _ {}
-            }
+    public static func walletExportPrivateKey(keyStore: KeyStore, password: String, address: String) -> Result<String, KeystoreError> {
+        guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
+            return .failure(.accountNotFound)
         }
-        return ""
+
+        do {
+            var privateKey = try keyStore.exportPrivateKey(account: account, password: password)
+            defer {
+                privateKey = Data()
+            }
+            guard !privateKey.isEmpty else {
+                return .failure(.failedToExportPrivateKey)
+            }
+            return .success(privateKey.hexString)
+        } catch {
+            return .failure(.failedToExportPrivateKey)
+        }
     }
     
     
-    public static func walletExportMnemonic(keyStore: KeyStore, password: String, address: String) -> String {
-        
-        for account in keyStore.accounts {
-            if address == account.address.data.addressString {
-                do {
-                    var mnemonic = try keyStore.exportMnemonic(account: account, password: password)
-                    defer {
-                        mnemonic = ""
-                    }
-                    return mnemonic
-                } catch _ {}
-            }
+    public static func walletExportMnemonic(keyStore: KeyStore, password: String, address: String) -> Result<String, KeystoreError> {
+        guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
+            return .failure(.accountNotFound)
         }
-        return ""
+
+        do {
+            let mnemonic = try keyStore.exportMnemonic(account: account, password: password)
+            guard !mnemonic.isEmpty else {
+                return .failure(.failedToExportMnemonic)
+            }
+            return .success(mnemonic)
+        } catch {
+            return .failure(.failedToExportMnemonic)
+        }
     }
 }
 
@@ -143,9 +152,9 @@ extension TLWalletCore {
      * @param unSignedString The string to be signed
      * @param password Password to unlock the KeyStore
      * @param address Account address associated with the string to be signed
-     * @return The signed string
+     * @return Result containing the signed string or a signing error
      */
-    public static func signString(keyStore: KeyStore, unSignedString: String, password: String, address: String) -> String {
+    public static func signString(keyStore: KeyStore, unSignedString: String, password: String, address: String) -> Result<String, KeystoreError> {
         return TLWalletCore.signTypeString(keyStore: keyStore, unSignedString: unSignedString, password: password, address: address, signType:.SIGN_MESSAGE)
     }
     
@@ -157,9 +166,9 @@ extension TLWalletCore {
      * @param password Password to unlock the KeyStore
      * @param address Account address associated with the string to be signed
      * @param messageType Message type, defaults to SIGN_MESSAGE_V2_STRING
-     * @return The signed string
+     * @return Result containing the signed string or a signing error
      */
-    public static func signStringV2(keyStore: KeyStore, unSignedString: String, password: String, address: String,_ messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> String {
+    public static func signStringV2(keyStore: KeyStore, unSignedString: String, password: String, address: String,_ messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> Result<String, KeystoreError> {
         return TLWalletCore.signTypeString(keyStore: keyStore, unSignedString: unSignedString, password: password, address: address, signType:.SIGN_MESSAGE_V2, messageType)
     }
     
@@ -172,26 +181,29 @@ extension TLWalletCore {
      * @param address Account address associated with the string to be signed
      * @param signType Sign type, defaults to SIGN_MESSAGE
      * @param messageType Message type, defaults to SIGN_MESSAGE_V2_STRING
-     * @return The signed string
+     * @return Result containing the signed string or a signing error
      */
-    public static func signTypeString(keyStore: KeyStore, unSignedString: String, password: String, address: String, signType: TLMessageSignType = .SIGN_MESSAGE, _ messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> String {
+    public static func signTypeString(keyStore: KeyStore, unSignedString: String, password: String, address: String, signType: TLMessageSignType = .SIGN_MESSAGE, _ messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> Result<String, KeystoreError> {
         // Find the account matching the address
         guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
-            return ""
+            return .failure(.accountNotFound)
         }
 
         var sha3Data =  TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
         if signType == .SIGN_MESSAGE_V2 {
-            sha3Data = TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString)
+            sha3Data = TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
         }
         do {
             var signature = try keyStore.signHash(sha3Data, account: account, password: password)
+            guard signature.count >= 65 else {
+                return .failure(.failedToSignMessage)
+            }
             if signature[64] >= 27 {
                 signature[64] -= 27
             }
-            return signature.toHexString().add0x
-        }catch _ {
-            return ""
+            return .success(signature.toHexString().add0x)
+        } catch {
+            return .failure(.failedToSignMessage)
         }
     }
     
@@ -204,6 +216,7 @@ extension TLWalletCore {
     public static func convertSignStringToSha3Data(unSignedString: String) -> Data {
         let signString = unSignedString.signStringHexEncoded
         let persondata = Data.init(hex: signString)
+        guard !persondata.isEmpty else { return Data() }
 
         var apendData = Data()
         let prefix = "\u{19}TRON Signed Message:\n32"
@@ -213,8 +226,8 @@ extension TLWalletCore {
 
         //sh3
         let sha3 = SHA3(variant: .keccak256)
-        let Sh3Data =  Data(bytes: sha3.calculate(for: apendData.bytesT))
-        return Sh3Data
+        let sha3Data = Data(sha3.calculate(for: apendData.bytesT))
+        return sha3Data
     }
     
     /**
@@ -230,16 +243,18 @@ extension TLWalletCore {
         if case .SIGN_MESSAGE_V2_ARRAY = messageType { //bytes
             let list = unSignedString.split(separator: ",")
             var byteList:[UInt8] = [UInt8]()
-            list.forEach { item in
-                if let value = (UInt8)(String(item)) {
-                    byteList.append(value)
+            for item in list {
+                guard let value = UInt8(String(item)) else {
+                    return Data()
                 }
+                byteList.append(value)
             }
-            persondata = Data.init(bytes:byteList)
+            persondata = Data(byteList)
         }else if case .SIGN_MESSAGE_V2_STRING = messageType { //String
             persondata = unSignedString.data(using: .utf8) ?? Data()
         }else if case .SIGN_MESSAGE_V2_HASHSTRING = messageType { //HexStringType
             persondata = Data.init(hex: unSignedString)
+            guard !persondata.isEmpty else { return Data() }
         }
 
         let prefix = "\u{19}TRON Signed Message:\n\(persondata.count)"
@@ -251,8 +266,8 @@ extension TLWalletCore {
 
         //sh3
         let sha3 = SHA3(variant: .keccak256)
-        let Sh3Data =  Data(bytes: sha3.calculate(for: apendData.bytesT))
-        return Sh3Data
+        let sha3Data = Data(sha3.calculate(for: apendData.bytesT))
+        return sha3Data
     }
     
 }
