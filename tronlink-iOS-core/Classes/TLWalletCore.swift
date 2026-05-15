@@ -6,14 +6,29 @@ import CryptoSwift
 
 public enum TLMessageSignV2Type {
     //v2
-    case SIGN_MESSAGE_V2_STRING
-    case SIGN_MESSAGE_V2_HASHSTRING
-    case SIGN_MESSAGE_V2_ARRAY
+    case string
+    case hashString
+    case array
+
+    @available(*, deprecated, renamed: "string")
+    public static var SIGN_MESSAGE_V2_STRING: TLMessageSignV2Type { return .string }
+
+    @available(*, deprecated, renamed: "hashString")
+    public static var SIGN_MESSAGE_V2_HASHSTRING: TLMessageSignV2Type { return .hashString }
+
+    @available(*, deprecated, renamed: "array")
+    public static var SIGN_MESSAGE_V2_ARRAY: TLMessageSignV2Type { return .array }
 }
 
 public enum TLMessageSignType {
-    case SIGN_MESSAGE
-    case SIGN_MESSAGE_V2
+    case signMessage
+    case signMessageV2
+
+    @available(*, deprecated, renamed: "signMessage")
+    public static var SIGN_MESSAGE: TLMessageSignType { return .signMessage }
+
+    @available(*, deprecated, renamed: "signMessageV2")
+    public static var SIGN_MESSAGE_V2: TLMessageSignType { return .signMessageV2 }
 }
 
 public class TLWalletCore: NSObject {
@@ -157,7 +172,7 @@ extension TLWalletCore {
      * @return Result containing the signed string or a signing error
      */
     public static func signString(keyStore: KeyStore, unSignedString: String, password: String, address: String) -> Result<String, KeystoreError> {
-        return TLWalletCore.signTypeString(keyStore: keyStore, unSignedString: unSignedString, password: password, address: address, signType:.SIGN_MESSAGE)
+        return TLWalletCore.signTypeString(keyStore: keyStore, unSignedString: unSignedString, password: password, address: address, signType:.signMessage)
     }
     
     /**
@@ -167,11 +182,11 @@ extension TLWalletCore {
      * @param unSignedString The string to be signed
      * @param password Password to unlock the KeyStore
      * @param address Account address associated with the string to be signed
-     * @param messageType Message type, defaults to SIGN_MESSAGE_V2_STRING
+     * @param messageType Message type, defaults to string
      * @return Result containing the signed string or a signing error
      */
-    public static func signStringV2(keyStore: KeyStore, unSignedString: String, password: String, address: String,_ messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> Result<String, KeystoreError> {
-        return TLWalletCore.signTypeString(keyStore: keyStore, unSignedString: unSignedString, password: password, address: address, signType:.SIGN_MESSAGE_V2, messageType)
+    public static func signStringV2(keyStore: KeyStore, unSignedString: String, password: String, address: String,_ messageType:TLMessageSignV2Type = .string) -> Result<String, KeystoreError> {
+        return TLWalletCore.signTypeString(keyStore: keyStore, unSignedString: unSignedString, password: password, address: address, signType:.signMessageV2, messageType)
     }
     
     /**
@@ -181,11 +196,11 @@ extension TLWalletCore {
      * @param unSignedString The string to be signed
      * @param password Password to unlock the KeyStore
      * @param address Account address associated with the string to be signed
-     * @param signType Sign type, defaults to SIGN_MESSAGE
-     * @param messageType Message type, defaults to SIGN_MESSAGE_V2_STRING
+     * @param signType Sign type, defaults to signMessage
+     * @param messageType Message type, defaults to string
      * @return Result containing the signed string or a signing error
      */
-    public static func signTypeString(keyStore: KeyStore, unSignedString: String, password: String, address: String, signType: TLMessageSignType = .SIGN_MESSAGE, _ messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) -> Result<String, KeystoreError> {
+    public static func signTypeString(keyStore: KeyStore, unSignedString: String, password: String, address: String, signType: TLMessageSignType = .signMessage, _ messageType:TLMessageSignV2Type = .string) -> Result<String, KeystoreError> {
         // Find the account matching the address
         guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
             return .failure(.accountNotFound)
@@ -193,7 +208,7 @@ extension TLWalletCore {
 
         do {
             var sha3Data = try TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
-            if signType == .SIGN_MESSAGE_V2 {
+            if signType == .signMessageV2 {
                 sha3Data = try TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
             }
             guard sha3Data.count == 32 else {
@@ -241,10 +256,10 @@ extension TLWalletCore {
      * @brief Convert the string to be signed into SHA3 data (V2 version)
      *
      * @param unSignedString The string to be signed
-     * @param messageType Message type, defaults to SIGN_MESSAGE_V2_STRING
+     * @param messageType Message type, defaults to string
      * @return The converted SHA3 data
      */
-    public static func convertSignStringV2ToSha3Data(unSignedString: String, messageType:TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING) throws -> Data {
+    public static func convertSignStringV2ToSha3Data(unSignedString: String, messageType:TLMessageSignV2Type = .string) throws -> Data {
         let persondata = try parseBytes(unSignedString, type: messageType)
 
         let prefix = "\u{19}TRON Signed Message:\n\(persondata.count)"
@@ -262,7 +277,7 @@ extension TLWalletCore {
 
     private static func parseBytes(_ string: String, type: TLMessageSignV2Type) throws -> Data {
         switch type {
-        case .SIGN_MESSAGE_V2_ARRAY:
+        case .array:
             let parts = string.split(separator: ",")
             var bytes: [UInt8] = []
             bytes.reserveCapacity(parts.count)
@@ -273,11 +288,11 @@ extension TLWalletCore {
                 bytes.append(value)
             }
             return Data(bytes)
-        case .SIGN_MESSAGE_V2_HASHSTRING:
+        case .hashString:
             let data = Data(hex: string)
             if data.isEmpty { throw KeystoreError.invalidSignInput }
             return data
-        case .SIGN_MESSAGE_V2_STRING:
+        case .string:
             guard let data = string.data(using: .utf8) else {
                 throw KeystoreError.invalidSignInput
             }
