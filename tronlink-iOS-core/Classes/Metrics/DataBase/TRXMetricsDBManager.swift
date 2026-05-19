@@ -41,8 +41,12 @@ public class TRXMetricsDBManager: NSObject {
                 }
             }
 
-            // Fall back to in-memory DB if the file-based queue fails (e.g. disk permission error)
-            queue = FMDatabaseQueue(path: dbURL.path) ?? FMDatabaseQueue(path: ":memory:")
+            if let fileQueue = FMDatabaseQueue(path: dbURL.path) {
+                queue = fileQueue
+            } else {
+                NSLog("[MetricsDB] file queue failed at %@, fallback to in-memory", dbURL.path)
+                queue = FMDatabaseQueue(path: ":memory:")
+            }
             dbURLForBackupExclusion = dbURL
         } else {
             // Should never happen on a real iOS device; fall back to in-memory DB so the app keeps running
