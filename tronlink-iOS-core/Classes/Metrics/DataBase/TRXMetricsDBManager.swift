@@ -157,6 +157,47 @@ public class TRXMetricsDBManager: NSObject {
         return ok
     }
     
+    // MARK: - FMResultSet → Model Helpers
+
+    private func makeAssetSync(from rs: FMResultSet) -> TRXAssetSyncModel {
+        let m = TRXAssetSyncModel()
+        m.uId = rs.string(forColumn: "uId")
+        m.idType = (rs.object(forColumn: "idType") as? NSNumber)?.intValue
+        m.trxBalance = rs.string(forColumn: "trxBalance")
+        m.usdtBalance = rs.string(forColumn: "usdtBalance")
+        m.usdBalance = rs.string(forColumn: "usdBalance")
+        m.date = rs.string(forColumn: "date")
+        m.chain = rs.string(forColumn: "chain")
+        m.updated = rs.int(forColumn: "updated") != 0
+        return m
+    }
+
+    private func makeTransactionSync(from rs: FMResultSet) -> TRXTransactionSyncModel {
+        let m = TRXTransactionSyncModel()
+        m.uId = rs.string(forColumn: "uId")
+        m.idType = (rs.object(forColumn: "idType") as? NSNumber)?.intValue
+        m.actionType = (rs.object(forColumn: "actionType") as? NSNumber)?.intValue
+        m.count = (rs.object(forColumn: "count") as? NSNumber)?.intValue
+        m.tokenAddress = rs.string(forColumn: "tokenAddress")
+        m.tokenAmount = rs.string(forColumn: "tokenAmount")
+        m.energy = rs.string(forColumn: "energy")
+        m.bandwidth = rs.string(forColumn: "bandwidth")
+        m.burn = rs.string(forColumn: "burn")
+        m.date = rs.string(forColumn: "date")
+        m.chain = rs.string(forColumn: "chain")
+        m.updated = (rs.object(forColumn: "updated") as? NSNumber)?.intValue == 1
+        m.A1 = (rs.object(forColumn: "A1") as? NSNumber)?.intValue ?? 0
+        m.A2 = (rs.object(forColumn: "A2") as? NSNumber)?.intValue ?? 0
+        m.A3 = (rs.object(forColumn: "A3") as? NSNumber)?.intValue ?? 0
+        m.A4 = (rs.object(forColumn: "A4") as? NSNumber)?.intValue ?? 0
+        m.A5 = (rs.object(forColumn: "A5") as? NSNumber)?.intValue ?? 0
+        m.A6 = (rs.object(forColumn: "A6") as? NSNumber)?.intValue ?? 0
+        m.A7 = (rs.object(forColumn: "A7") as? NSNumber)?.intValue ?? 0
+        m.A8 = (rs.object(forColumn: "A8") as? NSNumber)?.intValue ?? 0
+        m.A9 = (rs.object(forColumn: "A9") as? NSNumber)?.intValue ?? 0
+        return m
+    }
+
     // MARK: - ASSET SYNC TABLE METHODS
     private func copyAssetSyncModel(_ model: TRXAssetSyncModel, updated: Bool) -> TRXAssetSyncModel {
         let copiedModel = TRXAssetSyncModel()
@@ -224,17 +265,7 @@ public class TRXMetricsDBManager: NSObject {
             let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND updated = 1"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
-                    let m = TRXAssetSyncModel()
-                    m.uId = rs.string(forColumn: "uId")
-                    if let num = rs.object(forColumn: "idType") as? NSNumber { m.idType = num.intValue } else { m.idType = nil }
-                    m.trxBalance = rs.string(forColumn: "trxBalance")
-                    m.usdtBalance = rs.string(forColumn: "usdtBalance")
-                    m.usdBalance = rs.string(forColumn: "usdBalance")
-                    m.date = rs.string(forColumn: "date")
-                    m.chain = rs.string(forColumn: "chain")
-                    let updatedVal = rs.int(forColumn: "updated")
-                    m.updated = (updatedVal != 0)
-                    results.append(m)
+                    results.append(self.makeAssetSync(from: rs))
                 }
                 rs.close()
             }
@@ -248,17 +279,7 @@ public class TRXMetricsDBManager: NSObject {
             let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ? LIMIT 1"
             if let rs = try? db.executeQuery(sql, values: [chain, uId, date]) {
                 if rs.next() {
-                    let m = TRXAssetSyncModel()
-                    m.uId = rs.string(forColumn: "uId")
-                    if let num = rs.object(forColumn: "idType") as? NSNumber { m.idType = num.intValue } else { m.idType = nil }
-                    m.trxBalance = rs.string(forColumn: "trxBalance")
-                    m.usdtBalance = rs.string(forColumn: "usdtBalance")
-                    m.usdBalance = rs.string(forColumn: "usdBalance")
-                    m.date = rs.string(forColumn: "date")
-                    m.chain = rs.string(forColumn: "chain")
-                    let updatedVal = rs.int(forColumn: "updated")
-                    m.updated = (updatedVal != 0)
-                    model = m
+                    model = self.makeAssetSync(from: rs)
                 }
                 rs.close()
             }
@@ -364,17 +385,7 @@ public class TRXMetricsDBManager: NSObject {
             let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ?"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
-                    let m = TRXAssetSyncModel()
-                    m.uId = rs.string(forColumn: "uId")
-                    if let num = rs.object(forColumn: "idType") as? NSNumber { m.idType = num.intValue } else { m.idType = nil }
-                    m.trxBalance = rs.string(forColumn: "trxBalance")
-                    m.usdtBalance = rs.string(forColumn: "usdtBalance")
-                    m.usdBalance = rs.string(forColumn: "usdBalance")
-                    m.date = rs.string(forColumn: "date")
-                    m.chain = rs.string(forColumn: "chain")
-                    let updatedVal = rs.int(forColumn: "updated")
-                    m.updated = (updatedVal != 0)
-                    results.append(m)
+                    results.append(self.makeAssetSync(from: rs))
                 }
                 rs.close()
             }
@@ -514,29 +525,7 @@ public class TRXMetricsDBManager: NSObject {
             let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND updated = 1"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
-                    let m = TRXTransactionSyncModel()
-                    m.uId = rs.string(forColumn: "uId")
-                    if let num = rs.object(forColumn: "idType") as? NSNumber { m.idType = num.intValue } else { m.idType = nil }
-                    if let num = rs.object(forColumn: "actionType") as? NSNumber { m.actionType = num.intValue } else { m.actionType = nil }
-                    if let num = rs.object(forColumn: "count") as? NSNumber { m.count = num.intValue } else { m.count = nil }
-                    m.tokenAddress = rs.string(forColumn: "tokenAddress")
-                    m.tokenAmount = rs.string(forColumn: "tokenAmount")
-                    m.energy = rs.string(forColumn: "energy")
-                    m.bandwidth = rs.string(forColumn: "bandwidth")
-                    m.burn = rs.string(forColumn: "burn")
-                    m.date = rs.string(forColumn: "date")
-                    m.chain = rs.string(forColumn: "chain")
-                    if let num = rs.object(forColumn: "updated") as? NSNumber { m.updated = num.intValue == 1 } else { m.updated = false }
-                    if let num = rs.object(forColumn: "A1") as? NSNumber { m.A1 = num.intValue } else { m.A1 = 0 }
-                    if let num = rs.object(forColumn: "A2") as? NSNumber { m.A2 = num.intValue } else { m.A2 = 0 }
-                    if let num = rs.object(forColumn: "A3") as? NSNumber { m.A3 = num.intValue } else { m.A3 = 0 }
-                    if let num = rs.object(forColumn: "A4") as? NSNumber { m.A4 = num.intValue } else { m.A4 = 0 }
-                    if let num = rs.object(forColumn: "A5") as? NSNumber { m.A5 = num.intValue } else { m.A5 = 0 }
-                    if let num = rs.object(forColumn: "A6") as? NSNumber { m.A6 = num.intValue } else { m.A6 = 0 }
-                    if let num = rs.object(forColumn: "A7") as? NSNumber { m.A7 = num.intValue } else { m.A7 = 0 }
-                    if let num = rs.object(forColumn: "A8") as? NSNumber { m.A8 = num.intValue } else { m.A8 = 0 }
-                    if let num = rs.object(forColumn: "A9") as? NSNumber { m.A9 = num.intValue } else { m.A9 = 0 }
-                    results.append(m)
+                    results.append(self.makeTransactionSync(from: rs))
                 }
                 rs.close()
             }
@@ -550,29 +539,7 @@ public class TRXMetricsDBManager: NSObject {
             let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ?"
             if let rs = try? db.executeQuery(sql, values: [chain]) {
                 while rs.next() {
-                    let m = TRXTransactionSyncModel()
-                    m.uId = rs.string(forColumn: "uId")
-                    if let num = rs.object(forColumn: "idType") as? NSNumber { m.idType = num.intValue } else { m.idType = nil }
-                    if let num = rs.object(forColumn: "actionType") as? NSNumber { m.actionType = num.intValue } else { m.actionType = nil }
-                    if let num = rs.object(forColumn: "count") as? NSNumber { m.count = num.intValue } else { m.count = nil }
-                    m.tokenAddress = rs.string(forColumn: "tokenAddress")
-                    m.tokenAmount = rs.string(forColumn: "tokenAmount")
-                    m.energy = rs.string(forColumn: "energy")
-                    m.bandwidth = rs.string(forColumn: "bandwidth")
-                    m.burn = rs.string(forColumn: "burn")
-                    m.date = rs.string(forColumn: "date")
-                    m.chain = rs.string(forColumn: "chain")
-                    if let num = rs.object(forColumn: "updated") as? NSNumber { m.updated = num.intValue == 1 } else { m.updated = false }
-                    if let num = rs.object(forColumn: "A1") as? NSNumber { m.A1 = num.intValue } else { m.A1 = 0 }
-                    if let num = rs.object(forColumn: "A2") as? NSNumber { m.A2 = num.intValue } else { m.A2 = 0 }
-                    if let num = rs.object(forColumn: "A3") as? NSNumber { m.A3 = num.intValue } else { m.A3 = 0 }
-                    if let num = rs.object(forColumn: "A4") as? NSNumber { m.A4 = num.intValue } else { m.A4 = 0 }
-                    if let num = rs.object(forColumn: "A5") as? NSNumber { m.A5 = num.intValue } else { m.A5 = 0 }
-                    if let num = rs.object(forColumn: "A6") as? NSNumber { m.A6 = num.intValue } else { m.A6 = 0 }
-                    if let num = rs.object(forColumn: "A7") as? NSNumber { m.A7 = num.intValue } else { m.A7 = 0 }
-                    if let num = rs.object(forColumn: "A8") as? NSNumber { m.A8 = num.intValue } else { m.A8 = 0 }
-                    if let num = rs.object(forColumn: "A9") as? NSNumber { m.A9 = num.intValue } else { m.A9 = 0 }
-                    results.append(m)
+                    results.append(self.makeTransactionSync(from: rs))
                 }
                 rs.close()
             }
@@ -586,29 +553,7 @@ public class TRXMetricsDBManager: NSObject {
             let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ? LIMIT 1"
             if let rs = try? db.executeQuery(sql, values: [chain, uId, actionType, tokenAddress, date]) {
                 if rs.next() {
-                    let m = TRXTransactionSyncModel()
-                    m.uId = rs.string(forColumn: "uId")
-                    if let num = rs.object(forColumn: "idType") as? NSNumber { m.idType = num.intValue } else { m.idType = nil }
-                    if let num = rs.object(forColumn: "actionType") as? NSNumber { m.actionType = num.intValue } else { m.actionType = nil }
-                    if let num = rs.object(forColumn: "count") as? NSNumber { m.count = num.intValue } else { m.count = nil }
-                    m.tokenAddress = rs.string(forColumn: "tokenAddress")
-                    m.tokenAmount = rs.string(forColumn: "tokenAmount")
-                    m.energy = rs.string(forColumn: "energy")
-                    m.bandwidth = rs.string(forColumn: "bandwidth")
-                    m.burn = rs.string(forColumn: "burn")
-                    m.date = rs.string(forColumn: "date")
-                    m.chain = rs.string(forColumn: "chain")
-                    if let num = rs.object(forColumn: "updated") as? NSNumber { m.updated = num.intValue == 1 } else { m.updated = false }
-                    if let num = rs.object(forColumn: "A1") as? NSNumber { m.A1 = num.intValue } else { m.A1 = 0 }
-                    if let num = rs.object(forColumn: "A2") as? NSNumber { m.A2 = num.intValue } else { m.A2 = 0 }
-                    if let num = rs.object(forColumn: "A3") as? NSNumber { m.A3 = num.intValue } else { m.A3 = 0 }
-                    if let num = rs.object(forColumn: "A4") as? NSNumber { m.A4 = num.intValue } else { m.A4 = 0 }
-                    if let num = rs.object(forColumn: "A5") as? NSNumber { m.A5 = num.intValue } else { m.A5 = 0 }
-                    if let num = rs.object(forColumn: "A6") as? NSNumber { m.A6 = num.intValue } else { m.A6 = 0 }
-                    if let num = rs.object(forColumn: "A7") as? NSNumber { m.A7 = num.intValue } else { m.A7 = 0 }
-                    if let num = rs.object(forColumn: "A8") as? NSNumber { m.A8 = num.intValue } else { m.A8 = 0 }
-                    if let num = rs.object(forColumn: "A9") as? NSNumber { m.A9 = num.intValue } else { m.A9 = 0 }
-                    result = m
+                    result = self.makeTransactionSync(from: rs)
                 }
                 rs.close()
             }

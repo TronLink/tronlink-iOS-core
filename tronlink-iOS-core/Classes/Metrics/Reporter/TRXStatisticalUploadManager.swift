@@ -267,6 +267,7 @@ public class TRXStatisticalUploadManager: NSObject {
                         }
                     }
                 } else {
+                    NSLog("[Metrics] server returned isUploadSuccess=false, will retry next cycle")
                 }
             } failure: {
                 NSLog("upload failure")
