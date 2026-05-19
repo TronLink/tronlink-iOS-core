@@ -125,31 +125,29 @@ public class TRXMetricsDBManager: NSObject {
     public func createAssetSyncTable() -> Bool {
         var ok = true
         self.dataBaseQueue?.inDatabase { db in
-            do {
-                if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["AssetSyncTable"]) {
-                    var tableExist = false
-                    if rs.next() {
-                        tableExist = rs.int(forColumn: "count") > 0
-                    }
-                    rs.close()
+            if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["AssetSyncTable"]) {
+                var tableExist = false
+                if rs.next() {
+                    tableExist = rs.int(forColumn: "count") > 0
+                }
+                rs.close()
 
-                    if !tableExist {
-                        let createSql = """
-                        CREATE TABLE IF NOT EXISTS AssetSyncTable (
-                            uuid INTEGER PRIMARY KEY AUTOINCREMENT,
-                            uId TEXT,
-                            idType INTEGER,
-                            trxBalance TEXT,
-                            usdtBalance TEXT,
-                            usdBalance TEXT,
-                            date TEXT,
-                            chain TEXT,
-                            updated INTEGER DEFAULT 0,
-                            UNIQUE(chain, uId, date)
-                        )
-                        """
-                        ok = self.runUpdate(db, createSql)
-                    }
+                if !tableExist {
+                    let createSql = """
+                    CREATE TABLE IF NOT EXISTS AssetSyncTable (
+                        uuid INTEGER PRIMARY KEY AUTOINCREMENT,
+                        uId TEXT,
+                        idType INTEGER,
+                        trxBalance TEXT,
+                        usdtBalance TEXT,
+                        usdBalance TEXT,
+                        date TEXT,
+                        chain TEXT,
+                        updated INTEGER DEFAULT 0,
+                        UNIQUE(chain, uId, date)
+                    )
+                    """
+                    ok = self.runUpdate(db, createSql)
                 }
             }
         }
@@ -398,44 +396,42 @@ public class TRXMetricsDBManager: NSObject {
     public func createTransactionSyncTable() -> Bool {
         var ok = true
         self.dataBaseQueue?.inDatabase { db in
-            do {
-                if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["TransactionSyncTable"]) {
-                    var tableExist = false
-                    if rs.next() {
-                        tableExist = rs.int(forColumn: "count") > 0
-                    }
-                    rs.close()
+            if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["TransactionSyncTable"]) {
+                var tableExist = false
+                if rs.next() {
+                    tableExist = rs.int(forColumn: "count") > 0
+                }
+                rs.close()
 
-                    if !tableExist {
-                        let createSql = """
-                        CREATE TABLE IF NOT EXISTS TransactionSyncTable (
-                            uuid INTEGER PRIMARY KEY AUTOINCREMENT,
-                            uId TEXT,
-                            idType INTEGER,
-                            actionType INTEGER,
-                            count INTEGER,
-                            tokenAddress TEXT,
-                            tokenAmount TEXT,
-                            energy TEXT,
-                            bandwidth TEXT,
-                            burn TEXT,
-                            date TEXT,
-                            chain TEXT,
-                            updated INTEGER DEFAULT 0,
-                            A1 INTEGER DEFAULT 0,
-                            A2 INTEGER DEFAULT 0,
-                            A3 INTEGER DEFAULT 0,
-                            A4 INTEGER DEFAULT 0,
-                            A5 INTEGER DEFAULT 0,
-                            A6 INTEGER DEFAULT 0,
-                            A7 INTEGER DEFAULT 0,
-                            A8 INTEGER DEFAULT 0,
-                            A9 INTEGER DEFAULT 0,
-                            UNIQUE(chain, uId, actionType, tokenAddress, date)
-                        )
-                        """
-                        ok = self.runUpdate(db, createSql)
-                    }
+                if !tableExist {
+                    let createSql = """
+                    CREATE TABLE IF NOT EXISTS TransactionSyncTable (
+                        uuid INTEGER PRIMARY KEY AUTOINCREMENT,
+                        uId TEXT,
+                        idType INTEGER,
+                        actionType INTEGER,
+                        count INTEGER,
+                        tokenAddress TEXT,
+                        tokenAmount TEXT,
+                        energy TEXT,
+                        bandwidth TEXT,
+                        burn TEXT,
+                        date TEXT,
+                        chain TEXT,
+                        updated INTEGER DEFAULT 0,
+                        A1 INTEGER DEFAULT 0,
+                        A2 INTEGER DEFAULT 0,
+                        A3 INTEGER DEFAULT 0,
+                        A4 INTEGER DEFAULT 0,
+                        A5 INTEGER DEFAULT 0,
+                        A6 INTEGER DEFAULT 0,
+                        A7 INTEGER DEFAULT 0,
+                        A8 INTEGER DEFAULT 0,
+                        A9 INTEGER DEFAULT 0,
+                        UNIQUE(chain, uId, actionType, tokenAddress, date)
+                    )
+                    """
+                    ok = self.runUpdate(db, createSql)
                 }
             }
         }
