@@ -153,6 +153,9 @@ public class TRXMetricsDBManager: NSObject {
                     """
                     ok = self.runUpdate(db, createSql)
                 }
+            } else {
+                NSLog("[MetricsDB] table check failed: %@", db.lastErrorMessage())
+                ok = false
             }
         }
         if !ok { isDBHealthy = false }
@@ -437,6 +440,9 @@ public class TRXMetricsDBManager: NSObject {
                     """
                     ok = self.runUpdate(db, createSql)
                 }
+            } else {
+                NSLog("[MetricsDB] table check failed: %@", db.lastErrorMessage())
+                ok = false
             }
         }
         if !ok { isDBHealthy = false }
