@@ -53,15 +53,18 @@ public class TLWalletCore: NSObject {
                         data[64] -= 27
                     }
                     return .success(data)
-                } catch _ {
-                    return .failure(KeystoreError.failedToSignTransaction)
+                } catch let err as KeystoreError {
+                    return .failure(err)
+                } catch {
+                    NSLog("[Sign] unknown error: %@", String(describing: error))
+                    return .failure(.failedToSignTransaction)
                 }
             }
         }
         return .failure(KeystoreError.failedToSignTransaction)
     }
 
-    
+
     /// sign tron transaction
     /// - Parameters:
     ///   - keyStore: KeyStore
@@ -93,8 +96,11 @@ public class TLWalletCore: NSObject {
                                 data[64] -= 27
                             }
                             collectedSignatures.append(data)
-                        } catch _ {
-                            return .failure(KeystoreError.failedToSignTransaction)
+                        } catch let err as KeystoreError {
+                            return .failure(err)
+                        } catch {
+                            NSLog("[Sign] unknown error: %@", String(describing: error))
+                            return .failure(.failedToSignTransaction)
                         }
                     }
                     collectedSignatures.forEach { transaction.signatureArray.add($0 as Any) }
