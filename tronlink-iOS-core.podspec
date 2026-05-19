@@ -25,13 +25,6 @@ Pod::Spec.new do |s|
    
    s.requires_arc = false
    grpc_arc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.m']
-   grpc_mrc_files = [
-      'tronlink-iOS-core/Classes/gRPC/api/*.pbobjc.m',
-      'tronlink-iOS-core/Classes/gRPC/google/protobuf/*.pbobjc.m',
-      'tronlink-iOS-core/Classes/gRPC/google/api/Annotations.pbobjc.m',
-      'tronlink-iOS-core/Classes/gRPC/core/Tron.pbobjc.m',
-      'tronlink-iOS-core/Classes/gRPC/core/contract/SmartContract.pbobjc.m',
-      'tronlink-iOS-core/Classes/gRPC/core/contract/Common.pbobjc.m'
-   ].flat_map { |pattern| Dir[pattern] }
+   grpc_mrc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.pbobjc.m']
    s.requires_arc = grpc_arc_files - grpc_mrc_files
 end

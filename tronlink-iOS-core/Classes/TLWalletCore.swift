@@ -34,10 +34,54 @@ public enum TLMessageSignType {
 public class TLWalletCore: NSObject {
     
     public static func signTranscation(keyStore: KeyStore, transaction: Data, password: String, address: String, _ dappChainId: String = "") -> Result<Data, KeystoreError> {
+
+        guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
+            return .failure(KeystoreError.failedToSignTransaction)
+        }
+
+        var newHash: Data = transaction.sha256T()
+        if !dappChainId.isEmpty {
+            if let mainGateData = Data(hexString: dappChainId) {
+                newHash.append(mainGateData)
+                newHash = newHash.sha256T()
+            }
+        }
+        do {
+            var data = try keyStore.signHash(newHash, account: account, password: password)
+            guard data.count >= 65 else {
+                return .failure(KeystoreError.failedToSignTransaction)
+            }
+            if data[64] >= 27 {
+                data[64] -= 27
+            }
+            return .success(data)
+        } catch let err as KeystoreError {
+            return .failure(err)
+        } catch {
+            NSLog("[Sign] unknown error: %@", String(describing: error))
+            return .failure(.failedToSignTransaction)
+        }
+    }
+
+
+    /// sign tron transaction
+    /// - Parameters:
+    ///   - keyStore: KeyStore
+    ///   - transaction: Transaction
+    ///   - password: wallet password
+    ///   - address: wallet address
+    ///   - dappChainId: Optional, defalut is mainChain, dappChainId needs to pass in ChianId
+    /// - Returns: signed TronTransaction
+    public static func signTranscation(keyStore: KeyStore, transaction: TronTransaction, password: String, address: String, _ dappChainId: String = "") -> Result<TronTransaction, KeystoreError> {
         
-        for account in keyStore.accounts {
-            if address == account.address.data.addressString {
-                var newHash: Data = transaction.sha256T()
+        guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
+            return .failure(KeystoreError.failedToSignTransaction)
+        }
+
+        if let hash: Data = transaction.rawData.data()?.sha256T(), let list = transaction.rawData.contractArray, list.count > 0 {
+            var collectedSignatures: [Data] = []
+            for _ in list {
+                var newHash: Data = hash
                 if !dappChainId.isEmpty {
                     if let mainGateData = Data(hexString: dappChainId) {
                         newHash.append(mainGateData)
@@ -52,7 +96,7 @@ public class TLWalletCore: NSObject {
                     if data[64] >= 27 {
                         data[64] -= 27
                     }
-                    return .success(data)
+                    collectedSignatures.append(data)
                 } catch let err as KeystoreError {
                     return .failure(err)
                 } catch {
@@ -60,57 +104,11 @@ public class TLWalletCore: NSObject {
                     return .failure(.failedToSignTransaction)
                 }
             }
+            collectedSignatures.forEach { transaction.signatureArray.add($0 as Any) }
+            return .success(transaction)
+        } else {
+            return .failure(KeystoreError.failedToParseJSON)
         }
-        return .failure(KeystoreError.failedToSignTransaction)
-    }
-
-
-    /// sign tron transaction
-    /// - Parameters:
-    ///   - keyStore: KeyStore
-    ///   - transaction: Transaction
-    ///   - password: wallet password
-    ///   - address: wallet address
-    ///   - dappChainId: Optional, defalut is mainChain, dappChainId needs to pass in ChianId
-    /// - Returns: signed TronTransaction
-    public static func signTranscation(keyStore: KeyStore, transaction: TronTransaction, password: String, address: String, _ dappChainId: String = "") -> Result<TronTransaction, KeystoreError> {
-        
-        for account in keyStore.accounts {
-            if address == account.address.data.addressString {
-                if let hash: Data = transaction.rawData.data()?.sha256T(), let list = transaction.rawData.contractArray, list.count > 0 {
-                    var collectedSignatures: [Data] = []
-                    for _ in list {
-                        var newHash: Data = hash
-                        if !dappChainId.isEmpty {
-                            if let mainGateData = Data(hexString: dappChainId) {
-                                newHash.append(mainGateData)
-                                newHash = newHash.sha256T()
-                            }
-                        }
-                        do {
-                            var data = try keyStore.signHash(newHash, account: account, password: password)
-                            guard data.count >= 65 else {
-                                return .failure(KeystoreError.failedToSignTransaction)
-                            }
-                            if data[64] >= 27 {
-                                data[64] -= 27
-                            }
-                            collectedSignatures.append(data)
-                        } catch let err as KeystoreError {
-                            return .failure(err)
-                        } catch {
-                            NSLog("[Sign] unknown error: %@", String(describing: error))
-                            return .failure(.failedToSignTransaction)
-                        }
-                    }
-                    collectedSignatures.forEach { transaction.signatureArray.add($0 as Any) }
-                    return .success(transaction)
-                } else {
-                    return .failure(KeystoreError.failedToParseJSON)
-                }
-            }
-        }
-        return .failure(KeystoreError.failedToSignTransaction)
     }
 
 }
