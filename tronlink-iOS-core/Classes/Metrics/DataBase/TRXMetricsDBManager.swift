@@ -11,6 +11,8 @@ public class TRXMetricsDBManager: NSObject {
     private static let kMigrationDoneKeyPrefix = "TRXMetricsMigrationDone_"
     private static let kDBPathMigrationKey = "TRXMetricsDBPathMigrationDone"
 
+    private(set) var isDBHealthy = true
+
     private override init() {
         let queue: FMDatabaseQueue?
         let dbURLForBackupExclusion: URL?
@@ -60,6 +62,20 @@ public class TRXMetricsDBManager: NSObject {
         createAddressMapTable()
         createAssetSyncTable()
         createTransactionSyncTable()
+        if !isDBHealthy {
+            NSLog("[MetricsDB] init: one or more tables failed to create, DB marked unhealthy")
+        }
+    }
+
+    // MARK: - Helpers
+
+    @discardableResult
+    private func runUpdate(_ db: FMDatabase, _ sql: String, _ args: [Any] = []) -> Bool {
+        let ok = db.executeUpdate(sql, withArgumentsIn: args)
+        if !ok {
+            NSLog("[MetricsDB] update failed: %@\nSQL: %@", db.lastErrorMessage(), sql)
+        }
+        return ok
     }
 
     // MARK: - Legacy Data Migration
@@ -105,7 +121,9 @@ public class TRXMetricsDBManager: NSObject {
     }
     
     // MARK: - ASSET SYNC TABLE CREATION
-    public func createAssetSyncTable() {
+    @discardableResult
+    public func createAssetSyncTable() -> Bool {
+        var ok = true
         self.dataBaseQueue?.inDatabase { db in
             do {
                 if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["AssetSyncTable"]) {
@@ -114,7 +132,7 @@ public class TRXMetricsDBManager: NSObject {
                         tableExist = rs.int(forColumn: "count") > 0
                     }
                     rs.close()
-                    
+
                     if !tableExist {
                         let createSql = """
                         CREATE TABLE IF NOT EXISTS AssetSyncTable (
@@ -130,11 +148,13 @@ public class TRXMetricsDBManager: NSObject {
                             UNIQUE(chain, uId, date)
                         )
                         """
-                        db.executeUpdate(createSql, withArgumentsIn: [])
+                        ok = self.runUpdate(db, createSql)
                     }
                 }
             }
         }
+        if !ok { isDBHealthy = false }
+        return ok
     }
     
     // MARK: - ASSET SYNC TABLE METHODS
@@ -188,12 +208,14 @@ public class TRXMetricsDBManager: NSObject {
         return db.executeUpdate(sql, withArgumentsIn: args)
     }
 
-    public func deleteAssetsBeforeToday(forChain chain: String) {
+    @discardableResult
+    public func deleteAssetsBeforeToday(forChain chain: String) -> Bool {
         let today = Date().tronCore_getCurrentYMD_UTC()
+        var ok = false
         self.dataBaseQueue?.inDatabase { db in
-            let sql = "DELETE FROM AssetSyncTable WHERE chain = ? AND date < ?"
-            db.executeUpdate(sql, withArgumentsIn: [chain, today])
+            ok = self.runUpdate(db, "DELETE FROM AssetSyncTable WHERE chain = ? AND date < ?", [chain, today])
         }
+        return ok
     }
     
     public func getUpdatedAssetSyncModels(forChain chain: String) -> [TRXAssetSyncModel] {
@@ -361,7 +383,9 @@ public class TRXMetricsDBManager: NSObject {
     }
     
     // MARK: - TRANSACTION SYNC TABLE CREATION
-    public func createTransactionSyncTable() {
+    @discardableResult
+    public func createTransactionSyncTable() -> Bool {
+        var ok = true
         self.dataBaseQueue?.inDatabase { db in
             do {
                 if let rs = try? db.executeQuery("SELECT count(*) as count FROM sqlite_master WHERE type = 'table' and name = ?", values: ["TransactionSyncTable"]) {
@@ -370,7 +394,7 @@ public class TRXMetricsDBManager: NSObject {
                         tableExist = rs.int(forColumn: "count") > 0
                     }
                     rs.close()
-                    
+
                     if !tableExist {
                         let createSql = """
                         CREATE TABLE IF NOT EXISTS TransactionSyncTable (
@@ -399,11 +423,13 @@ public class TRXMetricsDBManager: NSObject {
                             UNIQUE(chain, uId, actionType, tokenAddress, date)
                         )
                         """
-                        db.executeUpdate(createSql, withArgumentsIn: [])
+                        ok = self.runUpdate(db, createSql)
                     }
                 }
             }
         }
+        if !ok { isDBHealthy = false }
+        return ok
     }
     
     // MARK: - TRANSACTION SYNC TABLE METHODS
@@ -472,12 +498,14 @@ public class TRXMetricsDBManager: NSObject {
         return db.executeUpdate(sql, withArgumentsIn: args)
     }
 
-    public func deleteTransactionSyncBeforeToday(forChain chain: String) {
+    @discardableResult
+    public func deleteTransactionSyncBeforeToday(forChain chain: String) -> Bool {
         let today = Date().tronCore_getCurrentYMD_UTC()
+        var ok = false
         self.dataBaseQueue?.inDatabase { db in
-            let sql = "DELETE FROM TransactionSyncTable WHERE chain = ? AND date < ?"
-            db.executeUpdate(sql, withArgumentsIn: [chain, today])
+            ok = self.runUpdate(db, "DELETE FROM TransactionSyncTable WHERE chain = ? AND date < ?", [chain, today])
         }
+        return ok
     }
 
     public func getUpdatedTransactionSyncModels(forChain chain: String) -> [TRXTransactionSyncModel] {
@@ -590,7 +618,9 @@ public class TRXMetricsDBManager: NSObject {
 
     // MARK: - ADDRESS MAP TABLE
 
-    public func createAddressMapTable() {
+    @discardableResult
+    public func createAddressMapTable() -> Bool {
+        var ok = false
         dataBaseQueue?.inDatabase { db in
             let sql = """
             CREATE TABLE IF NOT EXISTS AddressMapTable (
@@ -598,8 +628,10 @@ public class TRXMetricsDBManager: NSObject {
                 uuid TEXT NOT NULL
             )
             """
-            db.executeUpdate(sql, withArgumentsIn: [])
+            ok = self.runUpdate(db, sql)
         }
+        if !ok { isDBHealthy = false }
+        return ok
     }
 
     /// Replaces all address→uuid mappings atomically. Returns true on success.
