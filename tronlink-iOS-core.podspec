@@ -24,18 +24,14 @@ Pod::Spec.new do |s|
    s.dependency 'FMDB', '2.7.5'
    
    s.requires_arc = false
-   s.requires_arc = [       "tronlink-iOS-core/Classes/gRPC/google/api/HTTP.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/Discover.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/TronInventoryItems.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/AccountContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/AssetIssueContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/BalanceContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/ExchangeContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/MarketContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/ProposalContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/ShieldContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/StorageContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/VoteAssetContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/WitnessContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/Api.pbrpc.m"]
+   grpc_arc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.m']
+   grpc_mrc_files = [
+      'tronlink-iOS-core/Classes/gRPC/api/*.pbobjc.m',
+      'tronlink-iOS-core/Classes/gRPC/google/protobuf/*.pbobjc.m',
+      'tronlink-iOS-core/Classes/gRPC/google/api/Annotations.pbobjc.m',
+      'tronlink-iOS-core/Classes/gRPC/core/Tron.pbobjc.m',
+      'tronlink-iOS-core/Classes/gRPC/core/contract/SmartContract.pbobjc.m',
+      'tronlink-iOS-core/Classes/gRPC/core/contract/Common.pbobjc.m'
+   ].flat_map { |pattern| Dir[pattern] }
+   s.requires_arc = grpc_arc_files - grpc_mrc_files
 end
