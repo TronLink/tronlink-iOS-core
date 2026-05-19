@@ -177,7 +177,7 @@ public class TRXStatisticalUploadManager: NSObject {
     
     func makeTransactionSyncModel(actionType:Int, count:Int, tokenAddress:String, tokenAmount:String, totalTokenAmount:String,
                                   energy:String, bandwidth:String, burn:String, updated:Bool, localModel:TRXTransactionSyncModel) -> TRXTransactionSyncModel {
-        var model = TRXTransactionSyncModel()
+        let model = TRXTransactionSyncModel()
         let address = dataConfig?.walletAddress ?? ""
         model.uId = TRXAddressMapManager.shared.id(for: address)
         model.idType = dataConfig?.uploadWalletType ?? 0
