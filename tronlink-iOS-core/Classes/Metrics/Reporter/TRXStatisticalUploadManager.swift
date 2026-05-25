@@ -287,7 +287,8 @@ public class TRXStatisticalUploadManager: NSObject {
         }
         let ts = headers["ts"] ?? ""
         let sig = signature.removingPercentEncoding ?? signature
-        let newParams: [String: String] = parameters.mapValues { value in
+        var newParams: [String: String] = [:]
+        for (key, value) in parameters {
             let plain: String = {
                 if let s = value as? String { return s }
                 if JSONSerialization.isValidJSONObject(value) {
@@ -299,7 +300,11 @@ public class TRXStatisticalUploadManager: NSObject {
                 return "\(value)"
             }()
             let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: sig, ts: ts, plaintext: plain)
-            return encryptedP
+            if encryptedP.isEmpty {
+                NSLog("[Metrics] skip parameter due to AES encrypt failure: %@", key)
+                continue
+            }
+            newParams[key] = encryptedP
         }
         return newParams
     }
