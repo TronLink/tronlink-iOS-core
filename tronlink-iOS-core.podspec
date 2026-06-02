@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'tronlink-iOS-core'
-  s.version          = '1.0.5'
+  s.version          = '1.0.6'
   s.summary          = 'tronlink-iOS-core is repo of TronLink'
   s.module_name      = 'TLCore'
 
@@ -24,18 +24,7 @@ Pod::Spec.new do |s|
    s.dependency 'FMDB', '2.7.5'
    
    s.requires_arc = false
-   s.requires_arc = [       "tronlink-iOS-core/Classes/gRPC/google/api/HTTP.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/Discover.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/TronInventoryItems.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/AccountContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/AssetIssueContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/BalanceContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/ExchangeContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/MarketContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/ProposalContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/ShieldContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/StorageContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/VoteAssetContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/core/contract/WitnessContract.pbobjc.m",
-   "tronlink-iOS-core/Classes/gRPC/Api.pbrpc.m"]
+   grpc_arc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.m']
+   grpc_mrc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.pbobjc.m']
+   s.requires_arc = grpc_arc_files - grpc_mrc_files
 end

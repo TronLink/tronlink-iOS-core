@@ -6,9 +6,8 @@ class TRXStatisticalUploadViewModel: NSObject {
                                failure: @escaping ()->()) {
         let x = self.buildAssetParameter(from: assets)
         var params: [String: Any] = ["X": x]
-        if transactions.count > 0 {
-            let y = self.buildTransactionsParameter(from: transactions)
-            params = ["X": x,"Y": y]
+        if !transactions.isEmpty {
+            params["Y"] = self.buildTransactionsParameter(from: transactions)
         }
         var visible = false
         if let v = UserDefaults.standard.object(forKey: Metrics_Statistical_Upload_Visible_Key) as? Bool {

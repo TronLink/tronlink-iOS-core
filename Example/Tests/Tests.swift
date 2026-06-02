@@ -174,7 +174,7 @@ class Tests: XCTestCase {
                 }
                 
                 // sign v2
-                let messageSignV2: TLMessageSignV2Type = .SIGN_MESSAGE_V2_STRING
+                let messageSignV2: TLMessageSignV2Type = .string
                 let result2 = TLWalletCore.signStringV2(keyStore: self.keyStore, unSignedString: unSignedString, password: self.password, address: walletAddress, messageSignV2)
                 print("sign v2: \(result2)")
                 switch result2 {
