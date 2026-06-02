@@ -43,21 +43,20 @@ public extension String {
     }
     
     func convertBase58HexAddressToTronAddress() -> String {
-        return String.init(base58CheckEncoding: self.hexStringToUTF8Data() ?? Data())
+        return String.init(base58CheckEncoding: self.hexDecodedData() ?? Data())
     }
         
-    func hexStringToUTF8Data() -> Data? {
+    func hexDecodedData() -> Data? {
         var data = Data(capacity: self.count / 2)
         
-        String.hexByteRegex.enumerateMatches(in: self, range: NSMakeRange(0, utf16.count)) { match, flags, stop in
-            let byteString = (self as NSString).substring(with: match!.range)
+        String.hexByteRegex.enumerateMatches(in: self, range: NSMakeRange(0, utf16.count)) { match, _, _ in
+            guard let range = match?.range else { return }
+            let byteString = (self as NSString).substring(with: range)
             guard var num = UInt8(byteString, radix: 16) else { return }
             data.append(&num, count: 1)
         }
         
-        guard data.count > 0 else { return nil }
-        
-        return data
+        return data.isEmpty ? nil : data
     }
     
     func isEIP712TronAddress() -> Bool {

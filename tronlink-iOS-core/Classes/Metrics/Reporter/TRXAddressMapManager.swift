@@ -7,6 +7,8 @@ public final class TRXAddressMapManager {
     private var mapping: [String: String] = [:]   // address -> id (UUID string)
     private var usedIds: Set<String> = []        // Quick duplicate check
     private let queue = DispatchQueue(label: "com.tron.wallet.AddressMapManager", attributes: .concurrent)
+    private let persistenceQueue = DispatchQueue(label: "com.tron.wallet.AddressMapManager.persistence")
+    private var pendingMappingsSnapshot: [String: String]?
 
     private init() {
         // Migrate legacy UserDefaults data to FMDB on first launch after upgrade.
@@ -47,8 +49,8 @@ public final class TRXAddressMapManager {
                 DispatchQueue.main.async { cb() }
             }
             if let snap = snapshot {
-                DispatchQueue.global(qos: .utility).async {
-                    TRXMetricsDBManager.shared.saveAddressMappings(snap)
+                self.persistenceQueue.async {
+                    self.persistMapping(snap)
                 }
             }
         }
@@ -61,25 +63,17 @@ public final class TRXAddressMapManager {
         queue.sync { existing = mapping[normalized] }
         if let v = existing { return v }
 
-        var result = ""
-        var needsSave = false
+        var result = Self.generateUUIDFull()
         // Only mutate in-memory state inside the sync barrier (fast, no I/O).
         // The queue lock is released as soon as the barrier block returns.
         queue.sync(flags: .barrier) {
             if let v = self.mapping[normalized] { result = v; return }
-            var candidate = Self.generateUUIDFull()
-            while self.usedIds.contains(candidate) { candidate = Self.generateUUIDFull() }
-            self.mapping[normalized] = candidate
-            self.usedIds.insert(candidate)
-            result = candidate
-            needsSave = true
-        }
-        // Persist asynchronously on a background queue so the caller's thread
-        // (potentially main) is never blocked by FMDB I/O, and the mapping queue
-        // remains available to other readers/writers during the disk write.
-        if needsSave {
-            DispatchQueue.global(qos: .utility).async {
-                TRXMetricsDBManager.shared.saveAddressMappings(self.allMappings())
+            while self.usedIds.contains(result) { result = Self.generateUUIDFull() }
+            self.mapping[normalized] = result
+            self.usedIds.insert(result)
+            let snapshot = self.mapping
+            self.persistenceQueue.async {
+                self.persistMapping(snapshot)
             }
         }
         return result
@@ -92,8 +86,8 @@ public final class TRXAddressMapManager {
             guard let id = self.mapping.removeValue(forKey: normalized) else { return }
             self.usedIds.remove(id)
             let snapshot = self.mapping
-            DispatchQueue.global(qos: .utility).async {
-                TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
+            self.persistenceQueue.async {
+                self.persistMapping(snapshot)
             }
         }
     }
@@ -103,8 +97,8 @@ public final class TRXAddressMapManager {
             self.mapping.removeAll()
             self.usedIds.removeAll()
             let snapshot = self.mapping
-            DispatchQueue.global(qos: .utility).async {
-                TRXMetricsDBManager.shared.saveAddressMappings(snapshot)
+            self.persistenceQueue.async {
+                self.persistMapping(snapshot)
             }
         }
     }
@@ -121,6 +115,21 @@ public final class TRXAddressMapManager {
     }
 
     private static func normalizeAddress(_ addr: String) -> String {
-        return addr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = addr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+        return trimmed
+    }
+
+    private func persistMapping(_ snapshot: [String: String]) {
+        if let pending = pendingMappingsSnapshot {
+            NSLog("[AddressMap] retrying save, %d entries pending", pending.count)
+        }
+
+        if TRXMetricsDBManager.shared.saveAddressMappings(snapshot) {
+            pendingMappingsSnapshot = nil
+        } else {
+            pendingMappingsSnapshot = snapshot
+            NSLog("[AddressMap] save failed, %d entries pending", pendingMappingsSnapshot?.count ?? 0)
+        }
     }
 }

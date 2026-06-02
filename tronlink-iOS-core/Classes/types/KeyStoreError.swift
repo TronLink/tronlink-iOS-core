@@ -12,6 +12,7 @@ public enum KeystoreError: LocalizedError {
     case invalidPrivateKey
     case failedToParseJSON
     case accountNotFound
+    case invalidSignInput
     case failedToSignMessage
     case failedToSignTypedMessage
     case failedToExportPrivateKey
@@ -46,6 +47,8 @@ public enum KeystoreError: LocalizedError {
             return "Failed to parse key JSON"
         case .accountNotFound:
             return "TrustKeystore.Account not found"
+        case .invalidSignInput:
+            return "Invalid sign input"
         case .failedToSignMessage:
             return "Failed to sign message"
         case .failedToSignTypedMessage:

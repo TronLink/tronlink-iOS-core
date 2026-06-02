@@ -20,7 +20,7 @@ public extension Data {
     }
     
     func sha256T() -> Data {
-      Data(Digest.sha256(bytes))
+      return Data(Digest.sha256(bytes))
     }
     
     var bytesT: Array<UInt8> {
