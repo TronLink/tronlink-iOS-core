@@ -61,6 +61,15 @@ class Tests: XCTestCase {
         // This is an example of a functional test case.
         XCTAssert(true, "Pass")
     }
+
+    func testBase58CheckRoundTripWithFlickrAlphabet() {
+        let payload = Data([0x00, 0x41, 0x88, 0xff, 0x10, 0x7c, 0x23, 0x5a])
+        let encoded = String(base58CheckEncoding: payload, alphabet: Base58String.flickrAlphabet)
+        let decoded = Data(base58CheckDecoding: encoded, alphabet: Base58String.flickrAlphabet)
+
+        XCTAssertNotEqual(encoded, String(base58CheckEncoding: payload))
+        XCTAssertEqual(decoded, payload)
+    }
     
     func testPerformanceExample() {
         // This is an example of a performance test case.

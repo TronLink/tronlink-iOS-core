@@ -62,7 +62,7 @@ public extension Data {
     
     init?(base58CheckDecoding string: String, alphabet: [UInt8] = Base58String.btcAlphabet) {
         
-        let data = Data(base58Decoding: string)
+        let data = Data(base58Decoding: string, alphabet: alphabet)
         guard let decodeCheck = data, decodeCheck.count >= 4 else {
             return nil
         }
