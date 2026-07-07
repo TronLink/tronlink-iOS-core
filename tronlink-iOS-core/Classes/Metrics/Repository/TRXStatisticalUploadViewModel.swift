@@ -34,8 +34,8 @@ class TRXStatisticalUploadViewModel: NSObject {
             fields.append("V1X")
             fields.append(fmt(m.uId))
             fields.append(fmtInt(m.idType))
-            fields.append(fmt(m.trxBalance))
-            fields.append(fmt(m.usdtBalance))
+            fields.append(formatReportNumber(m.trxBalance))
+            fields.append(formatReportNumber(m.usdtBalance))
             fields.append(fmt(m.usdBalance))
             fields.append(fmt(m.date))
             
@@ -102,5 +102,49 @@ class TRXStatisticalUploadViewModel: NSObject {
     fileprivate func fmtInt(_ v: Int?) -> String {
         guard let v = v else { return "" }
         return String(v)
+    }
+
+    fileprivate func formatReportNumber(_ value: String?) -> String {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              value.count > 0,
+              value.tronCore_isPureNumber() else {
+            return "0"
+        }
+        let number = NSDecimalNumber(string: value)
+        guard number != .notANumber else { return "0" }
+        let precision = reportNumberPrecision(for: number)
+        let quotient = number.dividing(by: precision)
+        let floored = quotient.rounding(accordingToBehavior: Self.reportNumberFloorBehavior)
+        return floored
+            .multiplying(by: precision)
+            .rounding(accordingToBehavior: Self.reportNumberDecimalBehavior)
+            .stringValue
+            .tronCore_removeFloatSuffixZero()
+    }
+
+    private static let reportNumberFloorBehavior = NSDecimalNumberHandler(roundingMode: .down,
+                                                                          scale: 0,
+                                                                          raiseOnExactness: false,
+                                                                          raiseOnOverflow: false,
+                                                                          raiseOnUnderflow: false,
+                                                                          raiseOnDivideByZero: false)
+    private static let reportNumberDecimalBehavior = NSDecimalNumberHandler(roundingMode: .down,
+                                                                            scale: 1,
+                                                                            raiseOnExactness: false,
+                                                                            raiseOnOverflow: false,
+                                                                            raiseOnUnderflow: false,
+                                                                            raiseOnDivideByZero: false)
+    private static let reportNumberMinPrecision = NSDecimalNumber(string: "0.1")
+    private static let reportNumberBaseUpperBound = NSDecimalNumber(string: "100")
+    private static let reportNumberTen = NSDecimalNumber(string: "10")
+
+    fileprivate func reportNumberPrecision(for number: NSDecimalNumber) -> NSDecimalNumber {
+        var upperBound = Self.reportNumberBaseUpperBound
+        var precision = Self.reportNumberMinPrecision
+        while number.compare(upperBound) != .orderedAscending {
+            upperBound = upperBound.multiplying(by: Self.reportNumberTen)
+            precision = precision.multiplying(by: Self.reportNumberTen)
+        }
+        return precision
     }
 }
