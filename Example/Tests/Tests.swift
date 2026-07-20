@@ -113,6 +113,26 @@ class Tests: XCTestCase {
         XCTAssertEqual(config.uploadCallCount, 0)
     }
 
+    func testMetricsParameterEncryptionFailsClosed() {
+        let manager = TRXStatisticalUploadManager.shared
+        let signature = String(repeating: "a", count: 40)
+        let request = "https://example.com/upload?signature=\(signature)"
+
+        XCTAssertThrowsError(try manager.parameterProcessing(parameters: ["X": "plain"],
+                                                             requestString: "https://example.com/upload",
+                                                             headers: ["ts": "1712345678901"]))
+        XCTAssertThrowsError(try manager.parameterProcessing(parameters: ["X": "plain"],
+                                                             requestString: request,
+                                                             headers: [:]))
+        XCTAssertThrowsError(try manager.parameterProcessing(parameters: ["X": "plain"],
+                                                             requestString: "https://example.com/upload?signature=invalid",
+                                                             headers: ["ts": "1712345678901"]))
+        XCTAssertEqual((try? manager.parameterProcessing(parameters: ["X": "plain"],
+                                                         requestString: request,
+                                                         headers: ["ts": "1712345678901"]))?.count,
+                       1)
+    }
+
     func testBase58CheckRoundTripWithFlickrAlphabet() {
         let payload = Data([0x00, 0x41, 0x88, 0xff, 0x10, 0x7c, 0x23, 0x5a])
         let encoded = String(base58CheckEncoding: payload, alphabet: Base58String.flickrAlphabet)

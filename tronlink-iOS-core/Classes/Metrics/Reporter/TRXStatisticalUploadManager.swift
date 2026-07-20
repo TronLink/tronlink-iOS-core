@@ -3,6 +3,11 @@ import Foundation
 let Metrics_Statistical_Upload_Visible_Key = "TRXStatisticalUploadVisibleKey"
 
 public class TRXStatisticalUploadManager: NSObject {
+    public enum ParameterProcessingError: Error {
+        case invalidEncryptionInputs
+        case encryptionFailed
+    }
+
     @objc public static let shared = TRXStatisticalUploadManager()
     private static let amountBuckets: [(threshold: NSDecimalNumber, idx: Int)] = [
         (NSDecimalNumber(string: "1"), 0),
@@ -287,15 +292,20 @@ public class TRXStatisticalUploadManager: NSObject {
 
     
     
-    public func parameterProcessing(parameters: [String: Any], requestString: String, headers: [String: String]) -> [String: Any] {
-        var signature = ""
-        if let url = URL(string: requestString),
-           let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let value = comps.queryItems?.first(where: { $0.name.lowercased() == "signature" })?.value {
-            signature = value
+    public func parameterProcessing(parameters: [String: Any], requestString: String, headers: [String: String]) throws -> [String: Any] {
+        let hexCharacters = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        let decimalCharacters = CharacterSet(charactersIn: "0123456789")
+        guard let url = URL(string: requestString),
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let signature = comps.queryItems?.first(where: { $0.name.lowercased() == "signature" })?.value,
+              signature.count == 40,
+              signature.rangeOfCharacter(from: hexCharacters.inverted) == nil,
+              let ts = headers["ts"],
+              ts.count == 13,
+              ts.rangeOfCharacter(from: decimalCharacters.inverted) == nil else {
+            NSLog("[Metrics] skip request due to invalid encryption inputs")
+            throw ParameterProcessingError.invalidEncryptionInputs
         }
-        let ts = headers["ts"] ?? ""
-        let sig = signature.removingPercentEncoding ?? signature
         var newParams: [String: String] = [:]
         for (key, value) in parameters {
             let plain: String = {
@@ -308,10 +318,10 @@ public class TRXStatisticalUploadManager: NSObject {
                 }
                 return "\(value)"
             }()
-            let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: sig, ts: ts, plaintext: plain)
+            let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: signature, ts: ts, plaintext: plain)
             if encryptedP.isEmpty {
-                NSLog("[Metrics] skip parameter due to AES encrypt failure: %@", key)
-                continue
+                NSLog("[Metrics] skip request due to AES encrypt failure: %@", key)
+                throw ParameterProcessingError.encryptionFailed
             }
             newParams[key] = encryptedP
         }
