@@ -46,8 +46,11 @@ public class TRXStatisticalUploadManager: NSObject {
     }
 
     func isCurrentCollectionConfig(_ config: TRXMetricsDataSource, chain: String, walletAddress: String) -> Bool {
-        guard let currentConfig = dataConfig, currentConfig === config else { return false }
-        return !isCollectionDisabled(config) && config.environmentKey == chain && config.walletAddress == walletAddress
+        // Compare by value (chain/address) instead of object identity, since the host may
+        // legitimately replace dataConfig with a new instance carrying the same chain/address.
+        guard let currentConfig = dataConfig, !isCollectionDisabled(currentConfig) else { return false }
+        return currentConfig.environmentKey == chain && currentConfig.walletAddress == walletAddress &&
+            config.environmentKey == chain && config.walletAddress == walletAddress
     }
     
     
