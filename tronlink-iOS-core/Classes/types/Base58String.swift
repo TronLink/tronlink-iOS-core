@@ -4,11 +4,18 @@ import BigInt
 public enum Base58String {
     public static let btcAlphabet = [UInt8]("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".utf8)
     public static let flickrAlphabet = [UInt8]("123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ".utf8)
+
+    fileprivate static func isValidAlphabet(_ alphabet: [UInt8]) -> Bool {
+        return alphabet.count == 58 && Set(alphabet).count == 58 && !alphabet.contains(where: { $0 > 0x7f })
+    }
 }
 
 public extension String {
     
     init(base58Encoding bytes: Data, alphabet: [UInt8] = Base58String.btcAlphabet) {
+        precondition(Base58String.isValidAlphabet(alphabet),
+                     "Base58 alphabet must contain 58 unique single-byte characters")
+
         var x = BigUInt(bytes)
         let radix = BigUInt(alphabet.count)
 
@@ -27,8 +34,16 @@ public extension String {
 
         self = String(decoding: answer, as: UTF8.self)
     }
+
+    init?(base58Encoding bytes: Data, validatingAlphabet alphabet: [UInt8]) {
+        guard Base58String.isValidAlphabet(alphabet) else { return nil }
+        self.init(base58Encoding: bytes, alphabet: alphabet)
+    }
     
     init(base58CheckEncoding bytes: Data, alphabet: [UInt8] = Base58String.btcAlphabet) {
+        precondition(Base58String.isValidAlphabet(alphabet),
+                     "Base58 alphabet must contain 58 unique single-byte characters")
+
         let hash0 = bytes.sha256T()
         let hash1 = hash0.sha256T()
         var inputCheck = Data()
@@ -37,11 +52,18 @@ public extension String {
         self = String.init(base58Encoding: inputCheck, alphabet: alphabet)
     }
 
+    init?(base58CheckEncoding bytes: Data, validatingAlphabet alphabet: [UInt8]) {
+        guard Base58String.isValidAlphabet(alphabet) else { return nil }
+        self.init(base58CheckEncoding: bytes, alphabet: alphabet)
+    }
+
 }
 
 public extension Data {
 
     init?(base58Decoding string: String, alphabet: [UInt8] = Base58String.btcAlphabet) {
+        guard Base58String.isValidAlphabet(alphabet) else { return nil }
+
         var answer = BigUInt(0)
         var j = BigUInt(1)
         let radix = BigUInt(alphabet.count)

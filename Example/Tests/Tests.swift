@@ -141,6 +141,26 @@ class Tests: XCTestCase {
         XCTAssertNotEqual(encoded, String(base58CheckEncoding: payload))
         XCTAssertEqual(decoded, payload)
     }
+
+    func testBase58RejectsInvalidAlphabets() {
+        let payload = Data([0x00, 0x41])
+        let invalidAlphabets = [
+            [UInt8](),
+            [UInt8](repeating: 0x31, count: 1),
+            [UInt8](repeating: 0x31, count: 58),
+            Array(Base58String.btcAlphabet.dropLast()) + [0x80]
+        ]
+
+        XCTAssertNotNil(String(base58Encoding: payload, validatingAlphabet: Base58String.flickrAlphabet))
+        XCTAssertNotNil(String(base58CheckEncoding: payload, validatingAlphabet: Base58String.flickrAlphabet))
+
+        for alphabet in invalidAlphabets {
+            XCTAssertNil(String(base58Encoding: payload, validatingAlphabet: alphabet))
+            XCTAssertNil(String(base58CheckEncoding: payload, validatingAlphabet: alphabet))
+            XCTAssertNil(Data(base58Decoding: "1", alphabet: alphabet))
+            XCTAssertNil(Data(base58CheckDecoding: "1", alphabet: alphabet))
+        }
+    }
     
     func testPerformanceExample() {
         // This is an example of a performance test case.
