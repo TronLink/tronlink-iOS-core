@@ -2,6 +2,9 @@ class TRXStatisticalUploadViewModel: NSObject {
     //MARK: -Upload
     func uploadStatisticalDatabase(assets:[TRXAssetSyncModel],
                                transactions:[TRXTransactionSyncModel],
+                               dataConfig: TRXMetricsDataSource,
+                               chain: String,
+                               walletAddress: String,
                                success: @escaping (Bool,Bool) -> (),
                                failure: @escaping ()->()) {
         let x = self.buildAssetParameter(from: assets)
@@ -14,7 +17,9 @@ class TRXStatisticalUploadViewModel: NSObject {
             visible = v
         }
         
-        guard let dataConfig = TRXStatisticalUploadManager.shared.dataConfig else {
+        guard TRXStatisticalUploadManager.shared.isCurrentCollectionConfig(dataConfig,
+                                                                            chain: chain,
+                                                                            walletAddress: walletAddress) else {
             failure()
             return
         }

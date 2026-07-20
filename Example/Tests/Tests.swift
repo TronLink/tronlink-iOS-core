@@ -1,5 +1,5 @@
 import XCTest
-import TLCore
+@testable import TLCore
 import TronKeystore
 
 class Tests: XCTestCase {
@@ -60,6 +60,57 @@ class Tests: XCTestCase {
     func testExample() {
         // This is an example of a functional test case.
         XCTAssert(true, "Pass")
+    }
+
+    func testMetricsCollectionFailsClosed() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+
+        XCTAssertTrue(manager.isCollectionDisabled(nil))
+        XCTAssertFalse(manager.isCollectionDisabled(config))
+
+        config.isShastaEnvironment = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isShastaEnvironment = false
+
+        config.isWatchWallet = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isWatchWallet = false
+
+        config.isBasicFunctionOpen = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isBasicFunctionOpen = false
+
+        config.isTokenCloudSyncClose = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isTokenCloudSyncClose = false
+
+        config.environmentKey = ""
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.environmentKey = "MainNet"
+
+        config.walletAddress = ""
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+    }
+
+    func testMetricsUploadRechecksConfigBeforeNetwork() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        manager.dataConfig = config
+        defer { manager.dataConfig = nil }
+
+        config.isTokenCloudSyncClose = true
+        var failed = false
+        TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: [],
+                                                                  transactions: [],
+                                                                  dataConfig: config,
+                                                                  chain: "MainNet",
+                                                                  walletAddress: "TTestAddress",
+                                                                  success: { _, _ in XCTFail("Disabled metrics must not upload") },
+                                                                  failure: { failed = true })
+
+        XCTAssertTrue(failed)
+        XCTAssertEqual(config.uploadCallCount, 0)
     }
 
     func testBase58CheckRoundTripWithFlickrAlphabet() {
@@ -262,4 +313,23 @@ class Tests: XCTestCase {
         wait(for: [exp], timeout: 60)
     }
 
+}
+
+private final class MetricsDataSourceStub: TRXMetricsDataSource {
+    var environmentKey = "MainNet"
+    var isShastaEnvironment = false
+    var isWatchWallet = false
+    var isBasicFunctionOpen = false
+    var isTokenCloudSyncClose = false
+    var walletAddress = "TTestAddress"
+    var uploadWalletType = 0
+    var usdtContractAddress = "TUSDT"
+    var isOnlineEnvironment = true
+    var isPreReleaseEnvironment = false
+    private(set) var uploadCallCount = 0
+
+    func uploadStatisticalData(parameters: [String: Any], visible: Bool, success: @escaping (Bool, Bool) -> Void,
+                               failure: @escaping () -> Void) {
+        uploadCallCount += 1
+    }
 }
