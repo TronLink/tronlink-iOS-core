@@ -251,6 +251,35 @@ class Tests: XCTestCase {
         }
         wait(for: [exp], timeout: 60)
     }
+
+    func testSignTransactionAddsOneSignaturePerSigner() throws {
+        let firstAccount = try keyStore.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        let secondAccount = try keyStore.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        let transaction = TronTransaction()
+        let rawData = Transaction_raw()
+        rawData.contractArray = [Transaction_Contract(), Transaction_Contract()]
+        transaction.rawData = rawData
+
+        let firstAddress = String(base58CheckEncoding: firstAccount.address.data)
+        guard case .success = TLWalletCore.signTranscation(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
+            return XCTFail("First signer failed")
+        }
+        XCTAssertEqual(transaction.signatureArray.count, 1)
+
+        transaction.signatureArray.add(transaction.signatureArray[0])
+        XCTAssertEqual(transaction.signatureArray.count, 2)
+
+        let secondAddress = String(base58CheckEncoding: secondAccount.address.data)
+        guard case .success = TLWalletCore.signTranscation(keyStore: keyStore, transaction: transaction, password: password, address: secondAddress) else {
+            return XCTFail("Second signer failed")
+        }
+        XCTAssertEqual(transaction.signatureArray.count, 2)
+
+        guard case .success = TLWalletCore.signTranscation(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
+            return XCTFail("Repeated signer failed")
+        }
+        XCTAssertEqual(transaction.signatureArray.count, 2)
+    }
     
     // Sign String
     func testSignMessage() {

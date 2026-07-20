@@ -78,36 +78,52 @@ public class TLWalletCore: NSObject {
             return .failure(KeystoreError.failedToSignTransaction)
         }
 
-        if let hash: Data = transaction.rawData.data()?.sha256T(), let list = transaction.rawData.contractArray, list.count > 0 {
-            var collectedSignatures: [Data] = []
-            for _ in list {
-                var newHash: Data = hash
-                if !dappChainId.isEmpty {
-                    if let mainGateData = Data(hexString: dappChainId) {
-                        newHash.append(mainGateData)
-                        newHash = newHash.sha256T()
-                    }
-                }
-                do {
-                    var data = try keyStore.signHash(newHash, account: account, password: password)
-                    guard data.count >= 65 else {
-                        return .failure(KeystoreError.failedToSignTransaction)
-                    }
-                    if data[64] >= 27 {
-                        data[64] -= 27
-                    }
-                    collectedSignatures.append(data)
-                } catch let err as KeystoreError {
-                    return .failure(err)
-                } catch {
-                    NSLog("[Sign] unknown error: %@", String(describing: error))
-                    return .failure(.failedToSignTransaction)
-                }
-            }
-            collectedSignatures.forEach { transaction.signatureArray.add($0 as Any) }
-            return .success(transaction)
-        } else {
+        guard let hash: Data = transaction.rawData.data()?.sha256T(),
+              let contracts = transaction.rawData.contractArray,
+              !contracts.isEmpty else {
             return .failure(KeystoreError.failedToParseJSON)
+        }
+
+        var newHash: Data = hash
+        if !dappChainId.isEmpty, let mainGateData = Data(hexString: dappChainId) {
+            newHash.append(mainGateData)
+            newHash = newHash.sha256T()
+        }
+
+        var seenSigners = Set<Data>()
+        var duplicateIndexes: [Int] = []
+        var alreadySigned = false
+        for (index, value) in transaction.signatureArray.enumerated() {
+            guard let signature = value as? Data,
+                  let signer = try? Web3.Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
+                continue
+            }
+            alreadySigned = alreadySigned || signer == account.address.data
+            if !seenSigners.insert(signer).inserted {
+                duplicateIndexes.append(index)
+            }
+        }
+        if alreadySigned {
+            duplicateIndexes.reversed().forEach { transaction.signatureArray.removeObject(at: $0) }
+            return .success(transaction)
+        }
+
+        do {
+            var data = try keyStore.signHash(newHash, account: account, password: password)
+            guard data.count >= 65 else {
+                return .failure(KeystoreError.failedToSignTransaction)
+            }
+            if data[64] >= 27 {
+                data[64] -= 27
+            }
+            duplicateIndexes.reversed().forEach { transaction.signatureArray.removeObject(at: $0) }
+            transaction.signatureArray.add(data as Any)
+            return .success(transaction)
+        } catch let err as KeystoreError {
+            return .failure(err)
+        } catch {
+            NSLog("[Sign] unknown error: %@", String(describing: error))
+            return .failure(.failedToSignTransaction)
         }
     }
 
