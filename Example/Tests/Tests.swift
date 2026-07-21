@@ -113,6 +113,25 @@ class Tests: XCTestCase {
         XCTAssertEqual(config.uploadCallCount, 0)
     }
 
+    func testMetricsUploadStopsWhenConfigIsReplaced() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        manager.dataConfig = MetricsDataSourceStub()
+        defer { manager.dataConfig = nil }
+
+        var failed = false
+        TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: [],
+                                                                  transactions: [],
+                                                                  dataConfig: config,
+                                                                  chain: "MainNet",
+                                                                  walletAddress: "TTestAddress",
+                                                                  success: { _, _ in XCTFail("Replaced config must not upload") },
+                                                                  failure: { failed = true })
+
+        XCTAssertTrue(failed)
+        XCTAssertEqual(config.uploadCallCount, 0)
+    }
+
     func testMetricsParameterEncryptionFailsClosed() {
         let manager = TRXStatisticalUploadManager.shared
         let signature = String(repeating: "a", count: 40)
