@@ -300,7 +300,7 @@ class Tests: XCTestCase {
         transaction.rawData = rawData
 
         let firstAddress = String(base58CheckEncoding: firstAccount.address.data)
-        guard case .success = TLWalletCore.signTranscation(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
+        guard case .success = TLWalletCore.signTronTransaction(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
             return XCTFail("First signer failed")
         }
         XCTAssertEqual(transaction.signatureArray.count, 1)
@@ -309,12 +309,12 @@ class Tests: XCTestCase {
         XCTAssertEqual(transaction.signatureArray.count, 2)
 
         let secondAddress = String(base58CheckEncoding: secondAccount.address.data)
-        guard case .success = TLWalletCore.signTranscation(keyStore: keyStore, transaction: transaction, password: password, address: secondAddress) else {
+        guard case .success = TLWalletCore.signTronTransaction(keyStore: keyStore, transaction: transaction, password: password, address: secondAddress) else {
             return XCTFail("Second signer failed")
         }
         XCTAssertEqual(transaction.signatureArray.count, 2)
 
-        guard case .success = TLWalletCore.signTranscation(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
+        guard case .success = TLWalletCore.signTronTransaction(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
             return XCTFail("Repeated signer failed")
         }
         XCTAssertEqual(transaction.signatureArray.count, 2)

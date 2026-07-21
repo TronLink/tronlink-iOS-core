@@ -72,7 +72,7 @@ public class TLWalletCore: NSObject {
     ///   - address: wallet address
     ///   - dappChainId: Optional, defalut is mainChain, dappChainId needs to pass in ChianId
     /// - Returns: signed TronTransaction
-    public static func signTranscation(keyStore: KeyStore, transaction: TronTransaction, password: String, address: String, _ dappChainId: String = "") -> Result<TronTransaction, KeystoreError> {
+    public static func signTronTransaction(keyStore: KeyStore, transaction: TronTransaction, password: String, address: String, _ dappChainId: String = "") -> Result<TronTransaction, KeystoreError> {
         
         guard let account = keyStore.accounts.first(where: { $0.address.data.addressString == address }) else {
             return .failure(KeystoreError.failedToSignTransaction)
