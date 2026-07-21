@@ -118,18 +118,18 @@ class Tests: XCTestCase {
         let signature = String(repeating: "a", count: 40)
         let request = "https://example.com/upload?signature=\(signature)"
 
-        XCTAssertThrowsError(try manager.parameterProcessing(parameters: ["X": "plain"],
-                                                             requestString: "https://example.com/upload",
-                                                             headers: ["ts": "1712345678901"]))
-        XCTAssertThrowsError(try manager.parameterProcessing(parameters: ["X": "plain"],
-                                                             requestString: request,
-                                                             headers: [:]))
-        XCTAssertThrowsError(try manager.parameterProcessing(parameters: ["X": "plain"],
-                                                             requestString: "https://example.com/upload?signature=invalid",
-                                                             headers: ["ts": "1712345678901"]))
-        XCTAssertEqual((try? manager.parameterProcessing(parameters: ["X": "plain"],
-                                                         requestString: request,
-                                                         headers: ["ts": "1712345678901"]))?.count,
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: "https://example.com/upload",
+                                                  headers: ["ts": "1712345678901"]).isEmpty)
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: request,
+                                                  headers: [:]).isEmpty)
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: "https://example.com/upload?signature=invalid",
+                                                  headers: ["ts": "1712345678901"]).isEmpty)
+        XCTAssertEqual(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                   requestString: request,
+                                                   headers: ["ts": "1712345678901"]).count,
                        1)
     }
 

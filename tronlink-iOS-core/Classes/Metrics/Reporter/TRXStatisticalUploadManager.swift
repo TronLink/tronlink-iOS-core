@@ -295,7 +295,7 @@ public class TRXStatisticalUploadManager: NSObject {
 
     
     
-    public func parameterProcessing(parameters: [String: Any], requestString: String, headers: [String: String]) throws -> [String: Any] {
+    public func parameterProcessing(parameters: [String: Any], requestString: String, headers: [String: String]) -> [String: Any] {
         let hexCharacters = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
         let decimalCharacters = CharacterSet(charactersIn: "0123456789")
         guard let url = URL(string: requestString),
@@ -307,7 +307,7 @@ public class TRXStatisticalUploadManager: NSObject {
               ts.count == 13,
               ts.rangeOfCharacter(from: decimalCharacters.inverted) == nil else {
             NSLog("[Metrics] skip request due to invalid encryption inputs")
-            throw ParameterProcessingError.invalidEncryptionInputs
+            return [:]
         }
         var newParams: [String: String] = [:]
         for (key, value) in parameters {
@@ -324,7 +324,7 @@ public class TRXStatisticalUploadManager: NSObject {
             let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: signature, ts: ts, plaintext: plain)
             if encryptedP.isEmpty {
                 NSLog("[Metrics] skip request due to AES encrypt failure: %@", key)
-                throw ParameterProcessingError.encryptionFailed
+                return [:]
             }
             newParams[key] = encryptedP
         }

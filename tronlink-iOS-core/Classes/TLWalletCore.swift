@@ -93,12 +93,13 @@ public class TLWalletCore: NSObject {
         var seenSigners = Set<Data>()
         var duplicateIndexes: [Int] = []
         var alreadySigned = false
+        let accountSigner = Data(account.address.data.suffix(20))
         for (index, value) in transaction.signatureArray.enumerated() {
             guard let signature = value as? Data,
                   let signer = try? Web3.Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
                 continue
             }
-            alreadySigned = alreadySigned || signer == account.address.data
+            alreadySigned = alreadySigned || signer == accountSigner
             if !seenSigners.insert(signer).inserted {
                 duplicateIndexes.append(index)
             }
