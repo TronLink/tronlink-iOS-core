@@ -80,7 +80,7 @@ public class TLWalletCore: NSObject {
 
         guard let hash: Data = transaction.rawData.data()?.sha256T(),
               let contracts = transaction.rawData.contractArray,
-              !contracts.isEmpty else {
+              contracts.count > 0 else {
             return .failure(KeystoreError.failedToParseJSON)
         }
 
