@@ -142,6 +142,26 @@ class Tests: XCTestCase {
         XCTAssertEqual(decoded, payload)
     }
 
+    func testStrictHexAddressConversionRejectsGarbage() {
+        var payload = Data([0x41])
+        payload.append(contentsOf: Array(repeating: UInt8(0x11), count: 20))
+        let hex = payload.map { String(format: "%02x", $0) }.joined()
+
+        let valid = hex.convertBase58HexAddressToTronAddress()
+        XCTAssertFalse(valid.isEmpty)
+        XCTAssertTrue(valid.isTRXAddress())
+        XCTAssertTrue(valid.isEIP712TronAddress())
+        XCTAssertEqual(valid.convertTronAddressToBase58HexAddress().lowercased(), hex)
+
+        XCTAssertEqual("".convertBase58HexAddressToTronAddress(), "")
+        XCTAssertEqual("41".convertBase58HexAddressToTronAddress(), "")
+        XCTAssertEqual("41ZZ\(String(hex.dropFirst(2)))".convertBase58HexAddressToTronAddress(), "")
+        XCTAssertNil("abZZ".hexDecodedData())
+        XCTAssertNil("abc".hexDecodedData())
+        XCTAssertFalse("41notanaddress".isEIP712TronAddress())
+        XCTAssertFalse("Tnotanaddress".isEIP712TronAddress())
+    }
+
     func testBase58RejectsInvalidAlphabets() {
         let payload = Data([0x00, 0x41])
         let invalidAlphabets = [
