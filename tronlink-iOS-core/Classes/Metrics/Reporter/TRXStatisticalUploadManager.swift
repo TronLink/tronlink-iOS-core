@@ -52,51 +52,19 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     //MARK: -assets
-    func getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain chain: String) -> [TRXAssetSyncModel] {
-        let assets = TRXMetricsDBManager.shared.getUpdatedAssetSyncModels(forChain: chain)
-        return assets
+    func getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain chain: String, uId: String) -> [TRXAssetSyncModel] {
+        return TRXMetricsDBManager.shared.getUpdatedAssetSyncModels(forChain: chain, uId: uId)
     }
     
     
-    func upsertAssetDataCompareAndUpsert(model:TRXAssetSyncModel, callBackUpdate:Bool) {
+    public func upsertAssetData(model:TRXAssetSyncModel) {
         guard !isCollectionDisabled(dataConfig) else { return }
-        TRXMetricsDBManager.shared.upsertAssetSync_compareAndUpsert(model: model, callBackUpdate: callBackUpdate)
+        TRXMetricsDBManager.shared.upsertAssetSync_compareAndUpsert(model: model)
     }
     
     
-    public func upsertAssetData(model:TRXAssetSyncModel, callBackUpdate:Bool=false) {
-        guard !isCollectionDisabled(dataConfig) else { return }
-        if callBackUpdate {
-            model.updated = false
-            TRXMetricsDBManager.shared.upsertAssetSync(model: model)
-        }else{
-            let chain = model.chain ?? ""
-            let uId = model.uId ?? ""
-            let date = model.date ?? ""
-            let m = TRXMetricsDBManager.shared.getAssetSyncModel(chain: chain, uId: uId, date: date)
-            if let tm = m {
-                let oldTrxBalance = (tm.trxBalance ?? "").tronCore_removeFloatSuffixZero()
-                let oldUsdtBalance = (tm.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
-                let newTrxBalance = (model.trxBalance ?? "").tronCore_removeFloatSuffixZero()
-                let newUsdtBalance = (model.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
-                if (oldTrxBalance.count > 0 && newTrxBalance.count > 0 && oldTrxBalance != newTrxBalance) ||
-                    (oldUsdtBalance.count > 0 && newUsdtBalance.count > 0 && oldUsdtBalance != newUsdtBalance) {
-                    model.updated = true
-                    TRXMetricsDBManager.shared.upsertAssetSync(model: model)
-                }
-            }else{
-                model.updated = true
-                TRXMetricsDBManager.shared.upsertAssetSync(model: model)
-            }
-        }
-    }
-    
-    
-    func deletedBeforeTodayAssetsData(forChain chain: String) {
-        let assets = TRXMetricsDBManager.shared.getAllAssetSyncModels(forChain: chain)
-        if assets.count > 0 {
-            TRXMetricsDBManager.shared.deleteAssetsBeforeToday(forChain: chain)
-        }
+    func deletedBeforeTodayAssetsData(forChain chain: String, uId: String) {
+        TRXMetricsDBManager.shared.deleteAssetsBeforeToday(forChain: chain, uId: uId)
     }
     
     
@@ -116,16 +84,8 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     //MARK: -Transaction
-    func getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain chain: String) -> [TRXTransactionSyncModel] {
-        let transactions = TRXMetricsDBManager.shared.getUpdatedTransactionSyncModels(forChain: chain)
-        return transactions
-    }
-    
-    
-    //Upload success, update database
-    func callBackUpsertTransactionModel(model:TRXTransactionSyncModel) {
-        model.updated = false
-        TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
+    func getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain chain: String, uId: String) -> [TRXTransactionSyncModel] {
+        return TRXMetricsDBManager.shared.getUpdatedTransactionSyncModels(forChain: chain, uId: uId)
     }
     
     
@@ -176,11 +136,8 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     
-    func deletedBeforeTodayTransactionsData(forChain chain: String) {
-        let transactions = TRXMetricsDBManager.shared.getAllTransactionSyncModels(forChain: chain)
-        if transactions.count > 0 {
-            TRXMetricsDBManager.shared.deleteTransactionSyncBeforeToday(forChain: chain)
-        }
+    func deletedBeforeTodayTransactionsData(forChain chain: String, uId: String) {
+        TRXMetricsDBManager.shared.deleteTransactionSyncBeforeToday(forChain: chain, uId: uId)
     }
     
     
@@ -255,8 +212,9 @@ public class TRXStatisticalUploadManager: NSObject {
     /// Must be called from metricsQueue.
     func uploadStatisticalDataToServer(config: TRXMetricsDataSource, chain: String, walletAddress: String) {
         guard isCurrentCollectionConfig(config, chain: chain, walletAddress: walletAddress) else { return }
-        let assets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain: chain)
-        let transactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain: chain)
+        let uId = TRXAddressMapManager.shared.id(for: walletAddress)
+        let assets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain: chain, uId: uId)
+        let transactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain: chain, uId: uId)
         if assets.count > 0 || transactions.count > 0 {
             TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: assets,
                                                                       transactions: transactions,
@@ -269,16 +227,14 @@ public class TRXStatisticalUploadManager: NSObject {
                 if isUploadSuccess {
                     // Post-upload DB writes go back to the dedicated queue.
                     self.metricsQueue.async {
-                        self.deletedBeforeTodayAssetsData(forChain: chain)
-                        let newAssets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain: chain)
-                        for asset in newAssets {
-                            self.upsertAssetData(model: asset, callBackUpdate: true)
+                        for asset in assets {
+                            TRXMetricsDBManager.shared.acknowledgeUploadedAsset(asset)
                         }
-                        self.deletedBeforeTodayTransactionsData(forChain: chain)
-                        let newTransactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain: chain)
-                        for ts in newTransactions {
-                            self.callBackUpsertTransactionModel(model: ts)
+                        for transaction in transactions {
+                            TRXMetricsDBManager.shared.acknowledgeUploadedTransaction(transaction)
                         }
+                        self.deletedBeforeTodayAssetsData(forChain: chain, uId: uId)
+                        self.deletedBeforeTodayTransactionsData(forChain: chain, uId: uId)
                     }
                 } else {
                     NSLog("[Metrics] server returned isUploadSuccess=false, will retry next cycle")

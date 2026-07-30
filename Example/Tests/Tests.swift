@@ -132,6 +132,151 @@ class Tests: XCTestCase {
         XCTAssertEqual(config.uploadCallCount, 0)
     }
 
+    func testMetricsPendingRecordsAreFilteredByWalletUid() {
+        let chain = "MetricsWalletFilter-\(UUID().uuidString)"
+        let date = "2000-01-01"
+        let db = TRXMetricsDBManager.shared
+        defer {
+            for uId in ["wallet-a", "wallet-b"] {
+                for asset in db.getUpdatedAssetSyncModels(forChain: chain, uId: uId) {
+                    db.acknowledgeUploadedAsset(asset)
+                }
+                for transaction in db.getUpdatedTransactionSyncModels(forChain: chain, uId: uId) {
+                    db.acknowledgeUploadedTransaction(transaction)
+                }
+                db.deleteAssetsBeforeToday(forChain: chain, uId: uId)
+                db.deleteTransactionSyncBeforeToday(forChain: chain, uId: uId)
+            }
+        }
+
+        for uId in ["wallet-a", "wallet-b"] {
+            let asset = TRXAssetSyncModel()
+            asset.chain = chain
+            asset.uId = uId
+            asset.date = date
+            asset.trxBalance = "1"
+            asset.usdtBalance = "1"
+            asset.usdBalance = "2"
+            asset.updated = true
+            XCTAssertTrue(db.upsertAssetSync(model: asset))
+
+            var transaction = TRXTransactionSyncModel()
+            transaction.chain = chain
+            transaction.uId = uId
+            transaction.date = date
+            transaction.actionType = 1
+            transaction.tokenAddress = "_"
+            transaction.count = 1
+            transaction.updated = true
+            XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+        }
+
+        XCTAssertEqual(db.getUpdatedAssetSyncModels(forChain: chain, uId: "wallet-a").compactMap { $0.uId }, ["wallet-a"])
+        XCTAssertEqual(db.getUpdatedTransactionSyncModels(forChain: chain, uId: "wallet-a").compactMap { $0.uId }, ["wallet-a"])
+    }
+
+    func testMetricsAssetUpdatesWhenOnlyUsdBalanceChanges() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        manager.dataConfig = config
+        defer { manager.dataConfig = nil }
+
+        let chain = "MetricsUsdUpdate-\(UUID().uuidString)"
+        let uId = "wallet"
+        let date = "2000-01-01"
+        defer {
+            if let asset = TRXMetricsDBManager.shared.getAssetSyncModel(chain: chain, uId: uId, date: date) {
+                TRXMetricsDBManager.shared.acknowledgeUploadedAsset(asset)
+            }
+            TRXMetricsDBManager.shared.deleteAssetsBeforeToday(forChain: chain, uId: uId)
+        }
+        let original = TRXAssetSyncModel()
+        original.chain = chain
+        original.uId = uId
+        original.date = date
+        original.trxBalance = "1"
+        original.usdtBalance = "1"
+        original.usdBalance = "2"
+        original.updated = false
+        XCTAssertTrue(TRXMetricsDBManager.shared.upsertAssetSync(model: original))
+
+        let changed = TRXAssetSyncModel()
+        changed.chain = chain
+        changed.uId = uId
+        changed.date = date
+        changed.trxBalance = "1"
+        changed.usdtBalance = "1"
+        changed.usdBalance = "3"
+        manager.upsertAssetData(model: changed)
+
+        let stored = TRXMetricsDBManager.shared.getAssetSyncModel(chain: chain, uId: uId, date: date)
+        XCTAssertEqual(stored?.usdBalance, "3")
+        XCTAssertEqual(stored?.updated, true)
+    }
+
+    func testMetricsAcknowledgementPreservesNewerData() {
+        let chain = "MetricsAcknowledgement-\(UUID().uuidString)"
+        let uId = "wallet"
+        let date = "2000-01-01"
+        let db = TRXMetricsDBManager.shared
+        defer {
+            if let asset = db.getAssetSyncModel(chain: chain, uId: uId, date: date) {
+                db.acknowledgeUploadedAsset(asset)
+            }
+            if let transaction = db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date) {
+                db.acknowledgeUploadedTransaction(transaction)
+            }
+            db.deleteAssetsBeforeToday(forChain: chain, uId: uId)
+            db.deleteTransactionSyncBeforeToday(forChain: chain, uId: uId)
+        }
+
+        let asset = TRXAssetSyncModel()
+        asset.chain = chain
+        asset.uId = uId
+        asset.date = date
+        asset.trxBalance = "1"
+        asset.usdtBalance = "1"
+        asset.usdBalance = "2"
+        asset.updated = true
+        XCTAssertTrue(db.upsertAssetSync(model: asset))
+
+        var transaction = TRXTransactionSyncModel()
+        transaction.chain = chain
+        transaction.uId = uId
+        transaction.date = date
+        transaction.actionType = 1
+        transaction.tokenAddress = "_"
+        transaction.count = 1
+        transaction.tokenAmount = "1"
+        transaction.updated = true
+        XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+
+        guard let uploadedAsset = db.getUpdatedAssetSyncModels(forChain: chain, uId: uId).first,
+              let uploadedTransaction = db.getUpdatedTransactionSyncModels(forChain: chain, uId: uId).first else {
+            return XCTFail("Missing upload snapshots")
+        }
+
+        asset.usdBalance = "3"
+        XCTAssertTrue(db.upsertAssetSync(model: asset))
+        transaction.count = 2
+        transaction.tokenAmount = "2"
+        XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+
+        XCTAssertFalse(db.acknowledgeUploadedAsset(uploadedAsset))
+        XCTAssertFalse(db.acknowledgeUploadedTransaction(uploadedTransaction))
+        XCTAssertEqual(db.getAssetSyncModel(chain: chain, uId: uId, date: date)?.updated, true)
+        XCTAssertEqual(db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date)?.updated, true)
+
+        guard let currentAsset = db.getAssetSyncModel(chain: chain, uId: uId, date: date),
+              let currentTransaction = db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date) else {
+            return XCTFail("Missing current records")
+        }
+        XCTAssertTrue(db.acknowledgeUploadedAsset(currentAsset))
+        XCTAssertTrue(db.acknowledgeUploadedTransaction(currentTransaction))
+        XCTAssertEqual(db.getAssetSyncModel(chain: chain, uId: uId, date: date)?.updated, false)
+        XCTAssertEqual(db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date)?.updated, false)
+    }
+
     func testMetricsParameterEncryptionFailsClosed() {
         let manager = TRXStatisticalUploadManager.shared
         let signature = String(repeating: "a", count: 40)
