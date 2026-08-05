@@ -112,9 +112,12 @@ class TRXStatisticalUploadViewModel: NSObject {
     fileprivate func formatReportNumber(_ value: String?) -> String {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               value.count > 0,
+              value.count <= Self.reportNumberMaxLength,
               value.tronCore_isPureNumber() else {
             return "0"
         }
+        let integerDigits = value.dropFirst(value.hasPrefix("-") ? 1 : 0).prefix { $0 != "." }.count
+        guard integerDigits <= Self.reportNumberMaxIntegerDigits else { return "0" }
         let number = NSDecimalNumber(string: value)
         guard number != .notANumber else { return "0" }
         let precision = reportNumberPrecision(for: number)
@@ -142,6 +145,13 @@ class TRXStatisticalUploadViewModel: NSObject {
     private static let reportNumberMinPrecision = NSDecimalNumber(string: "0.1")
     private static let reportNumberBaseUpperBound = NSDecimalNumber(string: "100")
     private static let reportNumberTen = NSDecimalNumber(string: "10")
+    // ponytail: conservative bound. NSDecimal tops out near 3.4e166 and reportNumberPrecision only
+    // raises NSDecimalNumberOverflowException once upperBound reaches 1e167, so the real crash point
+    // sits around 1e165. Raise this only if a report value legitimately needs more integer digits.
+    private static let reportNumberMaxIntegerDigits = 127
+    // Fraction digits never enter the precision loop, so the total length is capped only to keep
+    // absurdly long strings out of the regex: sign + 127 integer digits + '.' + 128 fraction digits.
+    private static let reportNumberMaxLength = 257
 
     fileprivate func reportNumberPrecision(for number: NSDecimalNumber) -> NSDecimalNumber {
         var upperBound = Self.reportNumberBaseUpperBound

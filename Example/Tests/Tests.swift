@@ -132,6 +132,23 @@ class Tests: XCTestCase {
         XCTAssertEqual(config.uploadCallCount, 0)
     }
 
+    func testMetricsReportNumberBounds() {
+        let viewModel = TRXStatisticalUploadViewModel()
+        let asset = TRXAssetSyncModel()
+        func formatted(_ value: String) -> String {
+            asset.trxBalance = value
+            return String(viewModel.buildAssetParameter(from: [asset])
+                .split(separator: "|", omittingEmptySubsequences: false)[3])
+        }
+
+        XCTAssertEqual(formatted(String(repeating: "9", count: 127)), "999" + String(repeating: "0", count: 124))
+        XCTAssertEqual(formatted(String(repeating: "9", count: 128)), "0")
+        XCTAssertEqual(formatted("-" + String(repeating: "9", count: 128)), "0")
+        XCTAssertEqual(formatted("0." + String(repeating: "1", count: 129)), "0.1")
+        XCTAssertEqual(formatted("0." + String(repeating: "1", count: 1_000)), "0")
+        XCTAssertEqual(formatted("-1"), "-1")
+    }
+
     func testMetricsPendingRecordsAreFilteredByWalletUid() {
         let chain = "MetricsWalletFilter-\(UUID().uuidString)"
         let date = "2000-01-01"
