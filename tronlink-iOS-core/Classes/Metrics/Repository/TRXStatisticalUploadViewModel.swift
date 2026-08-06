@@ -41,7 +41,7 @@ class TRXStatisticalUploadViewModel: NSObject {
             fields.append(fmtInt(m.idType))
             fields.append(formatReportNumber(m.trxBalance))
             fields.append(formatReportNumber(m.usdtBalance))
-            fields.append(fmt(m.usdBalance))
+            fields.append(formatReportNumber(m.usdBalance))
             fields.append(fmt(m.date))
             
             let record = fields.joined(separator: "|") + "|"
