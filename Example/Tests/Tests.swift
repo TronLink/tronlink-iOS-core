@@ -590,6 +590,24 @@ class Tests: XCTestCase {
         XCTAssertFalse("Tnotanaddress".isEIP712TronAddress())
     }
 
+    func testHexValidationRejectsTrailingLineTerminators() {
+        // ICU lets `$` match before a final line terminator, so `^...$` accepted these.
+        XCTAssertFalse("ABCDEF\r\n".isSignStringHexEncoded)
+        XCTAssertFalse("0xABCDEF\r\n".isSignStringHexEncoded)
+        XCTAssertFalse("0xABCDEF\n".isHexEncoded)
+        XCTAssertFalse("0xABCDEF\r\n".isHexEncoded)
+        XCTAssertFalse("0xABCDEF\u{2028}".isHexEncoded)
+
+        XCTAssertTrue("ABCDEF".isSignStringHexEncoded)
+        XCTAssertTrue("0xABCDEF".isSignStringHexEncoded)
+        XCTAssertTrue("0xABCDEF".isHexEncoded)
+
+        // Rejected input must be UTF-8 encoded, not passed through as if it were hex.
+        XCTAssertEqual(try "ABCDEF\r\n".signStringHexEncoded(), "4142434445460d0a")
+        XCTAssertEqual(try "ABCDEF".signStringHexEncoded(), "ABCDEF")
+        XCTAssertThrowsError(try "0xABCDEF\r\n".signStringHexEncoded())
+    }
+
     func testBase58RejectsInvalidAlphabets() {
         let payload = Data([0x00, 0x41])
         let invalidAlphabets = [
