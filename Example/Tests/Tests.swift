@@ -192,6 +192,57 @@ class Tests: XCTestCase {
         XCTAssertEqual(db.getUpdatedTransactionSyncModels(forChain: chain, uId: "wallet-a").compactMap { $0.uId }, ["wallet-a"])
     }
 
+    func testAddressMappingSaveOnlyDeletesMetricsOfExplicitlyRemovedIds() {
+        let db = TRXMetricsDBManager.shared
+        guard let originalMappings = db.loadAllAddressMappings() else {
+            return XCTFail("could not read the address mapping table")
+        }
+        let chain = "MetricsMappingCleanup-\(UUID().uuidString)"
+        let date = "2000-01-01"
+        let removedAddress = "TRemoved-\(UUID().uuidString)"
+        let keptAddress = "TKept-\(UUID().uuidString)"
+        let removedId = UUID().uuidString
+        let keptId = UUID().uuidString
+
+        var mappings = originalMappings
+        mappings[removedAddress] = removedId
+        mappings[keptAddress] = keptId
+        XCTAssertTrue(db.saveAddressMappings(mappings))
+        defer { XCTAssertTrue(db.saveAddressMappings(originalMappings, deletingMetricsFor: [removedId, keptId])) }
+
+        for uId in [removedId, keptId] {
+            let asset = TRXAssetSyncModel()
+            asset.chain = chain
+            asset.uId = uId
+            asset.date = date
+            asset.updated = true
+            XCTAssertTrue(db.upsertAssetSync(model: asset))
+
+            var transaction = TRXTransactionSyncModel()
+            transaction.chain = chain
+            transaction.uId = uId
+            transaction.date = date
+            transaction.actionType = 1
+            transaction.tokenAddress = "_"
+            transaction.updated = true
+            XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+        }
+
+        // Writing a mapping that happens to omit both IDs must not touch their metrics:
+        // that is what an incomplete in-memory map looks like after a failed load.
+        XCTAssertTrue(db.saveAddressMappings(originalMappings))
+        XCTAssertFalse(db.getUpdatedAssetSyncModels(forChain: chain, uId: removedId).isEmpty)
+        XCTAssertFalse(db.getUpdatedTransactionSyncModels(forChain: chain, uId: removedId).isEmpty)
+        XCTAssertFalse(db.getUpdatedAssetSyncModels(forChain: chain, uId: keptId).isEmpty)
+
+        mappings.removeValue(forKey: removedAddress)
+        XCTAssertTrue(db.saveAddressMappings(mappings, deletingMetricsFor: [removedId]))
+        XCTAssertTrue(db.getUpdatedAssetSyncModels(forChain: chain, uId: removedId).isEmpty)
+        XCTAssertTrue(db.getUpdatedTransactionSyncModels(forChain: chain, uId: removedId).isEmpty)
+        XCTAssertFalse(db.getUpdatedAssetSyncModels(forChain: chain, uId: keptId).isEmpty)
+        XCTAssertFalse(db.getUpdatedTransactionSyncModels(forChain: chain, uId: keptId).isEmpty)
+    }
+
     func testMetricsAssetUpdatesWhenOnlyUsdBalanceChanges() {
         let config = MetricsDataSourceStub()
         let manager = TRXStatisticalUploadManager.shared

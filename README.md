@@ -18,20 +18,16 @@ public func id(for address: String) -> String {
     queue.sync { existing = mapping[normalized] }
     if let v = existing { return v }
 
-    var result = ""
-    var needsSave = false
+    var result = Self.generateUUIDFull()                   // UUID().uuidString
+    // Persist before the UID becomes visible to metrics writers.
     queue.sync(flags: .barrier) {
         if let v = self.mapping[normalized] { result = v; return }
-        var candidate = Self.generateUUIDFull()            // UUID().uuidString
-        while self.usedIds.contains(candidate) { candidate = Self.generateUUIDFull() }
-        self.mapping[normalized] = candidate
-        self.usedIds.insert(candidate)
-        result = candidate
-        needsSave = true
-    }
-    if needsSave {
-        DispatchQueue.global(qos: .utility).async {
-            TRXMetricsDBManager.shared.saveAddressMappings(self.allMappings()) // on-device only
+        while self.usedIds.contains(result) { result = Self.generateUUIDFull() }
+        self.mapping[normalized] = result
+        self.usedIds.insert(result)
+        let snapshot = self.mapping
+        self.persistenceQueue.sync {
+            self.persistMapping(snapshot)                  // writes to the local FMDB only
         }
     }
     return result
