@@ -4,8 +4,8 @@ import BigInt
 
 //Sign
 public extension String {
-    private static let hexOnlyRegex = try! NSRegularExpression(pattern: "^[A-Fa-f0-9]+$")
-    private static let hex0xRegex   = try! NSRegularExpression(pattern: "^0x[0-9A-Fa-f]*$")
+    private static let hexOnlyRegex = try! NSRegularExpression(pattern: "\\A[A-Fa-f0-9]+\\z")
+    private static let hex0xRegex   = try! NSRegularExpression(pattern: "\\A0x[0-9A-Fa-f]*\\z")
 
     var length: Int {
         return utf16.count
