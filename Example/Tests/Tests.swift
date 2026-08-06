@@ -2,6 +2,28 @@ import XCTest
 @testable import TLCore
 import TronKeystore
 
+private final class AddressMappingStoreStub: TRXAddressMappingStore {
+    var loadResult: [String: String]?
+    var saveResults: [Bool]
+    private(set) var loadCallCount = 0
+    private(set) var saves: [(mapping: [String: String], removedIds: Set<String>)] = []
+
+    init(loadResult: [String: String]? = [:], saveResults: [Bool] = [true]) {
+        self.loadResult = loadResult
+        self.saveResults = saveResults
+    }
+
+    func loadAllAddressMappings() -> [String: String]? {
+        loadCallCount += 1
+        return loadResult
+    }
+
+    func saveAddressMappings(_ mapping: [String: String], deletingMetricsFor removedIds: Set<String>) -> Bool {
+        saves.append((mapping, removedIds))
+        return saveResults.isEmpty ? false : saveResults.removeFirst()
+    }
+}
+
 class Tests: XCTestCase {
     
     private static let uppercaseChars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -60,6 +82,132 @@ class Tests: XCTestCase {
     func testExample() {
         // This is an example of a functional test case.
         XCTAssert(true, "Pass")
+    }
+
+    func testAddressMapLegacyMigrationSucceedsAndClearsDefaults() {
+        let (defaults, suite) = makeAddressMapDefaults(testName: #function)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacy = ["TLegacyAddress": "legacy-uuid"]
+        defaults.set(legacy, forKey: Metrics_Address_Map_Key)
+        defaults.set(true, forKey: Metrics_Address_Map_Pending_Key)
+        defaults.set(["removed-uuid"], forKey: Metrics_Address_Map_Removed_Key)
+        let store = AddressMappingStoreStub(saveResults: [true])
+
+        let manager = TRXAddressMapManager(store: store, defaults: defaults)
+
+        XCTAssertEqual(manager.allMappings(), legacy)
+        XCTAssertEqual(store.loadCallCount, 0)
+        XCTAssertEqual(store.saves.count, 1)
+        XCTAssertEqual(store.saves.first?.mapping, legacy)
+        XCTAssertEqual(store.saves.first?.removedIds, ["removed-uuid"])
+        assertAddressMapDefaultsCleared(defaults)
+    }
+
+    func testAddressMapFailedMigrationRegeneratesAndSavesOnce() {
+        let (defaults, suite) = makeAddressMapDefaults(testName: #function)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(["TRegeneratedAddress": "legacy-uuid"], forKey: Metrics_Address_Map_Key)
+        defaults.set(true, forKey: Metrics_Address_Map_Pending_Key)
+        let store = AddressMappingStoreStub(saveResults: [false, true])
+
+        let manager = TRXAddressMapManager(store: store, defaults: defaults)
+
+        XCTAssertTrue(manager.allMappings().isEmpty)
+        XCTAssertEqual(store.saves.count, 1)
+        assertAddressMapDefaultsCleared(defaults)
+
+        let generated = expectation(description: "regenerated mapping persisted")
+        manager.generateMappings(forAllAddresses: ["TRegeneratedAddress"]) {
+            generated.fulfill()
+        }
+        wait(for: [generated], timeout: 2)
+
+        let replacement = manager.allMappings()["TRegeneratedAddress"]
+        XCTAssertNotNil(replacement)
+        XCTAssertNotEqual(replacement, "legacy-uuid")
+        XCTAssertEqual(store.saves.count, 2)
+        XCTAssertEqual(store.saves.last?.mapping["TRegeneratedAddress"], replacement)
+        assertAddressMapDefaultsCleared(defaults)
+    }
+
+    func testAddressMapEmptyPendingSnapshotMigratesOnceAndClearsDefaults() {
+        let (defaults, suite) = makeAddressMapDefaults(testName: #function)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set([String: String](), forKey: Metrics_Address_Map_Key)
+        defaults.set(true, forKey: Metrics_Address_Map_Pending_Key)
+        defaults.set(["removed-uuid"], forKey: Metrics_Address_Map_Removed_Key)
+        let store = AddressMappingStoreStub(saveResults: [true])
+
+        let manager = TRXAddressMapManager(store: store, defaults: defaults)
+
+        XCTAssertTrue(manager.allMappings().isEmpty)
+        XCTAssertEqual(store.saves.count, 1)
+        XCTAssertEqual(store.saves.first?.mapping, [:])
+        XCTAssertEqual(store.saves.first?.removedIds, ["removed-uuid"])
+        assertAddressMapDefaultsCleared(defaults)
+    }
+
+    func testAddressMapMalformedLegacyDefaultsAreClearedWithoutMigration() {
+        let (defaults, suite) = makeAddressMapDefaults(testName: #function)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(["TBroken": 42], forKey: Metrics_Address_Map_Key)
+        defaults.set(true, forKey: Metrics_Address_Map_Pending_Key)
+        defaults.set(["stale-removal"], forKey: Metrics_Address_Map_Removed_Key)
+        let stored = ["TDatabaseAddress": "database-uuid"]
+        let store = AddressMappingStoreStub(loadResult: stored, saveResults: [])
+
+        let manager = TRXAddressMapManager(store: store, defaults: defaults)
+
+        XCTAssertEqual(manager.allMappings(), stored)
+        XCTAssertEqual(store.loadCallCount, 1)
+        XCTAssertTrue(store.saves.isEmpty)
+        assertAddressMapDefaultsCleared(defaults)
+    }
+
+    func testAddressMapRuntimeSaveFailureDoesNotRetryOrWriteDefaults() {
+        let (defaults, suite) = makeAddressMapDefaults(testName: #function)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AddressMappingStoreStub(loadResult: [:], saveResults: [false, true])
+        let manager = TRXAddressMapManager(store: store, defaults: defaults)
+
+        let generatedId = manager.id(for: "TRuntimeFailure")
+
+        XCTAssertFalse(generatedId.isEmpty)
+        XCTAssertEqual(store.saves.count, 1)
+        assertAddressMapDefaultsCleared(defaults)
+
+        let noRetry = expectation(description: "no delayed retry")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) {
+            noRetry.fulfill()
+        }
+        wait(for: [noRetry], timeout: 2)
+        XCTAssertEqual(store.saves.count, 1)
+        assertAddressMapDefaultsCleared(defaults)
+    }
+
+    func testAddressMapLoadFailureDoesNotOverwriteDatabase() {
+        let (defaults, suite) = makeAddressMapDefaults(testName: #function)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AddressMappingStoreStub(loadResult: nil, saveResults: [true])
+        let manager = TRXAddressMapManager(store: store, defaults: defaults)
+
+        XCTAssertFalse(manager.id(for: "TReadFailure").isEmpty)
+
+        XCTAssertTrue(store.saves.isEmpty)
+        assertAddressMapDefaultsCleared(defaults)
+    }
+
+    private func makeAddressMapDefaults(testName: String) -> (UserDefaults, String) {
+        let suite = "address-map.\(testName).\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defaults.removePersistentDomain(forName: suite)
+        return (defaults, suite)
+    }
+
+    private func assertAddressMapDefaultsCleared(_ defaults: UserDefaults, file: StaticString = #file, line: UInt = #line) {
+        XCTAssertNil(defaults.object(forKey: Metrics_Address_Map_Key), file: file, line: line)
+        XCTAssertNil(defaults.object(forKey: Metrics_Address_Map_Pending_Key), file: file, line: line)
+        XCTAssertNil(defaults.object(forKey: Metrics_Address_Map_Removed_Key), file: file, line: line)
     }
 
     func testMetricsCollectionFailsClosed() {

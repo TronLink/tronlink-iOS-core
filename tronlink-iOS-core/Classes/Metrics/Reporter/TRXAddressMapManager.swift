@@ -1,9 +1,15 @@
 import Foundation
-import UIKit
 
 let Metrics_Address_Map_Key = "TRXAddressRandomIdMapping"
-private let Metrics_Address_Map_Pending_Key = "TRXAddressRandomIdMappingPending"
-private let Metrics_Address_Map_Removed_Key = "TRXAddressRandomIdMappingRemoved"
+let Metrics_Address_Map_Pending_Key = "TRXAddressRandomIdMappingPending"
+let Metrics_Address_Map_Removed_Key = "TRXAddressRandomIdMappingRemoved"
+
+protocol TRXAddressMappingStore: AnyObject {
+    func saveAddressMappings(_ mapping: [String: String], deletingMetricsFor removedIds: Set<String>) -> Bool
+    func loadAllAddressMappings() -> [String: String]?
+}
+
+extension TRXMetricsDBManager: TRXAddressMappingStore {}
 
 public final class TRXAddressMapManager {
     public static let shared = TRXAddressMapManager()
@@ -11,46 +17,43 @@ public final class TRXAddressMapManager {
     private var usedIds: Set<String> = []        // Quick duplicate check
     private let queue = DispatchQueue(label: "com.tron.wallet.AddressMapManager", attributes: .concurrent)
     private let persistenceQueue = DispatchQueue(label: "com.tron.wallet.AddressMapManager.persistence")
-    private var pendingMappingsSnapshot: [String: String]?
-    private var pendingRemovedIds: Set<String> = []
+    private let store: TRXAddressMappingStore
+    private let defaults: UserDefaults
     private var persistenceDisabled = false
-    private var backgroundObserver: NSObjectProtocol?
-    private static let persistenceRetryDelays: [TimeInterval] = [1, 2, 4]
 
-    private init() {
-        // Migrate legacy UserDefaults data to FMDB on first launch after upgrade.
-        // Only clear UserDefaults once the DB write succeeds, so the migration retries
-        // on the next launch if the write fails (e.g. disk full).
-        let defaults = UserDefaults.standard
+    private convenience init() {
+        self.init(store: TRXMetricsDBManager.shared, defaults: .standard)
+    }
+
+    init(store: TRXAddressMappingStore, defaults: UserDefaults) {
+        self.store = store
+        self.defaults = defaults
+
+        // Make one best-effort migration of legacy defaults. Whether it succeeds or not,
+        // remove the old plaintext copy immediately. On failure the main app's existing
+        // generateMappings(forAllAddresses:) launch call creates replacement UUIDs.
         if let legacy = defaults.dictionary(forKey: Metrics_Address_Map_Key) as? [String: String],
            defaults.bool(forKey: Metrics_Address_Map_Pending_Key) || !legacy.isEmpty {
-            mapping = legacy
-            usedIds = Set(legacy.values)
-            // The pending snapshot may predate a delete whose cleanup never ran, so replay
-            // those removals here instead of leaving the metrics behind as orphans.
             let removedIds = Set(defaults.stringArray(forKey: Metrics_Address_Map_Removed_Key) ?? [])
-            if TRXMetricsDBManager.shared.saveAddressMappings(legacy, deletingMetricsFor: removedIds) {
-                clearPendingSnapshot()
+            if store.saveAddressMappings(legacy, deletingMetricsFor: removedIds) {
+                mapping = legacy
+                usedIds = Set(legacy.values)
             } else {
-                pendingRemovedIds = removedIds
+                NSLog("[AddressMap] legacy migration failed, mappings will be regenerated")
             }
-        } else if let stored = TRXMetricsDBManager.shared.loadAllAddressMappings() {
+            clearLegacySnapshot()
+        } else if let stored = store.loadAllAddressMappings() {
+            // Clear malformed or stale legacy values even when there is no valid snapshot.
+            clearLegacySnapshot()
             mapping = stored
             usedIds = Set(stored.values)
         } else {
+            clearLegacySnapshot()
             // The table could not be read. Start empty so IDs still resolve this session,
             // but never write back: a full save from an empty map would delete the mappings
             // that are still on disk and orphan their metrics permanently.
             persistenceDisabled = true
             NSLog("[AddressMap] mapping load failed, persistence disabled for this session")
-        }
-
-        backgroundObserver = NotificationCenter.default.addObserver(
-            forName: UIApplication.didEnterBackgroundNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            self?.flushPendingMappings()
         }
     }
 
@@ -83,8 +86,8 @@ public final class TRXAddressMapManager {
     }
 
     // MARK: - Obtain the ID corresponding to the address
-    /// For a new address this blocks the calling thread on a database write, so the ID is
-    /// durable before any metrics row can reference it. Do not call from the main thread.
+    /// For a new address this blocks the calling thread on one database save attempt before
+    /// exposing the ID. A failed save leaves the ID available in memory for this process.
     public func id(for address: String) -> String {
         let normalized = Self.normalizeAddress(address)
         var existing: String?
@@ -149,54 +152,17 @@ public final class TRXAddressMapManager {
 
     /// Must run on `persistenceQueue`. Lock order is `queue` (barrier) → `persistenceQueue`
     /// → FMDatabaseQueue; nothing reached from here may call back into this manager.
-    private func persistMapping(_ snapshot: [String: String], removedIds: Set<String> = [], retryAttempt: Int = 0) {
+    private func persistMapping(_ snapshot: [String: String], removedIds: Set<String> = []) {
         guard !persistenceDisabled else { return }
-        // A newer save supersedes a failed one, so carry its removals forward instead of
-        // dropping them along with its snapshot.
-        let removals = removedIds.union(pendingRemovedIds)
-        pendingMappingsSnapshot = snapshot
-        pendingRemovedIds = removals
-        if TRXMetricsDBManager.shared.saveAddressMappings(snapshot, deletingMetricsFor: removals) {
-            pendingMappingsSnapshot = nil
-            pendingRemovedIds = []
-            clearPendingSnapshot()
+        guard store.saveAddressMappings(snapshot, deletingMetricsFor: removedIds) else {
+            NSLog("[AddressMap] database save failed, %d entries remain in memory", snapshot.count)
             return
         }
-
-        savePendingSnapshot(snapshot, removedIds: removals)
-
-        guard retryAttempt < Self.persistenceRetryDelays.count else {
-            NSLog("[AddressMap] save failed after retries, %d entries preserved", snapshot.count)
-            return
-        }
-
-        let delay = Self.persistenceRetryDelays[retryAttempt]
-        NSLog("[AddressMap] save failed, retry %d in %.0fs", retryAttempt + 1, delay)
-        persistenceQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self = self, self.pendingMappingsSnapshot == snapshot else { return }
-            self.persistMapping(snapshot, retryAttempt: retryAttempt + 1)
-        }
     }
 
-    private func flushPendingMappings() {
-        queue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
-            self.persistenceQueue.async { [weak self] in
-                guard let self = self, let snapshot = self.pendingMappingsSnapshot else { return }
-                self.persistMapping(snapshot, retryAttempt: Self.persistenceRetryDelays.count)
-            }
-        }
-    }
-
-    private func savePendingSnapshot(_ snapshot: [String: String], removedIds: Set<String>) {
-        UserDefaults.standard.set(snapshot, forKey: Metrics_Address_Map_Key)
-        UserDefaults.standard.set(Array(removedIds), forKey: Metrics_Address_Map_Removed_Key)
-        UserDefaults.standard.set(true, forKey: Metrics_Address_Map_Pending_Key)
-    }
-
-    private func clearPendingSnapshot() {
-        UserDefaults.standard.removeObject(forKey: Metrics_Address_Map_Key)
-        UserDefaults.standard.removeObject(forKey: Metrics_Address_Map_Removed_Key)
-        UserDefaults.standard.removeObject(forKey: Metrics_Address_Map_Pending_Key)
+    private func clearLegacySnapshot() {
+        defaults.removeObject(forKey: Metrics_Address_Map_Key)
+        defaults.removeObject(forKey: Metrics_Address_Map_Removed_Key)
+        defaults.removeObject(forKey: Metrics_Address_Map_Pending_Key)
     }
 }
