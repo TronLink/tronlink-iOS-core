@@ -7,11 +7,24 @@ public class TRXMetricsDBManager: NSObject {
     public static let shared = TRXMetricsDBManager()
     
     private let dataBaseQueue: FMDatabaseQueue?
+    private let healthStateLock = NSLock()
     
     private static let kMigrationDoneKeyPrefix = "TRXMetricsMigrationDone_"
     private static let kDBPathMigrationKey = "TRXMetricsDBPathMigrationDone"
 
-    private(set) var isDBHealthy = true
+    private var _isDBHealthy = true
+    private(set) var isDBHealthy: Bool {
+        get {
+            healthStateLock.lock()
+            defer { healthStateLock.unlock() }
+            return _isDBHealthy
+        }
+        set {
+            healthStateLock.lock()
+            _isDBHealthy = newValue
+            healthStateLock.unlock()
+        }
+    }
 
     private override init() {
         let queue: FMDatabaseQueue?
@@ -255,20 +268,20 @@ public class TRXMetricsDBManager: NSObject {
     }
 
     @discardableResult
-    public func deleteAssetsBeforeToday(forChain chain: String) -> Bool {
+    public func deleteAssetsBeforeToday(forChain chain: String, uId: String) -> Bool {
         let today = Date().tronCore_getCurrentYMD_UTC()
         var ok = false
         self.dataBaseQueue?.inDatabase { db in
-            ok = self.runUpdate(db, "DELETE FROM AssetSyncTable WHERE chain = ? AND date < ?", [chain, today])
+            ok = self.runUpdate(db, "DELETE FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date < ? AND updated = 0", [chain, uId, today])
         }
         return ok
     }
     
-    public func getUpdatedAssetSyncModels(forChain chain: String) -> [TRXAssetSyncModel] {
+    public func getUpdatedAssetSyncModels(forChain chain: String, uId: String) -> [TRXAssetSyncModel] {
         var results = [TRXAssetSyncModel]()
         self.dataBaseQueue?.inDatabase { db in
-            let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND updated = 1"
-            if let rs = try? db.executeQuery(sql, values: [chain]) {
+            let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND uId = ? AND updated = 1"
+            if let rs = try? db.executeQuery(sql, values: [chain, uId]) {
                 while rs.next() {
                     results.append(self.makeAssetSync(from: rs))
                 }
@@ -292,7 +305,31 @@ public class TRXMetricsDBManager: NSObject {
         return model
     }
 
-    public func upsertAssetSync_compareAndUpsert(model: TRXAssetSyncModel, callBackUpdate: Bool) {
+    @discardableResult
+    func acknowledgeUploadedAsset(_ uploaded: TRXAssetSyncModel) -> Bool {
+        guard let chain = uploaded.chain, let uId = uploaded.uId, let date = uploaded.date else { return false }
+        var acknowledged = false
+        self.dataBaseQueue?.inDatabase { db in
+            let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ? LIMIT 1"
+            guard let rs = try? db.executeQuery(sql, values: [chain, uId, date]) else { return }
+            let current = rs.next() ? self.makeAssetSync(from: rs) : nil
+            rs.close()
+            guard let current = current, current.updated == true,
+                  current.uId == uploaded.uId,
+                  current.idType == uploaded.idType,
+                  current.trxBalance == uploaded.trxBalance,
+                  current.usdtBalance == uploaded.usdtBalance,
+                  current.usdBalance == uploaded.usdBalance,
+                  current.date == uploaded.date,
+                  current.chain == uploaded.chain else { return }
+            acknowledged = self.runUpdate(db,
+                                          "UPDATE AssetSyncTable SET updated = 0 WHERE chain = ? AND uId = ? AND date = ? AND updated = 1",
+                                          [chain, uId, date])
+        }
+        return acknowledged
+    }
+
+    public func upsertAssetSync_compareAndUpsert(model: TRXAssetSyncModel) {
         let chain = model.chain ?? ""
         let uId = model.uId ?? ""
         let date = model.date ?? ""
@@ -302,40 +339,31 @@ public class TRXMetricsDBManager: NSObject {
             db.beginTransaction()
             var success = false
             do {
-                if callBackUpdate {
-                    let m = self.copyAssetSyncModel(model, updated: false)
-                    let checkSql = "SELECT COUNT(1) AS cnt FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ?"
-                    let rs = try db.executeQuery(checkSql, values: [chain, uId, date])
-                    var exists = false
-                    if rs.next() { exists = rs.int(forColumn: "cnt") > 0 }
+                let sql = "SELECT trxBalance, usdtBalance, usdBalance FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ? LIMIT 1"
+                let rs = try db.executeQuery(sql, values: [chain, uId, date])
+                if rs.next() {
+                    let oldTrx = rs.string(forColumn: "trxBalance") ?? ""
+                    let oldUsdt = rs.string(forColumn: "usdtBalance") ?? ""
+                    let oldUsd = rs.string(forColumn: "usdBalance") ?? ""
                     rs.close()
 
-                    if exists {
+                    let oldTrxClean = oldTrx.tronCore_removeFloatSuffixZero()
+                    let oldUsdtClean = oldUsdt.tronCore_removeFloatSuffixZero()
+                    let oldUsdClean = oldUsd.tronCore_removeFloatSuffixZero()
+                    let newTrxClean = (model.trxBalance ?? "").tronCore_removeFloatSuffixZero()
+                    let newUsdtClean = (model.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
+                    let newUsdClean = (model.usdBalance ?? "").tronCore_removeFloatSuffixZero()
+
+                    if (oldTrxClean.count > 0 && newTrxClean.count > 0 && oldTrxClean != newTrxClean) ||
+                        (oldUsdtClean.count > 0 && newUsdtClean.count > 0 && oldUsdtClean != newUsdtClean) ||
+                        (oldUsdClean.count > 0 && newUsdClean.count > 0 && oldUsdClean != newUsdClean) {
+                        let m = self.copyAssetSyncModel(model, updated: true)
                         success = self.updateAssetSync_internal(db: db, chain: chain, uId: uId, idType: idType, date: date, trxBalance: m.trxBalance, usdtBalance: m.usdtBalance, usdBalance: m.usdBalance, updated: m.updated)
                     }
                 } else {
-                    let sql = "SELECT trxBalance, usdtBalance FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ? LIMIT 1"
-                    let rs = try db.executeQuery(sql, values: [chain, uId, date])
-                    if rs.next() {
-                        let oldTrx = rs.string(forColumn: "trxBalance") ?? ""
-                        let oldUsdt = rs.string(forColumn: "usdtBalance") ?? ""
-                        rs.close()
-
-                        let oldTrxClean = oldTrx.tronCore_removeFloatSuffixZero()
-                        let oldUsdtClean = oldUsdt.tronCore_removeFloatSuffixZero()
-                        let newTrxClean = (model.trxBalance ?? "").tronCore_removeFloatSuffixZero()
-                        let newUsdtClean = (model.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
-
-                        if (oldTrxClean.count > 0 && newTrxClean.count > 0 && oldTrxClean != newTrxClean) ||
-                            (oldUsdtClean.count > 0 && newUsdtClean.count > 0 && oldUsdtClean != newUsdtClean) {
-                            let m = self.copyAssetSyncModel(model, updated: true)
-                            success = self.updateAssetSync_internal(db: db, chain: chain, uId: uId, idType: idType, date: date, trxBalance: m.trxBalance, usdtBalance: m.usdtBalance, usdBalance: m.usdBalance, updated: m.updated)
-                        }
-                    } else {
-                        rs.close()
-                        let m = self.copyAssetSyncModel(model, updated: true)
-                        success = self.insertAssetSyncTable_internal(db: db, model: m)
-                    }
+                    rs.close()
+                    let m = self.copyAssetSyncModel(model, updated: true)
+                    success = self.insertAssetSyncTable_internal(db: db, model: m)
                 }
 
                 if success { db.commit() } else { db.rollback() }
@@ -382,20 +410,6 @@ public class TRXMetricsDBManager: NSObject {
             }
         }
         return result
-    }
-    
-    public func getAllAssetSyncModels(forChain chain: String) -> [TRXAssetSyncModel] {
-        var results = [TRXAssetSyncModel]()
-        self.dataBaseQueue?.inDatabase { db in
-            let sql = "SELECT uId, idType, trxBalance, usdtBalance, usdBalance, date, chain, updated FROM AssetSyncTable WHERE chain = ?"
-            if let rs = try? db.executeQuery(sql, values: [chain]) {
-                while rs.next() {
-                    results.append(self.makeAssetSync(from: rs))
-                }
-                rs.close()
-            }
-        }
-        return results
     }
     
     // MARK: - TRANSACTION SYNC TABLE CREATION
@@ -516,34 +530,20 @@ public class TRXMetricsDBManager: NSObject {
     }
 
     @discardableResult
-    public func deleteTransactionSyncBeforeToday(forChain chain: String) -> Bool {
+    public func deleteTransactionSyncBeforeToday(forChain chain: String, uId: String) -> Bool {
         let today = Date().tronCore_getCurrentYMD_UTC()
         var ok = false
         self.dataBaseQueue?.inDatabase { db in
-            ok = self.runUpdate(db, "DELETE FROM TransactionSyncTable WHERE chain = ? AND date < ?", [chain, today])
+            ok = self.runUpdate(db, "DELETE FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND date < ? AND updated = 0", [chain, uId, today])
         }
         return ok
     }
 
-    public func getUpdatedTransactionSyncModels(forChain chain: String) -> [TRXTransactionSyncModel] {
+    public func getUpdatedTransactionSyncModels(forChain chain: String, uId: String) -> [TRXTransactionSyncModel] {
         var results = [TRXTransactionSyncModel]()
         self.dataBaseQueue?.inDatabase { db in
-            let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND updated = 1"
-            if let rs = try? db.executeQuery(sql, values: [chain]) {
-                while rs.next() {
-                    results.append(self.makeTransactionSync(from: rs))
-                }
-                rs.close()
-            }
-        }
-        return results
-    }
-
-    public func getAllTransactionSyncModels(forChain chain: String) -> [TRXTransactionSyncModel] {
-        var results = [TRXTransactionSyncModel]()
-        self.dataBaseQueue?.inDatabase { db in
-            let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ?"
-            if let rs = try? db.executeQuery(sql, values: [chain]) {
+            let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND updated = 1"
+            if let rs = try? db.executeQuery(sql, values: [chain, uId]) {
                 while rs.next() {
                     results.append(self.makeTransactionSync(from: rs))
                 }
@@ -565,6 +565,44 @@ public class TRXMetricsDBManager: NSObject {
             }
         }
         return result
+    }
+
+    @discardableResult
+    func acknowledgeUploadedTransaction(_ uploaded: TRXTransactionSyncModel) -> Bool {
+        guard let chain = uploaded.chain, let uId = uploaded.uId, let actionType = uploaded.actionType,
+              let tokenAddress = uploaded.tokenAddress, let date = uploaded.date else { return false }
+        var acknowledged = false
+        self.dataBaseQueue?.inDatabase { db in
+            let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ? LIMIT 1"
+            guard let rs = try? db.executeQuery(sql, values: [chain, uId, actionType, tokenAddress, date]) else { return }
+            let current = rs.next() ? self.makeTransactionSync(from: rs) : nil
+            rs.close()
+            guard let current = current, current.updated == true,
+                  current.uId == uploaded.uId,
+                  current.idType == uploaded.idType,
+                  current.actionType == uploaded.actionType,
+                  current.count == uploaded.count,
+                  current.tokenAddress == uploaded.tokenAddress,
+                  current.tokenAmount == uploaded.tokenAmount,
+                  current.energy == uploaded.energy,
+                  current.bandwidth == uploaded.bandwidth,
+                  current.burn == uploaded.burn,
+                  current.date == uploaded.date,
+                  current.chain == uploaded.chain,
+                  current.A1 == uploaded.A1,
+                  current.A2 == uploaded.A2,
+                  current.A3 == uploaded.A3,
+                  current.A4 == uploaded.A4,
+                  current.A5 == uploaded.A5,
+                  current.A6 == uploaded.A6,
+                  current.A7 == uploaded.A7,
+                  current.A8 == uploaded.A8,
+                  current.A9 == uploaded.A9 else { return }
+            acknowledged = self.runUpdate(db,
+                                          "UPDATE TransactionSyncTable SET updated = 0 WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ? AND updated = 1",
+                                          [chain, uId, actionType, tokenAddress, date])
+        }
+        return acknowledged
     }
 
     // MARK: - ADDRESS MAP TABLE

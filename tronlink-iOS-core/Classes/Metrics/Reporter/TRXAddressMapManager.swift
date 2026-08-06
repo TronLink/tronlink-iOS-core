@@ -1,6 +1,8 @@
 import Foundation
+import UIKit
 
 let Metrics_Address_Map_Key = "TRXAddressRandomIdMapping"
+private let Metrics_Address_Map_Pending_Key = "TRXAddressRandomIdMappingPending"
 
 public final class TRXAddressMapManager {
     public static let shared = TRXAddressMapManager()
@@ -9,22 +11,33 @@ public final class TRXAddressMapManager {
     private let queue = DispatchQueue(label: "com.tron.wallet.AddressMapManager", attributes: .concurrent)
     private let persistenceQueue = DispatchQueue(label: "com.tron.wallet.AddressMapManager.persistence")
     private var pendingMappingsSnapshot: [String: String]?
+    private var backgroundObserver: NSObjectProtocol?
+    private static let persistenceRetryDelays: [TimeInterval] = [1, 2, 4]
 
     private init() {
         // Migrate legacy UserDefaults data to FMDB on first launch after upgrade.
         // Only clear UserDefaults once the DB write succeeds, so the migration retries
         // on the next launch if the write fails (e.g. disk full).
-        if let legacy = UserDefaults.standard.dictionary(forKey: Metrics_Address_Map_Key) as? [String: String],
-           !legacy.isEmpty {
+        let defaults = UserDefaults.standard
+        if let legacy = defaults.dictionary(forKey: Metrics_Address_Map_Key) as? [String: String],
+           defaults.bool(forKey: Metrics_Address_Map_Pending_Key) || !legacy.isEmpty {
             mapping = legacy
             usedIds = Set(legacy.values)
             if TRXMetricsDBManager.shared.saveAddressMappings(legacy) {
-                UserDefaults.standard.removeObject(forKey: Metrics_Address_Map_Key)
+                clearPendingSnapshot()
             }
         } else {
             let stored = TRXMetricsDBManager.shared.loadAllAddressMappings()
             mapping = stored
             usedIds = Set(stored.values)
+        }
+
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.flushPendingMappings()
         }
     }
 
@@ -116,20 +129,48 @@ public final class TRXAddressMapManager {
 
     private static func normalizeAddress(_ addr: String) -> String {
         let trimmed = addr.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercased = trimmed.lowercased()
         return trimmed
     }
 
-    private func persistMapping(_ snapshot: [String: String]) {
-        if let pending = pendingMappingsSnapshot {
-            NSLog("[AddressMap] retrying save, %d entries pending", pending.count)
-        }
-
+    private func persistMapping(_ snapshot: [String: String], retryAttempt: Int = 0) {
+        pendingMappingsSnapshot = snapshot
         if TRXMetricsDBManager.shared.saveAddressMappings(snapshot) {
             pendingMappingsSnapshot = nil
-        } else {
-            pendingMappingsSnapshot = snapshot
-            NSLog("[AddressMap] save failed, %d entries pending", pendingMappingsSnapshot?.count ?? 0)
+            clearPendingSnapshot()
+            return
         }
+
+        guard retryAttempt < Self.persistenceRetryDelays.count else {
+            savePendingSnapshot(snapshot)
+            NSLog("[AddressMap] save failed after retries, %d entries preserved", snapshot.count)
+            return
+        }
+
+        let delay = Self.persistenceRetryDelays[retryAttempt]
+        NSLog("[AddressMap] save failed, retry %d in %.0fs", retryAttempt + 1, delay)
+        persistenceQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.pendingMappingsSnapshot == snapshot else { return }
+            self.persistMapping(snapshot, retryAttempt: retryAttempt + 1)
+        }
+    }
+
+    private func flushPendingMappings() {
+        queue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            self.persistenceQueue.async { [weak self] in
+                guard let self = self, let snapshot = self.pendingMappingsSnapshot else { return }
+                self.persistMapping(snapshot, retryAttempt: Self.persistenceRetryDelays.count)
+            }
+        }
+    }
+
+    private func savePendingSnapshot(_ snapshot: [String: String]) {
+        UserDefaults.standard.set(snapshot, forKey: Metrics_Address_Map_Key)
+        UserDefaults.standard.set(true, forKey: Metrics_Address_Map_Pending_Key)
+    }
+
+    private func clearPendingSnapshot() {
+        UserDefaults.standard.removeObject(forKey: Metrics_Address_Map_Key)
+        UserDefaults.standard.removeObject(forKey: Metrics_Address_Map_Pending_Key)
     }
 }

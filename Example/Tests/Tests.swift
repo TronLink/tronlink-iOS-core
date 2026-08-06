@@ -1,5 +1,5 @@
 import XCTest
-import TLCore
+@testable import TLCore
 import TronKeystore
 
 class Tests: XCTestCase {
@@ -60,6 +60,307 @@ class Tests: XCTestCase {
     func testExample() {
         // This is an example of a functional test case.
         XCTAssert(true, "Pass")
+    }
+
+    func testMetricsCollectionFailsClosed() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+
+        XCTAssertTrue(manager.isCollectionDisabled(nil))
+        XCTAssertFalse(manager.isCollectionDisabled(config))
+
+        config.isShastaEnvironment = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isShastaEnvironment = false
+
+        config.isWatchWallet = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isWatchWallet = false
+
+        config.isBasicFunctionOpen = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isBasicFunctionOpen = false
+
+        config.isTokenCloudSyncClose = true
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.isTokenCloudSyncClose = false
+
+        config.environmentKey = ""
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+        config.environmentKey = "MainNet"
+
+        config.walletAddress = ""
+        XCTAssertTrue(manager.isCollectionDisabled(config))
+    }
+
+    func testMetricsUploadRechecksConfigBeforeNetwork() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        manager.dataConfig = config
+        defer { manager.dataConfig = nil }
+
+        config.isTokenCloudSyncClose = true
+        var failed = false
+        TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: [],
+                                                                  transactions: [],
+                                                                  dataConfig: config,
+                                                                  chain: "MainNet",
+                                                                  walletAddress: "TTestAddress",
+                                                                  success: { _, _ in XCTFail("Disabled metrics must not upload") },
+                                                                  failure: { failed = true })
+
+        XCTAssertTrue(failed)
+        XCTAssertEqual(config.uploadCallCount, 0)
+    }
+
+    func testMetricsUploadStopsWhenConfigIsReplaced() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        manager.dataConfig = MetricsDataSourceStub()
+        defer { manager.dataConfig = nil }
+
+        var failed = false
+        TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: [],
+                                                                  transactions: [],
+                                                                  dataConfig: config,
+                                                                  chain: "MainNet",
+                                                                  walletAddress: "TTestAddress",
+                                                                  success: { _, _ in XCTFail("Replaced config must not upload") },
+                                                                  failure: { failed = true })
+
+        XCTAssertTrue(failed)
+        XCTAssertEqual(config.uploadCallCount, 0)
+    }
+
+    func testMetricsReportNumberBounds() {
+        let viewModel = TRXStatisticalUploadViewModel()
+        let asset = TRXAssetSyncModel()
+        func formatted(_ value: String) -> String {
+            asset.trxBalance = value
+            return String(viewModel.buildAssetParameter(from: [asset])
+                .split(separator: "|", omittingEmptySubsequences: false)[3])
+        }
+
+        XCTAssertEqual(formatted(String(repeating: "9", count: 127)), "999" + String(repeating: "0", count: 124))
+        XCTAssertEqual(formatted(String(repeating: "9", count: 128)), "0")
+        XCTAssertEqual(formatted("-" + String(repeating: "9", count: 128)), "0")
+        XCTAssertEqual(formatted("0." + String(repeating: "1", count: 129)), "0.1")
+        XCTAssertEqual(formatted("0." + String(repeating: "1", count: 1_000)), "0")
+        XCTAssertEqual(formatted("-1"), "-1")
+    }
+
+    func testMetricsPendingRecordsAreFilteredByWalletUid() {
+        let chain = "MetricsWalletFilter-\(UUID().uuidString)"
+        let date = "2000-01-01"
+        let db = TRXMetricsDBManager.shared
+        defer {
+            for uId in ["wallet-a", "wallet-b"] {
+                for asset in db.getUpdatedAssetSyncModels(forChain: chain, uId: uId) {
+                    db.acknowledgeUploadedAsset(asset)
+                }
+                for transaction in db.getUpdatedTransactionSyncModels(forChain: chain, uId: uId) {
+                    db.acknowledgeUploadedTransaction(transaction)
+                }
+                db.deleteAssetsBeforeToday(forChain: chain, uId: uId)
+                db.deleteTransactionSyncBeforeToday(forChain: chain, uId: uId)
+            }
+        }
+
+        for uId in ["wallet-a", "wallet-b"] {
+            let asset = TRXAssetSyncModel()
+            asset.chain = chain
+            asset.uId = uId
+            asset.date = date
+            asset.trxBalance = "1"
+            asset.usdtBalance = "1"
+            asset.usdBalance = "2"
+            asset.updated = true
+            XCTAssertTrue(db.upsertAssetSync(model: asset))
+
+            var transaction = TRXTransactionSyncModel()
+            transaction.chain = chain
+            transaction.uId = uId
+            transaction.date = date
+            transaction.actionType = 1
+            transaction.tokenAddress = "_"
+            transaction.count = 1
+            transaction.updated = true
+            XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+        }
+
+        XCTAssertEqual(db.getUpdatedAssetSyncModels(forChain: chain, uId: "wallet-a").compactMap { $0.uId }, ["wallet-a"])
+        XCTAssertEqual(db.getUpdatedTransactionSyncModels(forChain: chain, uId: "wallet-a").compactMap { $0.uId }, ["wallet-a"])
+    }
+
+    func testMetricsAssetUpdatesWhenOnlyUsdBalanceChanges() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        manager.dataConfig = config
+        defer { manager.dataConfig = nil }
+
+        let chain = "MetricsUsdUpdate-\(UUID().uuidString)"
+        let uId = "wallet"
+        let date = "2000-01-01"
+        defer {
+            if let asset = TRXMetricsDBManager.shared.getAssetSyncModel(chain: chain, uId: uId, date: date) {
+                TRXMetricsDBManager.shared.acknowledgeUploadedAsset(asset)
+            }
+            TRXMetricsDBManager.shared.deleteAssetsBeforeToday(forChain: chain, uId: uId)
+        }
+        let original = TRXAssetSyncModel()
+        original.chain = chain
+        original.uId = uId
+        original.date = date
+        original.trxBalance = "1"
+        original.usdtBalance = "1"
+        original.usdBalance = "2"
+        original.updated = false
+        XCTAssertTrue(TRXMetricsDBManager.shared.upsertAssetSync(model: original))
+
+        let changed = TRXAssetSyncModel()
+        changed.chain = chain
+        changed.uId = uId
+        changed.date = date
+        changed.trxBalance = "1"
+        changed.usdtBalance = "1"
+        changed.usdBalance = "3"
+        manager.upsertAssetData(model: changed)
+
+        let stored = TRXMetricsDBManager.shared.getAssetSyncModel(chain: chain, uId: uId, date: date)
+        XCTAssertEqual(stored?.usdBalance, "3")
+        XCTAssertEqual(stored?.updated, true)
+    }
+
+    func testMetricsAcknowledgementPreservesNewerData() {
+        let chain = "MetricsAcknowledgement-\(UUID().uuidString)"
+        let uId = "wallet"
+        let date = "2000-01-01"
+        let db = TRXMetricsDBManager.shared
+        defer {
+            if let asset = db.getAssetSyncModel(chain: chain, uId: uId, date: date) {
+                db.acknowledgeUploadedAsset(asset)
+            }
+            if let transaction = db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date) {
+                db.acknowledgeUploadedTransaction(transaction)
+            }
+            db.deleteAssetsBeforeToday(forChain: chain, uId: uId)
+            db.deleteTransactionSyncBeforeToday(forChain: chain, uId: uId)
+        }
+
+        let asset = TRXAssetSyncModel()
+        asset.chain = chain
+        asset.uId = uId
+        asset.date = date
+        asset.trxBalance = "1"
+        asset.usdtBalance = "1"
+        asset.usdBalance = "2"
+        asset.updated = true
+        XCTAssertTrue(db.upsertAssetSync(model: asset))
+
+        var transaction = TRXTransactionSyncModel()
+        transaction.chain = chain
+        transaction.uId = uId
+        transaction.date = date
+        transaction.actionType = 1
+        transaction.tokenAddress = "_"
+        transaction.count = 1
+        transaction.tokenAmount = "1"
+        transaction.updated = true
+        XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+
+        guard let uploadedAsset = db.getUpdatedAssetSyncModels(forChain: chain, uId: uId).first,
+              let uploadedTransaction = db.getUpdatedTransactionSyncModels(forChain: chain, uId: uId).first else {
+            return XCTFail("Missing upload snapshots")
+        }
+
+        asset.usdBalance = "3"
+        XCTAssertTrue(db.upsertAssetSync(model: asset))
+        transaction.count = 2
+        transaction.tokenAmount = "2"
+        XCTAssertTrue(db.upsertTransactionSync(model: transaction))
+
+        XCTAssertFalse(db.acknowledgeUploadedAsset(uploadedAsset))
+        XCTAssertFalse(db.acknowledgeUploadedTransaction(uploadedTransaction))
+        XCTAssertEqual(db.getAssetSyncModel(chain: chain, uId: uId, date: date)?.updated, true)
+        XCTAssertEqual(db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date)?.updated, true)
+
+        guard let currentAsset = db.getAssetSyncModel(chain: chain, uId: uId, date: date),
+              let currentTransaction = db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date) else {
+            return XCTFail("Missing current records")
+        }
+        XCTAssertTrue(db.acknowledgeUploadedAsset(currentAsset))
+        XCTAssertTrue(db.acknowledgeUploadedTransaction(currentTransaction))
+        XCTAssertEqual(db.getAssetSyncModel(chain: chain, uId: uId, date: date)?.updated, false)
+        XCTAssertEqual(db.getTransactionSyncModel(chain: chain, uId: uId, actionType: 1, tokenAddress: "_", date: date)?.updated, false)
+    }
+
+    func testMetricsParameterEncryptionFailsClosed() {
+        let manager = TRXStatisticalUploadManager.shared
+        let signature = String(repeating: "a", count: 40)
+        let request = "https://example.com/upload?signature=\(signature)"
+
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: "https://example.com/upload",
+                                                  headers: ["ts": "1712345678901"]).isEmpty)
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: request,
+                                                  headers: [:]).isEmpty)
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: "https://example.com/upload?signature=invalid",
+                                                  headers: ["ts": "1712345678901"]).isEmpty)
+        XCTAssertEqual(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                   requestString: request,
+                                                   headers: ["ts": "1712345678901"]).count,
+                       1)
+    }
+
+    func testBase58CheckRoundTripWithFlickrAlphabet() {
+        let payload = Data([0x00, 0x41, 0x88, 0xff, 0x10, 0x7c, 0x23, 0x5a])
+        let encoded = String(base58CheckEncoding: payload, alphabet: Base58String.flickrAlphabet)
+        let decoded = Data(base58CheckDecoding: encoded, alphabet: Base58String.flickrAlphabet)
+
+        XCTAssertNotEqual(encoded, String(base58CheckEncoding: payload))
+        XCTAssertEqual(decoded, payload)
+    }
+
+    func testStrictHexAddressConversionRejectsGarbage() {
+        var payload = Data([0x41])
+        payload.append(contentsOf: Array(repeating: UInt8(0x11), count: 20))
+        let hex = payload.map { String(format: "%02x", $0) }.joined()
+
+        let valid = hex.convertBase58HexAddressToTronAddress()
+        XCTAssertFalse(valid.isEmpty)
+        XCTAssertTrue(valid.isTRXAddress())
+        XCTAssertTrue(valid.isEIP712TronAddress())
+        XCTAssertEqual(valid.convertTronAddressToBase58HexAddress().lowercased(), hex)
+
+        XCTAssertEqual("".convertBase58HexAddressToTronAddress(), "")
+        XCTAssertEqual("41".convertBase58HexAddressToTronAddress(), "")
+        XCTAssertEqual("41ZZ\(String(hex.dropFirst(2)))".convertBase58HexAddressToTronAddress(), "")
+        XCTAssertNil("abZZ".hexDecodedData())
+        XCTAssertNil("abc".hexDecodedData())
+        XCTAssertFalse("41notanaddress".isEIP712TronAddress())
+        XCTAssertFalse("Tnotanaddress".isEIP712TronAddress())
+    }
+
+    func testBase58RejectsInvalidAlphabets() {
+        let payload = Data([0x00, 0x41])
+        let invalidAlphabets = [
+            [UInt8](),
+            [UInt8](repeating: 0x31, count: 1),
+            [UInt8](repeating: 0x31, count: 58),
+            Array(Base58String.btcAlphabet.dropLast()) + [0x80]
+        ]
+
+        XCTAssertNotNil(String(base58Encoding: payload, validatingAlphabet: Base58String.flickrAlphabet))
+        XCTAssertNotNil(String(base58CheckEncoding: payload, validatingAlphabet: Base58String.flickrAlphabet))
+
+        for alphabet in invalidAlphabets {
+            XCTAssertNil(String(base58Encoding: payload, validatingAlphabet: alphabet))
+            XCTAssertNil(String(base58CheckEncoding: payload, validatingAlphabet: alphabet))
+            XCTAssertNil(Data(base58Decoding: "1", alphabet: alphabet))
+            XCTAssertNil(Data(base58CheckDecoding: "1", alphabet: alphabet))
+        }
     }
     
     func testPerformanceExample() {
@@ -150,6 +451,35 @@ class Tests: XCTestCase {
             }
         }
         wait(for: [exp], timeout: 60)
+    }
+
+    func testSignTransactionAddsOneSignaturePerSigner() throws {
+        let firstAccount = try keyStore.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        let secondAccount = try keyStore.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        let transaction = TronTransaction()
+        let rawData = Transaction_raw()
+        rawData.contractArray = [Transaction_Contract(), Transaction_Contract()]
+        transaction.rawData = rawData
+
+        let firstAddress = String(base58CheckEncoding: firstAccount.address.data)
+        guard case .success = TLWalletCore.signTronTransaction(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
+            return XCTFail("First signer failed")
+        }
+        XCTAssertEqual(transaction.signatureArray.count, 1)
+
+        transaction.signatureArray.add(transaction.signatureArray[0])
+        XCTAssertEqual(transaction.signatureArray.count, 2)
+
+        let secondAddress = String(base58CheckEncoding: secondAccount.address.data)
+        guard case .success = TLWalletCore.signTronTransaction(keyStore: keyStore, transaction: transaction, password: password, address: secondAddress) else {
+            return XCTFail("Second signer failed")
+        }
+        XCTAssertEqual(transaction.signatureArray.count, 2)
+
+        guard case .success = TLWalletCore.signTronTransaction(keyStore: keyStore, transaction: transaction, password: password, address: firstAddress) else {
+            return XCTFail("Repeated signer failed")
+        }
+        XCTAssertEqual(transaction.signatureArray.count, 2)
     }
     
     // Sign String
@@ -253,4 +583,23 @@ class Tests: XCTestCase {
         wait(for: [exp], timeout: 60)
     }
 
+}
+
+private final class MetricsDataSourceStub: TRXMetricsDataSource {
+    var environmentKey = "MainNet"
+    var isShastaEnvironment = false
+    var isWatchWallet = false
+    var isBasicFunctionOpen = false
+    var isTokenCloudSyncClose = false
+    var walletAddress = "TTestAddress"
+    var uploadWalletType = 0
+    var usdtContractAddress = "TUSDT"
+    var isOnlineEnvironment = true
+    var isPreReleaseEnvironment = false
+    private(set) var uploadCallCount = 0
+
+    func uploadStatisticalData(parameters: [String: Any], visible: Bool, success: @escaping (Bool, Bool) -> Void,
+                               failure: @escaping () -> Void) {
+        uploadCallCount += 1
+    }
 }
