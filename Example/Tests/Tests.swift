@@ -197,6 +197,54 @@ class Tests: XCTestCase {
         assertAddressMapDefaultsCleared(defaults)
     }
 
+    func testAddressMappingTransactionRequiresCommitSuccess() {
+        var commitCallCount = 0
+        var rollbackCallCount = 0
+
+        let commitFailure = TRXMetricsDBManager.finalizeAddressMappingTransaction(
+            statementsSucceeded: true,
+            commit: {
+                commitCallCount += 1
+                return false
+            },
+            rollback: { rollbackCallCount += 1 }
+        )
+
+        XCTAssertFalse(commitFailure)
+        XCTAssertEqual(commitCallCount, 1)
+        XCTAssertEqual(rollbackCallCount, 1)
+
+        commitCallCount = 0
+        rollbackCallCount = 0
+        let commitSuccess = TRXMetricsDBManager.finalizeAddressMappingTransaction(
+            statementsSucceeded: true,
+            commit: {
+                commitCallCount += 1
+                return true
+            },
+            rollback: { rollbackCallCount += 1 }
+        )
+
+        XCTAssertTrue(commitSuccess)
+        XCTAssertEqual(commitCallCount, 1)
+        XCTAssertEqual(rollbackCallCount, 0)
+
+        commitCallCount = 0
+        rollbackCallCount = 0
+        let statementFailure = TRXMetricsDBManager.finalizeAddressMappingTransaction(
+            statementsSucceeded: false,
+            commit: {
+                commitCallCount += 1
+                return true
+            },
+            rollback: { rollbackCallCount += 1 }
+        )
+
+        XCTAssertFalse(statementFailure)
+        XCTAssertEqual(commitCallCount, 0)
+        XCTAssertEqual(rollbackCallCount, 1)
+    }
+
     private func makeAddressMapDefaults(testName: String) -> (UserDefaults, String) {
         let suite = "address-map.\(testName).\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard

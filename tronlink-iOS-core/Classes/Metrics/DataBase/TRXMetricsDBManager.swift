@@ -629,6 +629,22 @@ public class TRXMetricsDBManager: NSObject {
     /// Removed UUIDs must be named by the caller. Deriving them by diffing `mapping` against
     /// the stored table would erase live metrics whenever the caller's mapping is incomplete,
     /// which happens on a failed load or a stale pending-snapshot migration.
+    static func finalizeAddressMappingTransaction(
+        statementsSucceeded: Bool,
+        commit: () -> Bool,
+        rollback: () -> Void
+    ) -> Bool {
+        guard statementsSucceeded else {
+            rollback()
+            return false
+        }
+        guard commit() else {
+            rollback()
+            return false
+        }
+        return true
+    }
+
     @discardableResult
     public func saveAddressMappings(_ mapping: [String: String], deletingMetricsFor removedIds: Set<String> = []) -> Bool {
         var result = false
@@ -658,12 +674,11 @@ public class TRXMetricsDBManager: NSObject {
                     }
                 }
             }
-            if allInserted {
-                db.commit()
-                result = true
-            } else {
-                db.rollback()
-            }
+            result = Self.finalizeAddressMappingTransaction(
+                statementsSucceeded: allInserted,
+                commit: { db.commit() },
+                rollback: { _ = db.rollback() }
+            )
         }
         return result
     }
