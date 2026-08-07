@@ -623,12 +623,33 @@ public class TRXMetricsDBManager: NSObject {
         return ok
     }
 
-    /// Replaces all address→uuid mappings atomically. Returns true on success.
+    /// Replaces all address→uuid mappings atomically, dropping the metrics of `removedIds`
+    /// in the same transaction.
+    ///
+    /// Removed UUIDs must be named by the caller. Deriving them by diffing `mapping` against
+    /// the stored table would erase live metrics whenever the caller's mapping is incomplete,
+    /// which happens on a failed load or a stale pending-snapshot migration.
+    static func finalizeAddressMappingTransaction(
+        statementsSucceeded: Bool,
+        commit: () -> Bool,
+        rollback: () -> Void
+    ) -> Bool {
+        guard statementsSucceeded else {
+            rollback()
+            return false
+        }
+        guard commit() else {
+            rollback()
+            return false
+        }
+        return true
+    }
+
     @discardableResult
-    public func saveAddressMappings(_ mapping: [String: String]) -> Bool {
+    public func saveAddressMappings(_ mapping: [String: String], deletingMetricsFor removedIds: Set<String> = []) -> Bool {
         var result = false
         dataBaseQueue?.inDatabase { db in
-            db.beginTransaction()
+            guard db.beginTransaction() else { return }
             guard db.executeUpdate("DELETE FROM AddressMapTable", withArgumentsIn: []) else {
                 db.rollback()
                 return
@@ -644,11 +665,20 @@ public class TRXMetricsDBManager: NSObject {
                 }
             }
             if allInserted {
-                db.commit()
-                result = true
-            } else {
-                db.rollback()
+                // A removed UUID that got remapped to another address is still live, keep it.
+                for uuid in removedIds.subtracting(mapping.values) {
+                    if !self.runUpdate(db, "DELETE FROM AssetSyncTable WHERE uId = ?", [uuid]) ||
+                        !self.runUpdate(db, "DELETE FROM TransactionSyncTable WHERE uId = ?", [uuid]) {
+                        allInserted = false
+                        break
+                    }
+                }
             }
+            result = Self.finalizeAddressMappingTransaction(
+                statementsSucceeded: allInserted,
+                commit: { db.commit() },
+                rollback: { _ = db.rollback() }
+            )
         }
         return result
     }
@@ -665,18 +695,22 @@ public class TRXMetricsDBManager: NSObject {
         return result
     }
 
-    public func loadAllAddressMappings() -> [String: String] {
-        var result: [String: String] = [:]
+    /// Returns nil when the table cannot be read, so callers can tell "no mappings" apart
+    /// from "read failed". Treating a failed read as empty would let the next full save
+    /// wipe the mappings still on disk and orphan every metrics row referencing them.
+    public func loadAllAddressMappings() -> [String: String]? {
+        var result: [String: String]?
         dataBaseQueue?.inDatabase { db in
-            if let rs = try? db.executeQuery("SELECT address, uuid FROM AddressMapTable", values: nil) {
-                while rs.next() {
-                    if let addr = rs.string(forColumn: "address"),
-                       let uuid = rs.string(forColumn: "uuid") {
-                        result[addr] = uuid
-                    }
+            guard let rs = try? db.executeQuery("SELECT address, uuid FROM AddressMapTable", values: nil) else { return }
+            var loaded: [String: String] = [:]
+            while rs.next() {
+                if let addr = rs.string(forColumn: "address"),
+                   let uuid = rs.string(forColumn: "uuid") {
+                    loaded[addr] = uuid
                 }
-                rs.close()
             }
+            rs.close()
+            result = loaded
         }
         return result
     }

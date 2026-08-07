@@ -249,18 +249,21 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     public func parameterProcessing(parameters: [String: Any], requestString: String, headers: [String: String]) -> [String: Any] {
-        let hexCharacters = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        let signatureCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
         let decimalCharacters = CharacterSet(charactersIn: "0123456789")
         guard let url = URL(string: requestString),
               let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let signature = comps.queryItems?.first(where: { $0.name.lowercased() == "signature" })?.value,
-              signature.count == 40,
-              signature.rangeOfCharacter(from: hexCharacters.inverted) == nil,
+              !signature.isEmpty,
+              signature.rangeOfCharacter(from: signatureCharacters.inverted) == nil,
               let ts = headers["ts"],
-              ts.count == 13,
+              !ts.isEmpty,
               ts.rangeOfCharacter(from: decimalCharacters.inverted) == nil else {
             NSLog("[Metrics] skip request due to invalid encryption inputs")
             return [:]
+        }
+        if (signature.count != 28 && signature.count != 40) || ts.count != 13 {
+            NSLog("[Metrics] unexpected encryption input lengths: signature=\(signature.count), ts=\(ts.count)")
         }
         var newParams: [String: String] = [:]
         for (key, value) in parameters {
