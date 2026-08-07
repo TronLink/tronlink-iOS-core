@@ -25,10 +25,7 @@ public func id(for address: String) -> String {
         while self.usedIds.contains(result) { result = Self.generateUUIDFull() }
         self.mapping[normalized] = result
         self.usedIds.insert(result)
-        let snapshot = self.mapping
-        self.persistenceQueue.sync {
-            self.persistMapping(snapshot)                  // writes to the local FMDB only
-        }
+        self.persistNewMappings([normalized: result])      // one row, local FMDB only
     }
     return result
 }

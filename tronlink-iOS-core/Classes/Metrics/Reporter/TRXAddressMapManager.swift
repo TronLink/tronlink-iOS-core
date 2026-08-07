@@ -6,6 +6,7 @@ let Metrics_Address_Map_Removed_Key = "TRXAddressRandomIdMappingRemoved"
 
 protocol TRXAddressMappingStore: AnyObject {
     func saveAddressMappings(_ mapping: [String: String], deletingMetricsFor removedIds: Set<String>) -> Bool
+    func upsertAddressMapping(address: String, uuid: String) -> Bool
     func loadAllAddressMappings() -> [String: String]?
 }
 
@@ -16,7 +17,6 @@ public final class TRXAddressMapManager {
     private var mapping: [String: String] = [:]   // address -> id (UUID string)
     private var usedIds: Set<String> = []        // Quick duplicate check
     private let queue = DispatchQueue(label: "com.tron.wallet.AddressMapManager", attributes: .concurrent)
-    private let persistenceQueue = DispatchQueue(label: "com.tron.wallet.AddressMapManager.persistence")
     private let store: TRXAddressMappingStore
     private let defaults: UserDefaults
     private var persistenceDisabled = false
@@ -61,24 +61,17 @@ public final class TRXAddressMapManager {
     public func generateMappings(forAllAddresses addresses: [String], completion: (() -> Void)? = nil) {
         let normalizedSet = Set(addresses.map { Self.normalizeAddress($0) })
         queue.async(flags: .barrier) {
-            var changed = false
-            for addr in normalizedSet {
-                if self.mapping[addr] == nil {
-                    var newId = Self.generateUUIDFull()
-                    while self.usedIds.contains(newId) {
-                        newId = Self.generateUUIDFull()
-                    }
-                    self.mapping[addr] = newId
-                    self.usedIds.insert(newId)
-                    changed = true
+            var added: [String: String] = [:]
+            for addr in normalizedSet where self.mapping[addr] == nil {
+                var newId = Self.generateUUIDFull()
+                while self.usedIds.contains(newId) {
+                    newId = Self.generateUUIDFull()
                 }
+                self.mapping[addr] = newId
+                self.usedIds.insert(newId)
+                added[addr] = newId
             }
-            let snapshot = changed ? self.mapping : nil
-            if let snap = snapshot {
-                self.persistenceQueue.sync {
-                    self.persistMapping(snap)
-                }
-            }
+            self.persistNewMappings(added)
             if let cb = completion {
                 DispatchQueue.main.async { cb() }
             }
@@ -86,8 +79,8 @@ public final class TRXAddressMapManager {
     }
 
     // MARK: - Obtain the ID corresponding to the address
-    /// For a new address this blocks the calling thread on one database save attempt before
-    /// exposing the ID. A failed save leaves the ID available in memory for this process.
+    /// For a new address this blocks the calling thread on one single-row database write before
+    /// exposing the ID. A failed write leaves the ID available in memory for this process.
     public func id(for address: String) -> String {
         let normalized = Self.normalizeAddress(address)
         var existing: String?
@@ -101,10 +94,7 @@ public final class TRXAddressMapManager {
             while self.usedIds.contains(result) { result = Self.generateUUIDFull() }
             self.mapping[normalized] = result
             self.usedIds.insert(result)
-            let snapshot = self.mapping
-            self.persistenceQueue.sync {
-                self.persistMapping(snapshot)
-            }
+            self.persistNewMappings([normalized: result])
         }
         return result
     }
@@ -115,10 +105,7 @@ public final class TRXAddressMapManager {
         queue.async(flags: .barrier) {
             guard let id = self.mapping.removeValue(forKey: normalized) else { return }
             self.usedIds.remove(id)
-            let snapshot = self.mapping
-            self.persistenceQueue.sync {
-                self.persistMapping(snapshot, removedIds: [id])
-            }
+            self.persistMapping(self.mapping, removedIds: [id])
         }
     }
 
@@ -127,10 +114,7 @@ public final class TRXAddressMapManager {
             let removedIds = self.usedIds
             self.mapping.removeAll()
             self.usedIds.removeAll()
-            let snapshot = self.mapping
-            self.persistenceQueue.sync {
-                self.persistMapping(snapshot, removedIds: removedIds)
-            }
+            self.persistMapping(self.mapping, removedIds: removedIds)
         }
     }
 
@@ -150,8 +134,24 @@ public final class TRXAddressMapManager {
         return trimmed
     }
 
-    /// Must run on `persistenceQueue`. Lock order is `queue` (barrier) → `persistenceQueue`
-    /// → FMDatabaseQueue; nothing reached from here may call back into this manager.
+    /// Writes only the rows just added, so the barrier is held for O(added) instead of the
+    /// O(table) of `persistMapping`. That matters because every barrier here also stalls the
+    /// `queue.sync` read in `id(for:)`, which runs on the caller's (possibly main) thread.
+    ///
+    /// Persistence stays off after a failed load: the in-memory map is empty there, so these
+    /// addresses may already hold different UUIDs on disk whose metrics the write would orphan.
+    private func persistNewMappings(_ added: [String: String]) {
+        guard !persistenceDisabled else { return }
+        for (address, uuid) in added {
+            if !store.upsertAddressMapping(address: address, uuid: uuid) {
+                NSLog("[AddressMap] database save failed for an address mapping")
+            }
+        }
+    }
+
+    /// Rewrites the whole table, so only removal paths may use it. Must run inside a `queue`
+    /// barrier: lock order is `queue` (barrier) → FMDatabaseQueue, and nothing reached from
+    /// here may call back into this manager.
     private func persistMapping(_ snapshot: [String: String], removedIds: Set<String> = []) {
         guard !persistenceDisabled else { return }
         guard store.saveAddressMappings(snapshot, deletingMetricsFor: removedIds) else {

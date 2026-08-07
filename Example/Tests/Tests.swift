@@ -7,6 +7,7 @@ private final class AddressMappingStoreStub: TRXAddressMappingStore {
     var saveResults: [Bool]
     private(set) var loadCallCount = 0
     private(set) var saves: [(mapping: [String: String], removedIds: Set<String>)] = []
+    private(set) var upserts: [(address: String, uuid: String)] = []
 
     init(loadResult: [String: String]? = [:], saveResults: [Bool] = [true]) {
         self.loadResult = loadResult
@@ -20,6 +21,11 @@ private final class AddressMappingStoreStub: TRXAddressMappingStore {
 
     func saveAddressMappings(_ mapping: [String: String], deletingMetricsFor removedIds: Set<String>) -> Bool {
         saves.append((mapping, removedIds))
+        return saveResults.isEmpty ? false : saveResults.removeFirst()
+    }
+
+    func upsertAddressMapping(address: String, uuid: String) -> Bool {
+        upserts.append((address, uuid))
         return saveResults.isEmpty ? false : saveResults.removeFirst()
     }
 }
@@ -125,8 +131,11 @@ class Tests: XCTestCase {
         let replacement = manager.allMappings()["TRegeneratedAddress"]
         XCTAssertNotNil(replacement)
         XCTAssertNotEqual(replacement, "legacy-uuid")
-        XCTAssertEqual(store.saves.count, 2)
-        XCTAssertEqual(store.saves.last?.mapping["TRegeneratedAddress"], replacement)
+        // Only the newly generated row, and no second full-table replace: the barrier that
+        // does this write also stalls the main thread's read in id(for:).
+        XCTAssertEqual(store.upserts.map { $0.address }, ["TRegeneratedAddress"])
+        XCTAssertEqual(store.upserts.first?.uuid, replacement)
+        XCTAssertEqual(store.saves.count, 1)
         assertAddressMapDefaultsCleared(defaults)
     }
 
@@ -173,7 +182,9 @@ class Tests: XCTestCase {
         let generatedId = manager.id(for: "TRuntimeFailure")
 
         XCTAssertFalse(generatedId.isEmpty)
-        XCTAssertEqual(store.saves.count, 1)
+        // One row for the new address, never a full-table rewrite: the caller may be the main thread.
+        XCTAssertEqual(store.upserts.map { $0.address }, ["TRuntimeFailure"])
+        XCTAssertTrue(store.saves.isEmpty)
         assertAddressMapDefaultsCleared(defaults)
 
         let noRetry = expectation(description: "no delayed retry")
@@ -181,7 +192,8 @@ class Tests: XCTestCase {
             noRetry.fulfill()
         }
         wait(for: [noRetry], timeout: 2)
-        XCTAssertEqual(store.saves.count, 1)
+        XCTAssertEqual(store.upserts.count, 1)
+        XCTAssertTrue(store.saves.isEmpty)
         assertAddressMapDefaultsCleared(defaults)
     }
 
@@ -194,6 +206,8 @@ class Tests: XCTestCase {
         XCTAssertFalse(manager.id(for: "TReadFailure").isEmpty)
 
         XCTAssertTrue(store.saves.isEmpty)
+        // The address may already hold a different UUID on disk; upserting would orphan its metrics.
+        XCTAssertTrue(store.upserts.isEmpty)
         assertAddressMapDefaultsCleared(defaults)
     }
 
