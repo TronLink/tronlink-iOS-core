@@ -545,6 +545,8 @@ class Tests: XCTestCase {
         let manager = TRXStatisticalUploadManager.shared
         let signature = String(repeating: "a", count: 40)
         let request = "https://example.com/upload?signature=\(signature)"
+        let base64Signature = "+/" + String(repeating: "A", count: 25) + "="
+        let base64Request = "https://example.com/upload?signature=\(base64Signature.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!)"
 
         XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
                                                   requestString: "https://example.com/upload",
@@ -553,8 +555,15 @@ class Tests: XCTestCase {
                                                   requestString: request,
                                                   headers: [:]).isEmpty)
         XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
-                                                  requestString: "https://example.com/upload?signature=invalid",
+                                                  requestString: "https://example.com/upload?signature=invalid!",
                                                   headers: ["ts": "1712345678901"]).isEmpty)
+        XCTAssertTrue(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                  requestString: request,
+                                                  headers: ["ts": "171234567890x"]).isEmpty)
+        XCTAssertEqual(manager.parameterProcessing(parameters: ["X": "plain"],
+                                                   requestString: base64Request,
+                                                   headers: ["ts": "1712345678"]).count,
+                       1)
         XCTAssertEqual(manager.parameterProcessing(parameters: ["X": "plain"],
                                                    requestString: request,
                                                    headers: ["ts": "1712345678901"]).count,
