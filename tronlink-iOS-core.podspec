@@ -24,20 +24,9 @@ Pod::Spec.new do |s|
    s.dependency 'FMDB', '2.7.5'
    
    s.requires_arc = false
-   s.requires_arc = [
-      "tronlink-iOS-core/Classes/gRPC/google/api/HTTP.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/Discover.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/TronInventoryItems.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/AccountContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/AssetIssueContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/BalanceContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/ExchangeContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/MarketContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/ProposalContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/ShieldContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/StorageContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/VoteAssetContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/core/contract/WitnessContract.pbobjc.m",
-      "tronlink-iOS-core/Classes/gRPC/Api.pbrpc.m"
-   ]
+   # Generated *.pbobjc.m must stay MRC; only the RPC layer is ARC.
+   # CocoaPods expands this pattern from the pod root, whereas Dir[] here would
+   # resolve against the installing project's CWD and silently yield [].
+   # covers *.pbrpc.m only — a hand-written ARC .m needs adding here.
+   s.requires_arc = 'tronlink-iOS-core/Classes/gRPC/**/*.pbrpc.m'
 end
