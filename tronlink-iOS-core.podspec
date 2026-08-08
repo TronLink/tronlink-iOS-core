@@ -20,7 +20,7 @@ Pod::Spec.new do |s|
   s.dependency 'gRPC-RxLibrary', '1.68.1'
    
    s.dependency 'TronWalletWeb3Swift', '1.1.1'
-   s.dependency 'TronWalletKeystore', '1.0.4'
+   s.dependency 'TronWalletKeystore', '1.0.5'
    s.dependency 'FMDB', '2.7.5'
    
    s.requires_arc = false
