@@ -453,7 +453,7 @@ class Tests: XCTestCase {
         XCTAssertFalse(db.getUpdatedTransactionSyncModels(forChain: chain, uId: keptId).isEmpty)
     }
 
-    func testMetricsAssetUpdatesWhenOnlyUsdBalanceChanges() {
+    func testMetricsAssetUpdatesWhenUsdBalanceRecoversFromEmpty() {
         let config = MetricsDataSourceStub()
         let manager = TRXStatisticalUploadManager.shared
         manager.dataConfig = config
@@ -474,7 +474,7 @@ class Tests: XCTestCase {
         original.date = date
         original.trxBalance = "1"
         original.usdtBalance = "1"
-        original.usdBalance = "2"
+        original.usdBalance = ""
         original.updated = false
         XCTAssertTrue(TRXMetricsDBManager.shared.upsertAssetSync(model: original))
 

@@ -356,7 +356,7 @@ public class TRXMetricsDBManager: NSObject {
 
                     if (oldTrxClean.count > 0 && newTrxClean.count > 0 && oldTrxClean != newTrxClean) ||
                         (oldUsdtClean.count > 0 && newUsdtClean.count > 0 && oldUsdtClean != newUsdtClean) ||
-                        (oldUsdClean.count > 0 && newUsdClean.count > 0 && oldUsdClean != newUsdClean) {
+                        (newUsdClean.count > 0 && oldUsdClean != newUsdClean) {
                         let m = self.copyAssetSyncModel(model, updated: true)
                         success = self.updateAssetSync_internal(db: db, chain: chain, uId: uId, idType: idType, date: date, trxBalance: m.trxBalance, usdtBalance: m.usdtBalance, usdBalance: m.usdBalance, updated: m.updated)
                     }
