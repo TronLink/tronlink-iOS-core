@@ -3,6 +3,11 @@ import Foundation
 let Metrics_Statistical_Upload_Visible_Key = "TRXStatisticalUploadVisibleKey"
 
 public class TRXStatisticalUploadManager: NSObject {
+    public enum ParameterProcessingError: Error {
+        case invalidEncryptionInputs
+        case encryptionFailed
+    }
+
     @objc public static let shared = TRXStatisticalUploadManager()
     private static let amountBuckets: [(threshold: NSDecimalNumber, idx: Int)] = [
         (NSDecimalNumber(string: "1"), 0),
@@ -33,60 +38,33 @@ public class TRXStatisticalUploadManager: NSObject {
     
     //MARK: -Required parameters, passed when the app starts.
     public var dataConfig: TRXMetricsDataSource?
+
+    func isCollectionDisabled(_ config: TRXMetricsDataSource?) -> Bool {
+        guard let config = config else { return true }
+        return config.isShastaEnvironment || config.isWatchWallet || config.isBasicFunctionOpen ||
+            config.isTokenCloudSyncClose || config.environmentKey.isEmpty || config.walletAddress.isEmpty
+    }
+
+    func isCurrentCollectionConfig(_ config: TRXMetricsDataSource, chain: String, walletAddress: String) -> Bool {
+        guard let currentConfig = dataConfig, currentConfig === config else { return false }
+        return !isCollectionDisabled(config) && config.environmentKey == chain && config.walletAddress == walletAddress
+    }
     
     
     //MARK: -assets
-    func getCurrentChainUpdatedIsTrueAllAssetSyncModels() -> [TRXAssetSyncModel] {
-        let chain = dataConfig?.environmentKey ?? ""
-        let assets = TRXMetricsDBManager.shared.getUpdatedAssetSyncModels(forChain: chain)
-        return assets
+    func getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain chain: String, uId: String) -> [TRXAssetSyncModel] {
+        return TRXMetricsDBManager.shared.getUpdatedAssetSyncModels(forChain: chain, uId: uId)
     }
     
     
-    func upsertAssetDataCompareAndUpsert(model:TRXAssetSyncModel, callBackUpdate:Bool) {
-        if (dataConfig?.isShastaEnvironment ?? false) || (dataConfig?.isWatchWallet ?? false) || (dataConfig?.isBasicFunctionOpen ?? false) || (dataConfig?.isTokenCloudSyncClose ?? false) {
-            return
-        }
-        TRXMetricsDBManager.shared.upsertAssetSync_compareAndUpsert(model: model, callBackUpdate: callBackUpdate)
+    public func upsertAssetData(model:TRXAssetSyncModel) {
+        guard !isCollectionDisabled(dataConfig) else { return }
+        TRXMetricsDBManager.shared.upsertAssetSync_compareAndUpsert(model: model)
     }
     
     
-    public func upsertAssetData(model:TRXAssetSyncModel, callBackUpdate:Bool=false) {
-        if (dataConfig?.isShastaEnvironment ?? false) || (dataConfig?.isWatchWallet ?? false) || (dataConfig?.isBasicFunctionOpen ?? false) || (dataConfig?.isTokenCloudSyncClose ?? false) {
-            return
-        }
-        if callBackUpdate {
-            model.updated = false
-            TRXMetricsDBManager.shared.upsertAssetSync(model: model)
-        }else{
-            let chain = model.chain ?? ""
-            let uId = model.uId ?? ""
-            let date = model.date ?? ""
-            let m = TRXMetricsDBManager.shared.getAssetSyncModel(chain: chain, uId: uId, date: date)
-            if let tm = m {
-                let oldTrxBalance = (tm.trxBalance ?? "").tronCore_removeFloatSuffixZero()
-                let oldUsdtBalance = (tm.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
-                let newTrxBalance = (model.trxBalance ?? "").tronCore_removeFloatSuffixZero()
-                let newUsdtBalance = (model.usdtBalance ?? "").tronCore_removeFloatSuffixZero()
-                if (oldTrxBalance.count > 0 && newTrxBalance.count > 0 && oldTrxBalance != newTrxBalance) ||
-                    (oldUsdtBalance.count > 0 && newUsdtBalance.count > 0 && oldUsdtBalance != newUsdtBalance) {
-                    model.updated = true
-                    TRXMetricsDBManager.shared.upsertAssetSync(model: model)
-                }
-            }else{
-                model.updated = true
-                TRXMetricsDBManager.shared.upsertAssetSync(model: model)
-            }
-        }
-    }
-    
-    
-    func deletedBeforeTodayAssetsData() {
-        let chain = dataConfig?.environmentKey ?? ""
-        let assets = TRXMetricsDBManager.shared.getAllAssetSyncModels(forChain: chain)
-        if assets.count > 0 {
-            TRXMetricsDBManager.shared.deleteAssetsBeforeToday(forChain: chain)
-        }
+    func deletedBeforeTodayAssetsData(forChain chain: String, uId: String) {
+        TRXMetricsDBManager.shared.deleteAssetsBeforeToday(forChain: chain, uId: uId)
     }
     
     
@@ -106,26 +84,17 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     //MARK: -Transaction
-    func getCurrentChainUpdatedIsTrueAllTransactionSyncModels() -> [TRXTransactionSyncModel] {
-        let chain = dataConfig?.environmentKey ?? ""
-        let transactions = TRXMetricsDBManager.shared.getUpdatedTransactionSyncModels(forChain: chain)
-        return transactions
-    }
-    
-    
-    //Upload success, update database
-    func callBackUpsertTransactionModel(model:TRXTransactionSyncModel) {
-        model.updated = false
-        TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
+    func getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain chain: String, uId: String) -> [TRXTransactionSyncModel] {
+        return TRXMetricsDBManager.shared.getUpdatedTransactionSyncModels(forChain: chain, uId: uId)
     }
     
     
     //upsert database
     public func upsertTransactionsData(actionType:Int, tokenAddress:String, tokenAmount:String, energy:String,
                                 bandwidth:String, burn:String) {
-        if (dataConfig?.isShastaEnvironment ?? false) || (dataConfig?.isWatchWallet ?? false) || (dataConfig?.isBasicFunctionOpen ?? false) {return}
-        let chain = dataConfig?.environmentKey ?? ""
-        let address = dataConfig?.walletAddress ?? ""
+        guard let config = dataConfig, !isCollectionDisabled(config) else { return }
+        let chain = config.environmentKey
+        let address = config.walletAddress
         let uId = TRXAddressMapManager.shared.id(for: address)
         let date = Date().tronCore_getCurrentYMD_UTC()
         let m = TRXMetricsDBManager.shared.getTransactionSyncModel(chain: chain, uId: uId, actionType: actionType,
@@ -145,7 +114,8 @@ public class TRXStatisticalUploadManager: NSObject {
                                                       bandwidth: totalBandwidth,
                                                       burn: totalburn,
                                                       updated: true,
-                                                      localModel: tm)
+                                                      localModel: tm,
+                                                      config: config)
             TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
         }else{
             let model = self.makeTransactionSyncModel(actionType: actionType,
@@ -157,7 +127,8 @@ public class TRXStatisticalUploadManager: NSObject {
                                                       bandwidth: bandwidth,
                                                       burn: burn,
                                                       updated: true,
-                                                      localModel: TRXTransactionSyncModel())
+                                                      localModel: TRXTransactionSyncModel(),
+                                                      config: config)
             TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
         }
         
@@ -165,22 +136,18 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     
-    func deletedBeforeTodayTransactionsData() {
-        let chain = dataConfig?.environmentKey ?? ""
-        let transactions = TRXMetricsDBManager.shared.getAllTransactionSyncModels(forChain: chain)
-        if transactions.count > 0 {
-            TRXMetricsDBManager.shared.deleteTransactionSyncBeforeToday(forChain: chain)
-        }
+    func deletedBeforeTodayTransactionsData(forChain chain: String, uId: String) {
+        TRXMetricsDBManager.shared.deleteTransactionSyncBeforeToday(forChain: chain, uId: uId)
     }
     
     
     
     func makeTransactionSyncModel(actionType:Int, count:Int, tokenAddress:String, tokenAmount:String, totalTokenAmount:String,
-                                  energy:String, bandwidth:String, burn:String, updated:Bool, localModel:TRXTransactionSyncModel) -> TRXTransactionSyncModel {
+                                  energy:String, bandwidth:String, burn:String, updated:Bool, localModel:TRXTransactionSyncModel,
+                                  config:TRXMetricsDataSource) -> TRXTransactionSyncModel {
         var model = TRXTransactionSyncModel()
-        let address = dataConfig?.walletAddress ?? ""
-        model.uId = TRXAddressMapManager.shared.id(for: address)
-        model.idType = dataConfig?.uploadWalletType ?? 0
+        model.uId = TRXAddressMapManager.shared.id(for: config.walletAddress)
+        model.idType = config.uploadWalletType
         model.actionType = actionType
         model.count = count
         model.tokenAddress = tokenAddress
@@ -189,9 +156,9 @@ public class TRXStatisticalUploadManager: NSObject {
         model.bandwidth = bandwidth
         model.burn = burn
         model.date = Date().tronCore_getCurrentYMD_UTC()
-        model.chain = dataConfig?.environmentKey ?? ""
+        model.chain = config.environmentKey
         model.updated = updated
-        if tokenAddress == "_" || tokenAddress == dataConfig?.usdtContractAddress {
+        if tokenAddress == "_" || tokenAddress == config.usdtContractAddress {
             let localHierarchyArr = Self.bucketKeyPaths.map { localModel[keyPath: $0] ?? 0 }
             let arr = self.distributionTokenAmount(forTokenAmount: tokenAmount, localHierarchyArr:localHierarchyArr)
             zip(Self.bucketKeyPaths, arr).forEach { keyPath, value in
@@ -223,48 +190,51 @@ public class TRXStatisticalUploadManager: NSObject {
     
     //MARK: -upload
     public func uploadStatisticalData() {
-        if (dataConfig?.isBasicFunctionOpen ?? false) || (dataConfig?.isShastaEnvironment ?? false) || (dataConfig?.isTokenCloudSyncClose ?? false) {
-            return
-        }
+        guard !isCollectionDisabled(dataConfig) else { return }
         // All DB operations run on the dedicated background queue to avoid blocking the main thread.
         // Migration is performed synchronously on this queue, so upload only starts after migration completes.
         metricsQueue.async { [weak self] in
             guard let self = self else { return }
-            if let config = self.dataConfig {
-                TRXMetricsDBManager.shared.migrateFromLegacyIfNeeded(dataSource: config)
-            }
+            guard let config = self.dataConfig, !self.isCollectionDisabled(config) else { return }
+            let chain = config.environmentKey
+            let walletAddress = config.walletAddress
+            TRXMetricsDBManager.shared.migrateFromLegacyIfNeeded(dataSource: config)
 #if DEBUG
-            self.uploadStatisticalDataToServer()
+            self.uploadStatisticalDataToServer(config: config, chain: chain, walletAddress: walletAddress)
 #else
-            if (self.dataConfig?.isOnlineEnvironment ?? false) || (self.dataConfig?.isPreReleaseEnvironment ?? false) {
-                self.uploadStatisticalDataToServer()
+            if config.isOnlineEnvironment || config.isPreReleaseEnvironment {
+                self.uploadStatisticalDataToServer(config: config, chain: chain, walletAddress: walletAddress)
             }
 #endif
         }
     }
     
     /// Must be called from metricsQueue.
-    func uploadStatisticalDataToServer() {
-        let assets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels()
-        let transactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels()
+    func uploadStatisticalDataToServer(config: TRXMetricsDataSource, chain: String, walletAddress: String) {
+        guard isCurrentCollectionConfig(config, chain: chain, walletAddress: walletAddress) else { return }
+        let uId = TRXAddressMapManager.shared.id(for: walletAddress)
+        let assets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain: chain, uId: uId)
+        let transactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain: chain, uId: uId)
         if assets.count > 0 || transactions.count > 0 {
-            TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: assets, transactions: transactions) { [weak self] isUploadSuccess, visible in
+            TRXStatisticalUploadViewModel().uploadStatisticalDatabase(assets: assets,
+                                                                      transactions: transactions,
+                                                                      dataConfig: config,
+                                                                      chain: chain,
+                                                                      walletAddress: walletAddress) { [weak self] isUploadSuccess, visible in
                 guard let self = self else { return }
                 // UserDefaults write is lightweight, safe on any thread.
                 UserDefaults.standard.set(visible, forKey: Metrics_Statistical_Upload_Visible_Key)
                 if isUploadSuccess {
                     // Post-upload DB writes go back to the dedicated queue.
                     self.metricsQueue.async {
-                        self.deletedBeforeTodayAssetsData()
-                        let newAssets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels()
-                        for asset in newAssets {
-                            self.upsertAssetData(model: asset, callBackUpdate: true)
+                        for asset in assets {
+                            TRXMetricsDBManager.shared.acknowledgeUploadedAsset(asset)
                         }
-                        self.deletedBeforeTodayTransactionsData()
-                        let newTransactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels()
-                        for ts in newTransactions {
-                            self.callBackUpsertTransactionModel(model: ts)
+                        for transaction in transactions {
+                            TRXMetricsDBManager.shared.acknowledgeUploadedTransaction(transaction)
                         }
+                        self.deletedBeforeTodayAssetsData(forChain: chain, uId: uId)
+                        self.deletedBeforeTodayTransactionsData(forChain: chain, uId: uId)
                     }
                 } else {
                     NSLog("[Metrics] server returned isUploadSuccess=false, will retry next cycle")
@@ -279,14 +249,22 @@ public class TRXStatisticalUploadManager: NSObject {
     
     
     public func parameterProcessing(parameters: [String: Any], requestString: String, headers: [String: String]) -> [String: Any] {
-        var signature = ""
-        if let url = URL(string: requestString),
-           let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let value = comps.queryItems?.first(where: { $0.name.lowercased() == "signature" })?.value {
-            signature = value
+        let signatureCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+        let decimalCharacters = CharacterSet(charactersIn: "0123456789")
+        guard let url = URL(string: requestString),
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let signature = comps.queryItems?.first(where: { $0.name.lowercased() == "signature" })?.value,
+              !signature.isEmpty,
+              signature.rangeOfCharacter(from: signatureCharacters.inverted) == nil,
+              let ts = headers["ts"],
+              !ts.isEmpty,
+              ts.rangeOfCharacter(from: decimalCharacters.inverted) == nil else {
+            NSLog("[Metrics] skip request due to invalid encryption inputs")
+            return [:]
         }
-        let ts = headers["ts"] ?? ""
-        let sig = signature.removingPercentEncoding ?? signature
+        if (signature.count != 28 && signature.count != 40) || ts.count != 13 {
+            NSLog("[Metrics] unexpected encryption input lengths: signature=\(signature.count), ts=\(ts.count)")
+        }
         var newParams: [String: String] = [:]
         for (key, value) in parameters {
             let plain: String = {
@@ -299,10 +277,10 @@ public class TRXStatisticalUploadManager: NSObject {
                 }
                 return "\(value)"
             }()
-            let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: sig, ts: ts, plaintext: plain)
+            let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: signature, ts: ts, plaintext: plain)
             if encryptedP.isEmpty {
-                NSLog("[Metrics] skip parameter due to AES encrypt failure: %@", key)
-                continue
+                NSLog("[Metrics] skip request due to AES encrypt failure: %@", key)
+                return [:]
             }
             newParams[key] = encryptedP
         }

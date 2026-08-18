@@ -1,8 +1,6 @@
 import Foundation
 
 public extension String {
-    private static let hexByteRegex = try! NSRegularExpression(pattern: "[0-9a-f]{1,2}", options: .caseInsensitive)
-
     func isTRXAddress() -> Bool {
         if self.isEmpty {
             return false
@@ -43,24 +41,45 @@ public extension String {
     }
     
     func convertBase58HexAddressToTronAddress() -> String {
-        return String.init(base58CheckEncoding: self.hexDecodedData() ?? Data())
+        // Strict: full hex, 21 bytes, 0x41 prefix. Never encode empty/partial Data.
+        guard let data = hexDecodedData(),
+              data.count == 21,
+              data.first == 0x41 else {
+            return ""
+        }
+        return String(base58CheckEncoding: data)
     }
         
     func hexDecodedData() -> Data? {
-        var data = Data(capacity: self.count / 2)
-        
-        String.hexByteRegex.enumerateMatches(in: self, range: NSMakeRange(0, utf16.count)) { match, _, _ in
-            guard let range = match?.range else { return }
-            let byteString = (self as NSString).substring(with: range)
-            guard var num = UInt8(byteString, radix: 16) else { return }
-            data.append(&num, count: 1)
+        let hex: String
+        if hasPrefix("0x") || hasPrefix("0X") {
+            hex = String(dropFirst(2))
+        } else {
+            hex = self
         }
-        
-        return data.isEmpty ? nil : data
+        guard !hex.isEmpty, hex.count % 2 == 0 else { return nil }
+
+        var data = Data(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let num = UInt8(hex[index..<next], radix: 16) else { return nil }
+            data.append(num)
+            index = next
+        }
+        return data
     }
     
     func isEIP712TronAddress() -> Bool {
-        if self.hasPrefix("T") || self.hasPrefix("41") {
+        if hasPrefix("T") {
+            return isTRXAddress()
+        }
+        if hasPrefix("41") || hasPrefix("0x41") || hasPrefix("0X41") {
+            guard let data = hexDecodedData(),
+                  data.count == 21,
+                  data.first == 0x41 else {
+                return false
+            }
             return true
         }
         return false
@@ -72,8 +91,11 @@ public extension String {
             if currentAddress.hasPrefix("T") {
                 currentAddress = currentAddress.base58CheckData?.toHexString() ?? ""
             }
+            if currentAddress.hasPrefix("0x") || currentAddress.hasPrefix("0X") {
+                currentAddress = String(currentAddress.dropFirst(2))
+            }
             currentAddress = String(currentAddress.dropFirst("41".count))
-        }else if currentAddress.hasPrefix("0x") {
+        } else if currentAddress.hasPrefix("0x") {
             currentAddress = String(currentAddress.dropFirst("0x".count))
         }
         return currentAddress

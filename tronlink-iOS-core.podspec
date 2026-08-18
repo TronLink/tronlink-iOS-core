@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'tronlink-iOS-core'
-  s.version          = '1.0.6'
+  s.version          = '1.0.7'
   s.summary          = 'tronlink-iOS-core is repo of TronLink'
   s.module_name      = 'TLCore'
 
@@ -19,12 +19,14 @@ Pod::Spec.new do |s|
   s.dependency 'gRPC-ProtoRPC', '1.68.1'
   s.dependency 'gRPC-RxLibrary', '1.68.1'
    
-   s.dependency 'TronWalletWeb3Swift', '1.1.1'
-   s.dependency 'TronWalletKeystore', '1.0.4'
+   s.dependency 'TronWalletWeb3Swift', '1.1.2'
+   s.dependency 'TronWalletKeystore', '1.0.5'
    s.dependency 'FMDB', '2.7.5'
    
    s.requires_arc = false
-   grpc_arc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.m']
-   grpc_mrc_files = Dir['tronlink-iOS-core/Classes/gRPC/**/*.pbobjc.m']
-   s.requires_arc = grpc_arc_files - grpc_mrc_files
+   # Generated *.pbobjc.m must stay MRC; only the RPC layer is ARC.
+   # CocoaPods expands this pattern from the pod root, whereas Dir[] here would
+   # resolve against the installing project's CWD and silently yield [].
+   # covers *.pbrpc.m only — a hand-written ARC .m needs adding here.
+   s.requires_arc = 'tronlink-iOS-core/Classes/gRPC/**/*.pbrpc.m'
 end
