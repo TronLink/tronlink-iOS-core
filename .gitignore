@@ -26,3 +26,9 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+
+# Local architecture and implementation design documents
+docs/migration/*-design.md
+docs/migration/*-design-audit.md
+docs/superpowers/specs/
+docs/superpowers/plans/

@@ -912,3 +912,50 @@ private final class MetricsDataSourceStub: TRXMetricsDataSource {
         uploadCallCount += 1
     }
 }
+
+import BigInt
+import TronCore
+import web3swift
+
+final class SingleModuleMigrationBaselineTests: XCTestCase {
+    private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+    private let messageHash = Data(repeating: 0x11, count: 32)
+
+    func testLegacyABIVector() throws {
+        let encoder = TronCore.ABIEncoder()
+        try encoder.encode(BigUInt(42))
+        XCTAssertEqual(encoder.data.hexString,
+                       String(repeating: "0", count: 62) + "2a")
+    }
+
+    func testLegacyWeb3SignAndRecoverVector() throws {
+        let key = web3swift.PrivateKey(privateKey)
+        try key.verify()
+        let signature = try key.sign(hash: messageHash)
+        try signature.check()
+        let recovered = try web3swift.Web3Utils.hashECRecover(hash: messageHash, signature: signature.data)
+        XCTAssertEqual(recovered, key.address)
+        XCTAssertEqual(key.address.address.lowercased(),
+                       "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")
+    }
+
+    func testLegacyTronDerivationVector() throws {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        let wallet = try TronKeystore.Wallet(mnemonic: mnemonic)
+        let key = try wallet.getKey(at: 0)
+        XCTAssertEqual(key.privateKey.hexString,
+                       "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
+        XCTAssertEqual(key.address.data.count, 20)
+        let keystoreKey = try TronKeystore.KeystoreKey(password: "baseline-password", mnemonic: mnemonic)
+        XCTAssertEqual(keystoreKey.address.data.count, 21)
+        XCTAssertEqual(keystoreKey.address.data.first, 0x41)
+        XCTAssertEqual(keystoreKey.address.data.dropFirst(), key.address.data)
+    }
+
+    func testLegacyTronBase58CheckVector() {
+        let address = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+        XCTAssertEqual(address.base58CheckData?.hexString,
+                       "410000000000000000000000000000000000000000")
+        XCTAssertEqual(address.base58CheckData?.addressString, address)
+    }
+}
