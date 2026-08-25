@@ -16,6 +16,7 @@ Pod::Spec.new do |s|
   s.module_map = 'tronlink-iOS-core/TLCore.modulemap'
 
   trezor_headers = 'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto'
+  secp_headers = 'tronlink-iOS-core/Classes/Secp256k1'
   s.private_header_files = [
     "#{trezor_headers}/nem_serialize.h",
     "#{trezor_headers}/bip39_english.h",
@@ -32,12 +33,15 @@ Pod::Spec.new do |s|
     "#{trezor_headers}/ed25519-donna/ed25519-hash-custom-keccak.h",
     "#{trezor_headers}/ed25519-donna/ed25519-hash-custom-sha3.h",
     "#{trezor_headers}/ed25519-donna/ed25519-keccak.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-sha3.h"
+    "#{trezor_headers}/ed25519-donna/ed25519-sha3.h",
+    'tronlink-iOS-core/Classes/Secp256k1/*.h'
   ]
 
   trezor = "$(PODS_TARGET_SRCROOT)/#{trezor_headers}"
+  secp = "$(PODS_TARGET_SRCROOT)/#{secp_headers}"
   s.pod_target_xcconfig = {
-    'HEADER_SEARCH_PATHS' => "$(inherited) \"#{trezor}\" \"#{trezor}/aes\" \"#{trezor}/chacha20poly1305\" \"#{trezor}/ed25519-donna\""
+    'HEADER_SEARCH_PATHS' => "$(inherited) \"#{trezor}\" \"#{trezor}/aes\" \"#{trezor}/chacha20poly1305\" \"#{trezor}/ed25519-donna\" \"#{secp}\" \"#{secp}/include\"",
+    'OTHER_CFLAGS' => '$(inherited) -pedantic -Wall -Wextra -Wcast-align -Wnested-externs -Wshadow -Wstrict-prototypes -Wno-shorten-64-to-32 -Wno-conditional-uninitialized -Wno-unused-function -Wno-long-long -Wno-overlength-strings -O3'
   }
 
   s.dependency 'gRPC', '1.68.1'
@@ -46,7 +50,6 @@ Pod::Spec.new do |s|
   s.dependency 'gRPC-ProtoRPC', '1.68.1'
   s.dependency 'gRPC-RxLibrary', '1.68.1'
    
-   s.dependency 'TronWalletWeb3Swift', '1.1.2'
    s.dependency 'FMDB', '2.7.5'
 
   s.dependency 'BigInt', '3.1.0'

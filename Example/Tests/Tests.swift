@@ -915,6 +915,92 @@ private final class MetricsDataSourceStub: TRXMetricsDataSource {
 import BigInt
 import CryptoSwift
 
+final class EmbeddedWeb3GoldenTests: XCTestCase {
+    private let privateKeyData = Data(repeating: 0, count: 31) + Data([1])
+    private let messageHash = Data(repeating: 0x11, count: 32)
+
+    func testPrivateKeySignAndRecoverMatchesGoldenValues() throws {
+        let key = TLCore.PrivateKey(privateKeyData)
+        try key.verify()
+        XCTAssertEqual(key.publicKey.hex,
+                       "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+        XCTAssertEqual(key.address.address, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
+        let signature = try key.sign(hash: messageHash)
+        try signature.check()
+        XCTAssertEqual(signature.data.count, 65)
+        XCTAssertLessThan(signature.v, 4)
+        XCTAssertEqual(signature.r.serialize().count, 32)
+        XCTAssertLessThanOrEqual(signature.s.serialize().count, 32)
+        XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: messageHash, signature: signature.data), key.address)
+        XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(messageHash, signature: signature.data.hex), key.address)
+    }
+
+    func testABIv2EncodingAndDecodingMatchesGoldenValues() throws {
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("(address,uint256[])[]"))
+        let embeddedType = try TLCore.ABIv2TypeParser.parseTypeString("uint256[][2]")
+        guard case let .array(type: embeddedInner, length: embeddedOuterLength) = embeddedType,
+              case let .array(type: embeddedLeaf, length: embeddedInnerLength) = embeddedInner,
+              case let .uint(bits: embeddedBits) = embeddedLeaf else {
+            return XCTFail("Embedded parser did not produce the expected nested array structure")
+        }
+        XCTAssertEqual(embeddedOuterLength, 2)
+        XCTAssertEqual(embeddedInnerLength, 0)
+        XCTAssertEqual(embeddedBits, 256)
+
+        let encoded = try XCTUnwrap(TLCore.ABIv2Encoder.encode(
+            types: [.uint(bits: 256)],
+            values: [BigUInt(42) as AnyObject]
+        ))
+        XCTAssertEqual(encoded.hex, String(repeating: "0", count: 62) + "2a")
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.uint(bits: 256)], data: encoded))
+        XCTAssertEqual(decoded.first as? BigUInt, BigUInt(42))
+    }
+
+    func testMergedHexHelpersPreserveBothRequiredBehaviors() throws {
+        XCTAssertEqual(Data([0x00, 0xff]).hex, "00ff")
+        XCTAssertEqual("TRON".hex, "54524f4e")
+        XCTAssertEqual(Data.fromHex("0xabc"), Data([0xab, 0x0c]))
+        XCTAssertThrowsError(try "0x".dataFromHex())
+    }
+
+    func testEventLogDecodesApprovedCompatibilityFields() throws {
+        let json = """
+        {
+          "address": "0x53066cddbc0099eb6c96785d9b3df2aaeede5da3",
+          "blockHash": "0x779c1f08f2b5252873f08fd6ec62d75bb54f956633bbb59d33bd7c49f1a3d389",
+          "blockNumber": "0x4f58f8",
+          "data": "0x0000000000000000000000000000000000000000000000004563918244f40000",
+          "logIndex": "0x84",
+          "removed": "0x0",
+          "topics": [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x000000000000000000000000efdcf2c36f3756ce7247628afdb632fa4ee12ec5",
+            "0x000000000000000000000000d5395c132c791a7f46fa8fc27f0ab6bacd824484"
+          ],
+          "transactionHash": "0x9f7bb2633abb3192d35f65e50a96f9f7ca878fa2ee7bf5d3fca489c0c60dc79a",
+          "transactionIndex": "0x99"
+        }
+        """
+        let log = try JSONDecoder().decode(TLCore.EventLog.self, from: try XCTUnwrap(json.data(using: .utf8)))
+        XCTAssertEqual(log.address.addressData.count, 20)
+        XCTAssertEqual(log.blockNumber, BigUInt(0x4f58f8))
+        XCTAssertEqual(log.logIndex, BigUInt(0x84))
+        XCTAssertGreaterThanOrEqual(log.topics.count, 2)
+        XCTAssertTrue(log.topics.allSatisfy { $0.count == 32 })
+    }
+
+    func testPrivateKeyRejectsOutOfRangeRandomScalar() {
+        var valid = Data(repeating: 0, count: 32)
+        valid[31] = 1
+        var candidates = [Data(repeating: 0xff, count: 32), valid]
+
+        let generated = TLCore.PrivateKey.generatePrivateKey { candidates.removeFirst() }
+
+        XCTAssertEqual(generated, valid)
+        XCTAssertTrue(candidates.isEmpty)
+    }
+}
+
 final class EmbeddedABIGoldenTests: XCTestCase {
     func testEmbeddedAddressAndIntegerEncodingMatchGoldenValues() throws {
         let bytes = Data([0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d,

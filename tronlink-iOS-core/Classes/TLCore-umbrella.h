@@ -27,3 +27,4 @@ FOUNDATION_EXPORT const unsigned char TLCoreVersionString[];
 #import "Descriptor.pbobjc.h"
 #import "EthereumCrypto.h"
 #import "TrezorCrypto.h"
+#import "secp256k1-wallet.h"

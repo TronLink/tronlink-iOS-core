@@ -1,5 +1,4 @@
 
-import web3swift
 import CryptoSwift
 
 public enum TLMessageSignV2Type {
@@ -98,7 +97,7 @@ public class TLWalletCore: NSObject {
         let accountSigner = Data(account.address.data.suffix(20))
         for (index, value) in transaction.signatureArray.enumerated() {
             guard let signature = value as? Data,
-                  let signer = try? Web3.Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
+                  let signer = try? Web3Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
                 continue
             }
             alreadySigned = alreadySigned || signer == accountSigner
