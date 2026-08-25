@@ -915,6 +915,28 @@ private final class MetricsDataSourceStub: TRXMetricsDataSource {
 import BigInt
 import CryptoSwift
 
+final class SingleTLCorePublicAPITests: XCTestCase {
+    func testWalletABIAndWeb3APIsAreAvailableFromTLCore() throws {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        let wallet = try Wallet(mnemonic: mnemonic)
+        let walletKey = try wallet.getKey(at: 0)
+        XCTAssertEqual(walletKey.address.data.count, 20)
+        XCTAssertEqual(walletKey.privateKey.hexString,
+                       "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
+        let keystoreKey = try KeystoreKey(password: "single-module-smoke", mnemonic: mnemonic)
+        XCTAssertEqual(keystoreKey.address.data.first, 0x41)
+
+        let encoder = ABIEncoder()
+        try encoder.encode(BigUInt(42))
+        XCTAssertEqual(encoder.data.count, 32)
+
+        let privateKey = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        try privateKey.verify()
+        XCTAssertTrue(privateKey.address.isValid)
+        XCTAssertNotNil(ABIv2Encoder.encode(types: [.uint(bits: 256)], values: [BigUInt(42) as AnyObject]))
+    }
+}
+
 final class EmbeddedWeb3GoldenTests: XCTestCase {
     private let privateKeyData = Data(repeating: 0, count: 31) + Data([1])
     private let messageHash = Data(repeating: 0x11, count: 32)
