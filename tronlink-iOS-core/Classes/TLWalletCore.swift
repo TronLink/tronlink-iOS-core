@@ -1,6 +1,4 @@
 
-import TronKeystore
-import TronCore
 import web3swift
 import CryptoSwift
 
@@ -140,7 +138,7 @@ public class TLWalletCore: NSObject {
 
 //MARK: - Create
 extension TLWalletCore {
-    public static func createWalletAccount(keyStore: KeyStore, password: String, completion: @escaping (Result<TronKeystore.Account, KeystoreError>) -> Void) {
+    public static func createWalletAccount(keyStore: KeyStore, password: String, completion: @escaping (Result<Account, KeystoreError>) -> Void) {
         do {
             let account = try keyStore.createAccount(password: password, type: .hierarchicalDeterministicWallet)
             completion(.success(account))

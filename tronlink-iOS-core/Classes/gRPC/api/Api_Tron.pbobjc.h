@@ -462,6 +462,7 @@ typedef GPB_ENUM(Address_FieldNumber) {
 /**
  * Gossip node address
  **/
+NS_SWIFT_NAME(TronProtoAddress)
 GPB_FINAL @interface Address : GPBMessage
 
 @property(nonatomic, readwrite, copy, null_resettable) NSData *host;
