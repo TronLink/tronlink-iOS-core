@@ -12,6 +12,7 @@ Pod::Spec.new do |s|
   s.swift_versions = '4.2'
 
   s.source_files = 'tronlink-iOS-core/Classes/**/*'
+  s.exclude_files = 'tronlink-iOS-core/Classes/ABI/**/*'
 
   s.dependency 'gRPC', '1.68.1'
   s.dependency 'Protobuf', '3.29.6'
