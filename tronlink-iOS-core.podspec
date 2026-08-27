@@ -41,7 +41,8 @@ Pod::Spec.new do |s|
   secp = "$(PODS_TARGET_SRCROOT)/#{secp_headers}"
   s.pod_target_xcconfig = {
     'HEADER_SEARCH_PATHS' => "$(inherited) \"#{trezor}\" \"#{trezor}/aes\" \"#{trezor}/chacha20poly1305\" \"#{trezor}/ed25519-donna\" \"#{secp}\" \"#{secp}/include\"",
-    'OTHER_CFLAGS' => '$(inherited) -pedantic -Wall -Wextra -Wcast-align -Wnested-externs -Wshadow -Wstrict-prototypes -Wno-shorten-64-to-32 -Wno-conditional-uninitialized -Wno-unused-function -Wno-long-long -Wno-overlength-strings -O3'
+    'OTHER_CFLAGS' => '$(inherited) -pedantic -Wall -Wextra -Wcast-align -Wnested-externs -Wshadow -Wstrict-prototypes -Wno-shorten-64-to-32 -Wno-conditional-uninitialized -Wno-unused-function -Wno-long-long -Wno-overlength-strings -O3',
+    'SWIFT_OPTIMIZATION_LEVEL[config=Debug]' => '-Owholemodule'
   }
 
   s.dependency 'gRPC', '1.68.1'
