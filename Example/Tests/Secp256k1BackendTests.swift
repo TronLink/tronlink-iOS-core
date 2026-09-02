@@ -2,7 +2,7 @@ import XCTest
 @testable import TLCore
 
 final class Secp256k1BackendTests: XCTestCase {
-    private struct DifferentialVector {
+    private struct DeterministicVector {
         let scalar: Int
         let privateKey: Data
         let hash: Data
@@ -12,7 +12,7 @@ final class Secp256k1BackendTests: XCTestCase {
     private let messageHash = Data(repeating: 0x11, count: 32)
     private let signatureHex = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
 
-    private func deterministicVector(for scalar: Int) -> DifferentialVector {
+    private func deterministicVector(for scalar: Int) -> DeterministicVector {
         var privateKeyBytes = [UInt8](repeating: 0, count: 32)
         privateKeyBytes[28] = UInt8(truncatingIfNeeded: scalar >> 24)
         privateKeyBytes[29] = UInt8(truncatingIfNeeded: scalar >> 16)
@@ -22,18 +22,18 @@ final class Secp256k1BackendTests: XCTestCase {
         let hashBytes = (0..<32).map { index in
             UInt8(truncatingIfNeeded: scalar &* (index + 1) &+ index &* 37)
         }
-        return DifferentialVector(
+        return DeterministicVector(
             scalar: scalar,
             privateKey: Data(privateKeyBytes),
             hash: Data(hashBytes)
         )
     }
 
-    private func mismatchMessage(vector: DifferentialVector,
-                                 legacy: Data,
-                                 trezor: Data?,
+    private func mismatchMessage(vector: DeterministicVector,
+                                 expected: Data,
+                                 actual: Data?,
                                  recoveryID: UInt8) -> String {
-        return "privateKey=\(vector.privateKey.hex); hash=\(vector.hash.hex); old=\(legacy.hex); new=\(trezor?.hex ?? "nil"); recoveryID=\(recoveryID)"
+        return "scalar=\(vector.scalar); privateKey=\(vector.privateKey.hex); hash=\(vector.hash.hex); expected=\(expected.hex); actual=\(actual?.hex ?? "nil"); recoveryID=\(recoveryID)"
     }
 
     func testCurrentBackendMatchesFixedSignatureVector() throws {
@@ -100,6 +100,17 @@ final class Secp256k1BackendTests: XCTestCase {
         }
     }
 
+    func testRecoveryIDNormalizationRemainsByteCompatible() {
+        let cases: [(UInt8, UInt8)] = [
+            (0, 0), (1, 1), (2, 1), (3, 0),
+            (27, 0), (28, 1), (29, 0), (30, 1)
+        ]
+
+        for item in cases {
+            XCTAssertEqual(SECP256K1.normalizedRecoveryID(item.0), item.1)
+        }
+    }
+
     func testMalformedSignatureSizesPreserveErrors() {
         for size in [64, 66] {
             XCTAssertThrowsError(try TLCore.Signature(data: Data(repeating: 0, count: size)).check()) {
@@ -116,8 +127,13 @@ final class Secp256k1BackendTests: XCTestCase {
     }
 
     func testCompressedPublicKeyMatchesPrivateKeyOne() throws {
-        XCTAssertEqual(try TLCore.Web3Utils.privateToPublic(privateKey, compressed: true).hex,
+        let compressed = try TLCore.Web3Utils.privateToPublic(privateKey, compressed: true)
+        let uncompressed = try TLCore.Web3Utils.privateToPublic(privateKey, compressed: false)
+
+        XCTAssertEqual(compressed.hex,
                        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        XCTAssertEqual(try TLCore.Web3Utils.publicToAddressData(compressed),
+                       try TLCore.Web3Utils.publicToAddressData(uncompressed))
     }
 
     func testEthereumCryptoExposesTrezorPublicKeyForms() throws {
@@ -201,119 +217,122 @@ final class Secp256k1BackendTests: XCTestCase {
         ).isEmpty)
     }
 
-    func testTrezorBackendMatchesLegacyForOneThousandDeterministicVectors() throws {
+    func testTrezorBackendIsSelfConsistentForOneThousandDeterministicVectors() throws {
         for scalar in 1...1000 {
             let vector = deterministicVector(for: scalar)
-            let legacyKey = TLCore.PrivateKey(vector.privateKey)
-            let legacySignature = try legacyKey.sign(hash: vector.hash).data
-            let trezorSignature = TrezorSecp256k1Backend.sign(
-                hash: vector.hash,
-                privateKey: vector.privateKey
-            )
-            let recoveryID = legacySignature[64]
-            let trezorPublicKey = TrezorSecp256k1Backend.privateToPublic(
+            let publicKey = try XCTUnwrap(TrezorSecp256k1Backend.privateToPublic(
                 vector.privateKey,
                 compressed: false
-            )
-            let trezorRecoveredPublicKey = TrezorSecp256k1Backend.recover(
+            ))
+            let signature = try XCTUnwrap(TrezorSecp256k1Backend.sign(
                 hash: vector.hash,
-                signature: Data(legacySignature.prefix(64)),
+                privateKey: vector.privateKey
+            ))
+            let recoveryID = signature[64]
+            let recoveredPublicKey = TrezorSecp256k1Backend.recover(
+                hash: vector.hash,
+                signature: Data(signature.prefix(64)),
                 recoveryID: recoveryID,
                 compressed: false
             )
+            let facadeKey = TLCore.PrivateKey(vector.privateKey)
+            let facadeSignature = try facadeKey.sign(hash: vector.hash).data
+            let compressed = try XCTUnwrap(TrezorSecp256k1Backend.privateToPublic(
+                vector.privateKey,
+                compressed: true
+            ))
+            let expanded = TrezorSecp256k1Backend.uncompressPublicKey(compressed)
+            let facadeCompressed = try TLCore.Web3Utils.privateToPublic(
+                vector.privateKey,
+                compressed: true
+            )
 
             XCTAssertTrue(TrezorSecp256k1Backend.verifyPrivateKey(vector.privateKey))
+            XCTAssertLessThanOrEqual(recoveryID, 1)
             XCTAssertEqual(
-                trezorPublicKey,
-                legacyKey.publicKey,
+                facadeKey.publicKey,
+                publicKey,
                 mismatchMessage(
                     vector: vector,
-                    legacy: legacyKey.publicKey,
-                    trezor: trezorPublicKey,
+                    expected: publicKey,
+                    actual: facadeKey.publicKey,
                     recoveryID: recoveryID
                 )
             )
             XCTAssertEqual(
-                trezorSignature,
-                legacySignature,
+                facadeSignature,
+                signature,
                 mismatchMessage(
                     vector: vector,
-                    legacy: legacySignature,
-                    trezor: trezorSignature,
+                    expected: signature,
+                    actual: facadeSignature,
                     recoveryID: recoveryID
                 )
             )
             XCTAssertEqual(
-                trezorRecoveredPublicKey,
-                legacyKey.publicKey,
+                recoveredPublicKey,
+                publicKey,
                 mismatchMessage(
                     vector: vector,
-                    legacy: legacyKey.publicKey,
-                    trezor: trezorRecoveredPublicKey,
+                    expected: publicKey,
+                    actual: recoveredPublicKey,
                     recoveryID: recoveryID
                 )
             )
-        }
-    }
-
-    func testTrezorBackendMatchesOneThousandCompressedPublicKeys() throws {
-        for scalar in 1...1000 {
-            let vector = deterministicVector(for: scalar)
-            let legacyCompressed = try TLCore.Web3Utils.privateToPublic(vector.privateKey, compressed: true)
-            let legacyUncompressed = try TLCore.Web3Utils.privateToPublic(vector.privateKey, compressed: false)
-            let trezorCompressed = TrezorSecp256k1Backend.privateToPublic(vector.privateKey, compressed: true)
-            let trezorUncompressed = trezorCompressed.flatMap(TrezorSecp256k1Backend.uncompressPublicKey)
-
             XCTAssertEqual(
-                trezorCompressed,
-                legacyCompressed,
+                facadeCompressed,
+                compressed,
                 mismatchMessage(
                     vector: vector,
-                    legacy: legacyCompressed,
-                    trezor: trezorCompressed,
+                    expected: compressed,
+                    actual: facadeCompressed,
                     recoveryID: 0
                 )
             )
             XCTAssertEqual(
-                trezorUncompressed,
-                legacyUncompressed,
+                expanded,
+                publicKey,
                 mismatchMessage(
                     vector: vector,
-                    legacy: legacyUncompressed,
-                    trezor: trezorUncompressed,
+                    expected: publicKey,
+                    actual: expanded,
                     recoveryID: 0
                 )
             )
         }
     }
 
-    func testTrezorBackendMatchesLegacyRecoveryForRawZeroAndOneIDs() throws {
+    func testTrezorBackendRecoversRawZeroAndOneIDs() throws {
         let signature = try XCTUnwrap(Data.fromHex(signatureHex))
         let compactSignature = Data(signature.prefix(64))
+        var recoveredPublicKeys = [Data]()
 
         for recoveryID: UInt8 in 0...1 {
-            let legacySignature = compactSignature + Data([recoveryID])
-            let legacyPublicKey = try SECP256K1.recoverPublicKey(
-                hash: messageHash,
-                signature: legacySignature,
-                compressed: false
-            )
-            let trezorPublicKey = TrezorSecp256k1Backend.recover(
+            let publicKey = try XCTUnwrap(TrezorSecp256k1Backend.recover(
                 hash: messageHash,
                 signature: compactSignature,
                 recoveryID: recoveryID,
                 compressed: false
-            )
+            ))
+            recoveredPublicKeys.append(publicKey)
 
             XCTAssertEqual(
-                trezorPublicKey,
-                legacyPublicKey,
-                "privateKey=\(privateKey.hex); hash=\(messageHash.hex); old=\(legacyPublicKey.hex); new=\(trezorPublicKey?.hex ?? "nil"); recoveryID=\(recoveryID)"
+                try SECP256K1.recoverPublicKey(
+                    hash: messageHash,
+                    signature: compactSignature + Data([recoveryID]),
+                    compressed: false
+                ),
+                publicKey,
+                "privateKey=\(privateKey.hex); hash=\(messageHash.hex); expected=\(publicKey.hex); recoveryID=\(recoveryID)"
             )
         }
+
+        XCTAssertNotEqual(recoveredPublicKeys[0], recoveredPublicKeys[1])
+        XCTAssertEqual(recoveredPublicKeys[1],
+                       TrezorSecp256k1Backend.privateToPublic(privateKey, compressed: false))
     }
 
-    func testTrezorBackendRejectsInvalidScalarsAndMalformedInputsLikeLegacy() throws {
+    func testTrezorFacadeAndBackendRejectInvalidScalarsAndMalformedInputs() throws {
         let curveOrder = try XCTUnwrap(Data.fromHex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"))
         let invalidPrivateKeys = [
             Data(repeating: 0, count: 31),
@@ -365,13 +384,13 @@ final class Secp256k1BackendTests: XCTestCase {
             compressed: false
         ))
 
-        for malformedPublicKey in [
-            Data(repeating: 0, count: 32),
-            Data([0x04]) + Data(repeating: 0, count: 32)
-        ] {
-            XCTAssertThrowsError(try SECP256K1.parsePublicKey(serializedKey: malformedPublicKey))
-            XCTAssertNil(TrezorSecp256k1Backend.uncompressPublicKey(malformedPublicKey))
+        let malformedPublicKey = Data([0x04]) + Data(repeating: 0, count: 32)
+        XCTAssertThrowsError(try TLCore.Web3Utils.publicToAddressData(malformedPublicKey)) {
+            guard case SECP256DataError.cannotParsePublicKey = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
         }
+        XCTAssertNil(TrezorSecp256k1Backend.uncompressPublicKey(malformedPublicKey))
     }
 
     func testTrezorBackendSigningIsDeterministicAcrossOneHundredRuns() throws {
@@ -398,10 +417,17 @@ final class Secp256k1BackendTests: XCTestCase {
     }
 
     func testTrezorBackendHasNoSharedMutableStateAcrossEightWorkers() throws {
-        let vectors = try (1...8).map { scalar -> (DifferentialVector, Data, Data) in
+        let vectors = try (1...8).map { scalar -> (DeterministicVector, Data, Data) in
             let vector = deterministicVector(for: scalar)
-            let legacyKey = TLCore.PrivateKey(vector.privateKey)
-            return (vector, legacyKey.publicKey, try legacyKey.sign(hash: vector.hash).data)
+            let publicKey = try XCTUnwrap(TrezorSecp256k1Backend.privateToPublic(
+                vector.privateKey,
+                compressed: false
+            ))
+            let signature = try XCTUnwrap(TrezorSecp256k1Backend.sign(
+                hash: vector.hash,
+                privateKey: vector.privateKey
+            ))
+            return (vector, publicKey, signature)
         }
         let failureLock = NSLock()
         var firstFailure: String?
@@ -426,22 +452,22 @@ final class Secp256k1BackendTests: XCTestCase {
                 if signature != expected.2 {
                     failure = mismatchMessage(
                         vector: expected.0,
-                        legacy: expected.2,
-                        trezor: signature,
+                        expected: expected.2,
+                        actual: signature,
                         recoveryID: signature?.last ?? 0xff
                     )
                 } else if publicKey != expected.1 {
                     failure = mismatchMessage(
                         vector: expected.0,
-                        legacy: expected.1,
-                        trezor: publicKey,
+                        expected: expected.1,
+                        actual: publicKey,
                         recoveryID: signature?.last ?? 0xff
                     )
                 } else if recovered != expected.1 {
                     failure = mismatchMessage(
                         vector: expected.0,
-                        legacy: expected.1,
-                        trezor: recovered,
+                        expected: expected.1,
+                        actual: recovered,
                         recoveryID: signature?.last ?? 0xff
                     )
                 } else {

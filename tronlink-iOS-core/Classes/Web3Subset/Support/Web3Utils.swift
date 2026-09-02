@@ -60,8 +60,9 @@ extension Web3Utils {
 
     public static func publicToAddressData(_ publicKey: Data) throws -> Data {
         if publicKey.count == 33 {
-            var parsedPublicKey = try SECP256K1.parsePublicKey(serializedKey: publicKey)
-            let decompressedKey = try SECP256K1.serializePublicKey(publicKey: &parsedPublicKey, compressed: false)
+            guard let decompressedKey = TrezorSecp256k1Backend.uncompressPublicKey(publicKey) else {
+                throw SECP256DataError.cannotParsePublicKey
+            }
             return try publicToAddressData(decompressedKey)
         } else {
             var stipped = publicKey
