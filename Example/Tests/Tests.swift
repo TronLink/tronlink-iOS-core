@@ -949,8 +949,9 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
         XCTAssertEqual(key.address.address, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
         let signature = try key.sign(hash: messageHash)
         try signature.check()
-        XCTAssertEqual(signature.data.count, 65)
-        XCTAssertLessThan(signature.v, 4)
+        XCTAssertEqual(signature.data.hex,
+                       "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01")
+        XCTAssertEqual(signature.v, 1)
         XCTAssertEqual(signature.r.serialize().count, 32)
         XCTAssertLessThanOrEqual(signature.s.serialize().count, 32)
         XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: messageHash, signature: signature.data), key.address)
