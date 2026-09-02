@@ -377,10 +377,22 @@ final class Secp256k1BackendTests: XCTestCase {
     func testTrezorBackendSigningIsDeterministicAcrossOneHundredRuns() throws {
         let expectedSignature = try XCTUnwrap(Data.fromHex(signatureHex))
 
-        for _ in 0..<100 {
+        for iteration in 0..<100 {
+            let actualSignature = TrezorSecp256k1Backend.sign(
+                hash: messageHash,
+                privateKey: privateKey
+            )
+            let actualRecoveryID: String
+            if let recoveryID = actualSignature?.last {
+                actualRecoveryID = String(recoveryID)
+            } else {
+                actualRecoveryID = "absent"
+            }
+
             XCTAssertEqual(
-                TrezorSecp256k1Backend.sign(hash: messageHash, privateKey: privateKey),
-                expectedSignature
+                actualSignature,
+                expectedSignature,
+                "iteration=\(iteration); privateKey=\(privateKey.hex); hash=\(messageHash.hex); old=\(expectedSignature.hex); new=\(actualSignature?.hex ?? "nil"); recoveryID=\(actualRecoveryID)"
             )
         }
     }
