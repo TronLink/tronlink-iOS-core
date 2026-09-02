@@ -14,16 +14,17 @@ final class Secp256k1PerformanceTests: XCTestCase {
 
         var durations = [TimeInterval]()
         durations.reserveCapacity(1_000)
-        let totalStart = CFAbsoluteTimeGetCurrent()
+        let processInfo = ProcessInfo.processInfo
+        let totalStart = processInfo.systemUptime
         for _ in 0..<1_000 {
-            let start = CFAbsoluteTimeGetCurrent()
+            let start = processInfo.systemUptime
             let signature = try key.sign(hash: hash)
-            durations.append(CFAbsoluteTimeGetCurrent() - start)
+            durations.append(processInfo.systemUptime - start)
             XCTAssertFalse(signature.data.isEmpty)
             XCTAssertEqual(signature.data.hex, expected)
             XCTAssertEqual(signature.v, 1)
         }
-        let total = CFAbsoluteTimeGetCurrent() - totalStart
+        let total = processInfo.systemUptime - totalStart
         durations.sort()
         let medianMicroseconds = durations[durations.count / 2] * 1_000_000
         let p95Microseconds = durations[Int(Double(durations.count - 1) * 0.95)] * 1_000_000

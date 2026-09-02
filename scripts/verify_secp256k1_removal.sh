@@ -23,6 +23,8 @@ podspec="$repository_root/tronlink-iOS-core.podspec"
 umbrella_header="$classes_root/TLCore-umbrella.h"
 licenses_root="$repository_root/ThirdPartyLicenses"
 forbidden_pattern='secp256k1-wallet|Classes/Secp256k1'
+temporary_directory=$(mktemp -d /private/tmp/tlcore-secp-boundary.XXXXXX) || fail "source-boundary" "cannot create temporary directory"
+trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 
 if [ -e "$classes_root/Secp256k1" ]; then
     fail "source-boundary" "tronlink-iOS-core/Classes/Secp256k1 still exists"
@@ -63,38 +65,64 @@ else
     fi
 fi
 
-if find "$licenses_root" \( -name '*secp256k1-wallet*' -o -path '*Classes/Secp256k1*' \) -print | grep -q .; then
+license_paths="$temporary_directory/license-paths.txt"
+if ! find "$licenses_root" \( -name '*secp256k1-wallet*' -o -path '*Classes/Secp256k1*' \) -print >"$license_paths"; then
+    fail "source-boundary" "cannot enumerate ThirdPartyLicenses paths"
+fi
+if [ -s "$license_paths" ]; then
     fail "source-boundary" "forbidden path in ThirdPartyLicenses"
 fi
 
 pass "source-boundary"
 
-temporary_directory=$(mktemp -d /private/tmp/tlcore-secp-boundary.XXXXXX) || fail "artifact-boundary" "cannot create temporary directory"
-trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
-symbols="$temporary_directory/symbols.txt"
-
-if ! nm -gjU "$binary" >"$symbols" 2>/dev/null; then
-    fail "artifact-boundary" "nm cannot read supplied binary"
+if ! architectures=$(lipo -archs "$binary" 2>/dev/null); then
+    fail "artifact-boundary" "lipo cannot enumerate supplied binary architectures"
+fi
+if [ -z "$architectures" ]; then
+    fail "artifact-boundary" "supplied binary has no architectures"
 fi
 
-if LC_ALL=C grep -E '^_?(secp256k1_context|secp256k1_ec_|secp256k1_ecdsa_)' "$symbols" >/dev/null; then
-    fail "artifact-old-symbols" "embedded libsecp256k1 symbol remains"
-fi
+for architecture in $architectures; do
+    case "$architecture" in
+        ''|*[!A-Za-z0-9_]*)
+            fail "artifact-boundary" "invalid architecture reported by lipo: $architecture"
+            ;;
+    esac
+
+    symbols="$temporary_directory/symbols-$architecture.txt"
+    if ! nm -arch "$architecture" -gjU "$binary" >"$symbols" 2>/dev/null; then
+        fail "artifact-boundary" "nm cannot scan architecture $architecture"
+    fi
+
+    if LC_ALL=C grep -E '^_?(secp256k1_context|secp256k1_ec_|secp256k1_ecdsa_)' "$symbols" >/dev/null; then
+        fail "artifact-old-symbols" "embedded libsecp256k1 symbol remains in architecture $architecture"
+    else
+        grep_status=$?
+        if [ "$grep_status" -ne 1 ]; then
+            fail "artifact-boundary" "cannot scan forbidden symbols in architecture $architecture"
+        fi
+    fi
+
+    for required_symbol in \
+        _ecdsa_sign_digest \
+        _ecdsa_get_public_key65 \
+        _ecdsa_recover_pub_from_sig \
+        _hdnode_from_seed \
+        _hdnode_private_ckd \
+        _random32; do
+        if LC_ALL=C grep -F -x "$required_symbol" "$symbols" >/dev/null; then
+            :
+        else
+            grep_status=$?
+            if [ "$grep_status" -eq 1 ]; then
+                fail "artifact-trezor-symbols" "missing $required_symbol in architecture $architecture"
+            fi
+            fail "artifact-boundary" "cannot scan required symbols in architecture $architecture"
+        fi
+    done
+done
 
 pass "artifact-old-symbols"
-
-if ! LC_ALL=C grep -E '^_ecdsa_' "$symbols" >/dev/null; then
-    fail "artifact-trezor-symbols" "missing Trezor _ecdsa_* symbols"
-fi
-
-# Trezor's bip32.c exports its public API with the hdnode_ prefix.
-if ! LC_ALL=C grep -E '^_hdnode_' "$symbols" >/dev/null; then
-    fail "artifact-trezor-symbols" "missing Trezor BIP32 _hdnode_* symbols"
-fi
-
-if ! LC_ALL=C grep -E '^_random32$' "$symbols" >/dev/null; then
-    fail "artifact-trezor-symbols" "missing Trezor _random32 symbol"
-fi
 
 pass "artifact-trezor-symbols"
 pass "secp256k1-removal"

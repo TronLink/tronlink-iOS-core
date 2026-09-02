@@ -83,8 +83,12 @@ if ! LC_ALL=C grep -E '^_tl_fake_SecRandomCopyBytes$' "$defined_symbols" >/dev/n
     fail "healthy-sign" "SecRandom.m is not bound exclusively to the fake RNG"
 fi
 
-if ! "$harness_binary" healthy-sign >/dev/null 2>&1; then
-    fail "healthy-sign" "fixed signature mismatch or healthy operation failed"
+if ! "$harness_binary" --verify-timeout-supervision >/dev/null 2>&1; then
+    fail "healthy-sign" "child timeout supervision self-test failed"
+fi
+
+if ! "$harness_binary" --expect-exit-zero healthy-sign >/dev/null 2>&1; then
+    fail "healthy-sign" "supervised child did not exit zero with the fixed signature"
 fi
 printf 'healthy-sign: PASS\n'
 
