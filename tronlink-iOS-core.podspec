@@ -16,7 +16,6 @@ Pod::Spec.new do |s|
   s.module_map = 'tronlink-iOS-core/TLCore.modulemap'
 
   trezor_headers = 'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto'
-  secp_headers = 'tronlink-iOS-core/Classes/Secp256k1'
   s.private_header_files = [
     "#{trezor_headers}/nem_serialize.h",
     "#{trezor_headers}/bip39_english.h",
@@ -33,15 +32,13 @@ Pod::Spec.new do |s|
     "#{trezor_headers}/ed25519-donna/ed25519-hash-custom-keccak.h",
     "#{trezor_headers}/ed25519-donna/ed25519-hash-custom-sha3.h",
     "#{trezor_headers}/ed25519-donna/ed25519-keccak.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-sha3.h",
-    'tronlink-iOS-core/Classes/Secp256k1/*.h'
+    "#{trezor_headers}/ed25519-donna/ed25519-sha3.h"
   ]
 
   trezor = "$(PODS_TARGET_SRCROOT)/#{trezor_headers}"
-  secp = "$(PODS_TARGET_SRCROOT)/#{secp_headers}"
   s.pod_target_xcconfig = {
-    'HEADER_SEARCH_PATHS' => "$(inherited) \"#{trezor}\" \"#{trezor}/aes\" \"#{trezor}/chacha20poly1305\" \"#{trezor}/ed25519-donna\" \"#{secp}\" \"#{secp}/include\"",
-    'OTHER_CFLAGS' => '$(inherited) -pedantic -Wall -Wextra -Wcast-align -Wnested-externs -Wshadow -Wstrict-prototypes -Wno-shorten-64-to-32 -Wno-conditional-uninitialized -Wno-unused-function -Wno-long-long -Wno-overlength-strings -O3',
+    'HEADER_SEARCH_PATHS' => "$(inherited) \"#{trezor}\" \"#{trezor}/aes\" \"#{trezor}/chacha20poly1305\" \"#{trezor}/ed25519-donna\"",
+    'OTHER_CFLAGS' => '$(inherited) -O3',
     'SWIFT_OPTIMIZATION_LEVEL[config=Debug]' => '-Owholemodule'
   }
 
