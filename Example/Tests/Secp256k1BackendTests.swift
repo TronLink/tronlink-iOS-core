@@ -89,4 +89,85 @@ final class Secp256k1BackendTests: XCTestCase {
         XCTAssertEqual(try TLCore.Web3Utils.privateToPublic(privateKey, compressed: true).hex,
                        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
     }
+
+    func testEthereumCryptoExposesTrezorPublicKeyForms() throws {
+        let uncompressed = EthereumCrypto.getPublicKey(from: privateKey, compressed: false)
+        let compressed = EthereumCrypto.getPublicKey(from: privateKey, compressed: true)
+
+        XCTAssertEqual(uncompressed.hex,
+                       "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+        XCTAssertEqual(compressed.hex,
+                       "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        XCTAssertFalse(EthereumCrypto.uncompressPublicKey(compressed).isEmpty)
+        XCTAssertEqual(EthereumCrypto.uncompressPublicKey(compressed), uncompressed)
+    }
+
+    func testEthereumCryptoRecoversRawTrezorPublicKey() throws {
+        let signature = try XCTUnwrap(Data.fromHex(signatureHex))
+        let recovered = EthereumCrypto.recoverPublicKey(
+            hash: messageHash,
+            signature: Data(signature.prefix(64)),
+            recoveryID: signature[64],
+            compressed: false
+        )
+
+        XCTAssertEqual(recovered, EthereumCrypto.getPublicKey(from: privateKey, compressed: false))
+    }
+
+    func testEthereumCryptoRejectsInvalidPrivateKeys() throws {
+        let curveOrder = try XCTUnwrap(Data.fromHex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"))
+        let invalidPrivateKeys = [
+            Data(repeating: 0, count: 31),
+            Data(repeating: 0, count: 33),
+            Data(repeating: 0, count: 32),
+            curveOrder
+        ]
+
+        for invalidPrivateKey in invalidPrivateKeys {
+            XCTAssertFalse(EthereumCrypto.isValidPrivateKey(invalidPrivateKey))
+            XCTAssertTrue(EthereumCrypto.getPublicKey(from: invalidPrivateKey, compressed: false).isEmpty)
+            XCTAssertTrue(EthereumCrypto.getPublicKey(from: invalidPrivateKey, compressed: true).isEmpty)
+        }
+        XCTAssertTrue(EthereumCrypto.isValidPrivateKey(privateKey))
+    }
+
+    func testEthereumCryptoRejectsInvalidCompressedPublicKeys() {
+        let invalidLength = Data(repeating: 0, count: 32)
+        let invalidPrefix = Data([0x04]) + Data(repeating: 0, count: 32)
+
+        XCTAssertTrue(EthereumCrypto.uncompressPublicKey(invalidLength).isEmpty)
+        XCTAssertTrue(EthereumCrypto.uncompressPublicKey(invalidPrefix).isEmpty)
+    }
+
+    func testEthereumCryptoRejectsInvalidRecoveryInputs() throws {
+        let signature = try XCTUnwrap(Data.fromHex(signatureHex))
+        let compactSignature = Data(signature.prefix(64))
+
+        XCTAssertTrue(EthereumCrypto.recoverPublicKey(
+            hash: Data(repeating: 0, count: 31),
+            signature: compactSignature,
+            recoveryID: signature[64],
+            compressed: false
+        ).isEmpty)
+        for invalidLength in [63, 65] {
+            XCTAssertTrue(EthereumCrypto.recoverPublicKey(
+                hash: messageHash,
+                signature: Data(repeating: 0, count: invalidLength),
+                recoveryID: signature[64],
+                compressed: false
+            ).isEmpty)
+        }
+        XCTAssertTrue(EthereumCrypto.recoverPublicKey(
+            hash: messageHash,
+            signature: compactSignature,
+            recoveryID: 4,
+            compressed: false
+        ).isEmpty)
+        XCTAssertTrue(EthereumCrypto.recoverPublicKey(
+            hash: messageHash,
+            signature: Data(repeating: 0, count: 64),
+            recoveryID: 0,
+            compressed: false
+        ).isEmpty)
+    }
 }

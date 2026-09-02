@@ -25,12 +25,66 @@ static BOOL isValidPublicKeyData(NSData *publicKey) {
 
 @implementation EthereumCrypto
 
++ (BOOL)isValidPrivateKey:(nonnull NSData *)privateKey {
+    return isValidPrivateKeyData(privateKey);
+}
+
 + (nonnull NSData *)getPublicKeyFrom:(nonnull NSData *)privateKey {
+    return [self getPublicKeyFrom:privateKey compressed:NO];
+}
+
++ (nonnull NSData *)getPublicKeyFrom:(nonnull NSData *)privateKey compressed:(BOOL)compressed {
     if (!isValidPrivateKeyData(privateKey)) {
         return [NSData data];
     }
-    NSMutableData *publicKey = [[NSMutableData alloc] initWithLength:65];
-    ecdsa_get_public_key65(&secp256k1, privateKey.bytes, publicKey.mutableBytes);
+    NSUInteger length = compressed ? 33 : 65;
+    NSMutableData *publicKey = [[NSMutableData alloc] initWithLength:length];
+    if (compressed) {
+        ecdsa_get_public_key33(&secp256k1, privateKey.bytes, publicKey.mutableBytes);
+    } else {
+        ecdsa_get_public_key65(&secp256k1, privateKey.bytes, publicKey.mutableBytes);
+    }
+    return publicKey;
+}
+
++ (nonnull NSData *)uncompressPublicKey:(nonnull NSData *)publicKey {
+    if (publicKey.length != 33) {
+        return [NSData data];
+    }
+    uint8_t prefix = ((const uint8_t *)publicKey.bytes)[0];
+    if (prefix != 0x02 && prefix != 0x03) {
+        return [NSData data];
+    }
+    NSMutableData *uncompressed = [[NSMutableData alloc] initWithLength:65];
+    if (ecdsa_uncompress_pubkey(&secp256k1, publicKey.bytes, uncompressed.mutableBytes) != 1) {
+        memzero(uncompressed.mutableBytes, uncompressed.length);
+        return [NSData data];
+    }
+    return uncompressed;
+}
+
++ (nonnull NSData *)recoverPublicKeyFromHash:(nonnull NSData *)hash
+                                   signature:(nonnull NSData *)signature
+                                  recoveryID:(uint8_t)recoveryID
+                                  compressed:(BOOL)compressed {
+    if (hash.length != 32 || signature.length != 64 || recoveryID > 3) {
+        return [NSData data];
+    }
+    uint8_t uncompressed[65] = {0};
+    if (ecdsa_recover_pub_from_sig(&secp256k1, uncompressed, signature.bytes, hash.bytes, recoveryID) != 0) {
+        memzero(uncompressed, sizeof(uncompressed));
+        return [NSData data];
+    }
+    if (compressed) {
+        NSMutableData *publicKey = [[NSMutableData alloc] initWithLength:33];
+        uint8_t *bytes = publicKey.mutableBytes;
+        bytes[0] = 0x02 | (uncompressed[64] & 1);
+        memcpy(bytes + 1, uncompressed + 1, 32);
+        memzero(uncompressed, sizeof(uncompressed));
+        return publicKey;
+    }
+    NSData *publicKey = [NSData dataWithBytes:uncompressed length:sizeof(uncompressed)];
+    memzero(uncompressed, sizeof(uncompressed));
     return publicKey;
 }
 
