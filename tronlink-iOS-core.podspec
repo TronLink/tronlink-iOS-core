@@ -10,9 +10,14 @@ Pod::Spec.new do |s|
   s.source           = { :git => 'https://github.com/TronLink/tronlink-iOS-core.git', :tag => s.version.to_s }
   s.platform = :ios, '13.0'
   s.swift_versions = '4.2'
+  s.framework = 'Security'
 
   s.source_files = 'tronlink-iOS-core/Classes/**/*.{h,m,c,swift}'
-  s.preserve_paths = 'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/*.table'
+  s.preserve_paths = [
+    'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/*.table',
+    'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/LICENSE',
+    'ThirdPartyLicenses/*'
+  ]
   s.module_map = 'tronlink-iOS-core/TLCore.modulemap'
 
   trezor_headers = 'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto'
