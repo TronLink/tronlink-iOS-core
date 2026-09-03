@@ -50,15 +50,6 @@ class Tests: XCTestCase {
         return keyStore
     }()
     
-    private lazy var tWallet: TWallet = {
-        // 18.206.50.220:50051
-        // 47.90.214.183:50051
-        let fullNode = "18.206.50.220:50051"
-//        GRPCCall.useInsecureConnections(forHost: fullNode)
-        let tWallet = TWallet.init(host: fullNode)
-        return tWallet
-    }()
-
     private static func randomPassword() -> String {
         var generator = SystemRandomNumberGenerator()
 
@@ -592,6 +583,54 @@ class Tests: XCTestCase {
         XCTAssertEqual(decoded, payload)
     }
 
+    func testBase58RoundTripsLeadingZeroBytes() {
+        let rotatedAlphabet = Array(Base58String.btcAlphabet.dropFirst()) + [Base58String.btcAlphabet[0]]
+        let alphabets = [Base58String.btcAlphabet, Base58String.flickrAlphabet, rotatedAlphabet]
+        let payloads = [
+            Data(),
+            Data([0x00]),
+            Data([0x00, 0x00]),
+            Data([0x00, 0x00, 0x01, 0x02, 0x03]),
+            Data([0x01, 0x02, 0x03]),
+        ]
+
+        for (alphabetIndex, alphabet) in alphabets.enumerated() {
+            for payload in payloads {
+                let encoded = String(base58Encoding: payload, alphabet: alphabet)
+                XCTAssertEqual(Data(base58Decoding: encoded, alphabet: alphabet), payload,
+                               "raw Base58 round trip failed for alphabet \(alphabetIndex)")
+
+                let checkEncoded = String(base58CheckEncoding: payload, alphabet: alphabet)
+                XCTAssertEqual(Data(base58CheckDecoding: checkEncoded, alphabet: alphabet), payload,
+                               "Base58Check round trip failed for alphabet \(alphabetIndex)")
+            }
+        }
+    }
+
+    func testBase58CanonicalVectorsPreserveLeadingZeroBytes() {
+        let vectors: [(alphabet: [UInt8], bytes: Data, encoded: String)] = [
+            (Base58String.btcAlphabet, Data(), ""),
+            (Base58String.btcAlphabet, Data([0x0a]), "B"),
+            (Base58String.btcAlphabet, Data([0x00]), "1"),
+            (Base58String.btcAlphabet, Data([0x00, 0x00]), "11"),
+            (Base58String.btcAlphabet, Data([0x00, 0x0a]), "1B"),
+            (Base58String.btcAlphabet, Data([0x00, 0x00, 0x0a]), "11B"),
+            (Base58String.flickrAlphabet, Data(), ""),
+            (Base58String.flickrAlphabet, Data([0x0a]), "b"),
+            (Base58String.flickrAlphabet, Data([0x00]), "1"),
+            (Base58String.flickrAlphabet, Data([0x00, 0x00]), "11"),
+            (Base58String.flickrAlphabet, Data([0x00, 0x0a]), "1b"),
+            (Base58String.flickrAlphabet, Data([0x00, 0x00, 0x0a]), "11b"),
+        ]
+
+        for vector in vectors {
+            XCTAssertEqual(String(base58Encoding: vector.bytes, alphabet: vector.alphabet),
+                           vector.encoded)
+            XCTAssertEqual(Data(base58Decoding: vector.encoded, alphabet: vector.alphabet),
+                           vector.bytes)
+        }
+    }
+
     func testStrictHexAddressConversionRejectsGarbage() {
         var payload = Data([0x41])
         payload.append(contentsOf: Array(repeating: UInt8(0x11), count: 20))
@@ -677,67 +716,62 @@ class Tests: XCTestCase {
         wait(for: [exp], timeout: 60)
     }
     
-    // Sign Transaction
-    func testSignTransaction() {
-        let exp = expectation(description: "testSignTransaction")
-        TLWalletCore.createWalletAccount(keyStore: self.keyStore, password: self.password) {  result in
-            switch result {
-            case .success(let account):
-                let walletAddress = String(base58CheckEncoding: account.address.data)
-                print("createWallet: \(walletAddress)")
-                XCTAssert(walletAddress.count > 0)
+    // Sign serialized transaction data without depending on a live full node.
+    func testSignTransaction() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-                let newContract: TransferContract = TransferContract()
-                newContract.ownerAddress = walletAddress.base58CheckData
-                newContract.toAddress = walletAddress.base58CheckData
-                newContract.amount = 1
+        let password = "transaction-signing-password"
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        let store = try KeyStore(keyDirectory: directory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let walletAddress = String(base58CheckEncoding: account.address.data)
 
-                self.tWallet.getNowBlock2(withRequest: EmptyMessage()) { blockExtention, error in
-                    if blockExtention == nil || error != nil {
-                        XCTAssert(false)
-                    }
-                    
-                    let transaction = TronTransaction()
-                    let rawData: Transaction_raw = Transaction_raw()
-                    rawData.refBlockHash = blockExtention?.blockid.subdata(in: Range(NSRange(location: 8, length: 8))!)
-                    
-                    var result = Data()
-                    let uint8Convert = Data([UInt8(truncatingIfNeeded: (blockExtention?.blockHeader.rawData.number ?? 0) >> 8),UInt8(truncatingIfNeeded: (blockExtention?.blockHeader.rawData.number ?? 0))])
-                    result.append(uint8Convert)
-                    rawData.refBlockBytes = result
-                    
-                    let transactionContract: Transaction_Contract = Transaction_Contract()
-                    transactionContract.type = .transferContract
-                    transactionContract.parameter.typeURL = "type.googleapis.com/protocol." + "TransferContract"
-                    transactionContract.parameter.value = newContract.data() ?? Data()
-                    rawData.contractArray = [transactionContract]
-                    transaction.rawData = rawData
-                    
-                    let data = transaction.rawData.data() ?? Data()
-                    let signResult = TLWalletCore.signTranscation(keyStore: self.keyStore, transaction: data, password: self.password, address: walletAddress)
-                            
-                    switch signResult {
-                    case .success(let data):
-                        print(data)
-                        exp.fulfill()
-                        XCTAssert(true)
-                        break
-                    case .failure(let error):
-                        print(error)
-                        exp.fulfill()
-                        XCTAssert(false)
-                        break
-                    }
-                }
-                break
-            case .failure(let error):
-                print(error)
-                exp.fulfill()
-                XCTAssert(false)
-                break
-            }
+        let transfer = TransferContract()
+        transfer.ownerAddress = account.address.data
+        transfer.toAddress = account.address.data
+        transfer.amount = 1
+
+        let contract = Transaction_Contract()
+        contract.type = .transferContract
+        contract.parameter.typeURL = "type.googleapis.com/protocol.TransferContract"
+        contract.parameter.value = try XCTUnwrap(transfer.data())
+
+        let rawData = Transaction_raw()
+        rawData.refBlockHash = Data(repeating: 0x11, count: 8)
+        rawData.refBlockBytes = Data([0x12, 0x34])
+        rawData.contractArray = [contract]
+        let serialized = try XCTUnwrap(rawData.data())
+
+        let signature: Data
+        switch TLWalletCore.signTranscation(keyStore: store,
+                                            transaction: serialized,
+                                            password: password,
+                                            address: walletAddress) {
+        case .success(let value):
+            signature = value
+        case .failure(let error):
+            return XCTFail("Failed to sign serialized transaction: \(error)")
         }
-        wait(for: [exp], timeout: 60)
+
+        guard signature.count == 65 else {
+            return XCTFail("Expected a 65-byte recoverable signature, got \(signature.count) bytes")
+        }
+        XCTAssertLessThan(signature[64], 4)
+
+        let digest = serialized.sha256T()
+        let fixtureWallet = try Wallet(mnemonic: mnemonic)
+        defer { fixtureWallet.clear() }
+        let expectedPublicKey = try fixtureWallet.getKey(at: 0).publicKey
+        let recoveredPublicKey = try SECP256K1.recoverPublicKey(hash: digest, signature: signature)
+        XCTAssertEqual(recoveredPublicKey, expectedPublicKey)
+
+        XCTAssertEqual(account.address.data.count, 21)
+        XCTAssertEqual(account.address.data.first, 0x41)
+        let expectedAddress = Data(account.address.data.dropFirst())
+        XCTAssertEqual(try Web3Utils.publicToAddressData(recoveredPublicKey), expectedAddress)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: digest, signature: signature).addressData,
+                       expectedAddress)
     }
 
     func testSignTransactionAddsOneSignaturePerSigner() throws {
@@ -1122,8 +1156,10 @@ final class EmbeddedABIGoldenTests: XCTestCase {
         XCTAssertEqual(keystoreKey.address.data.first, 0x41)
         XCTAssertEqual(Data(keystoreKey.address.data.dropFirst()), key.address.data)
         let zeroAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
-        XCTAssertEqual(zeroAddress.base58CheckData?.hexString,
-                       "410000000000000000000000000000000000000000")
+        var zeroAddressData = Data([0x41])
+        zeroAddressData.append(Data(repeating: 0, count: 20))
+        XCTAssertEqual(zeroAddress.base58CheckData, zeroAddressData)
+        XCTAssertEqual(String(base58CheckEncoding: zeroAddressData), zeroAddress)
     }
 
     func testProtobufAddressRetainsBehaviorUnderSwiftRename() {
@@ -1302,12 +1338,19 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase).count, 64)
     }
 
-    /// `EthereumCrypto` reports an invalid private key by returning an empty `Data`, since its
-    /// return type is `nonnull`. Decoding an address from that used to trap, including in release
-    /// builds, rather than surfacing an error.
+    /// Invalid input must fail at the Swift API boundary with one stable error instead of reaching
+    /// encryption or public-key derivation.
     func testInvalidPrivateKeyThrowsInsteadOfTrapping() {
-        XCTAssertThrowsError(try KeystoreKey(password: password, key: Data(repeating: 1, count: 16)))
-        XCTAssertThrowsError(try KeystoreKey(password: password, key: Data(repeating: 0, count: 32)))
+        let curveOrder = Data([
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+            0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+            0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+        ])
+        assertRejectsPrivateKey(Data(repeating: 1, count: 16))
+        assertRejectsPrivateKey(Data(repeating: 0, count: 32))
+        assertRejectsPrivateKey(curveOrder)
+        assertRejectsPrivateKey(Data(repeating: 0xff, count: 32))
     }
 
     /// `import(json:)` used to send every decrypted payload through the raw-key path. For an HD
@@ -1406,16 +1449,32 @@ final class EmbeddedKeystoreTests: XCTestCase {
         }
     }
 
-    /// Mnemonic bytes must never be accepted as a raw secp256k1 scalar, at any length.
-    func testKeystoreKeyRejectsMnemonicASCIIPayload() throws {
+    /// A complete mnemonic payload is not a 32-byte private-key scalar.
+    func testKeystoreKeyRejectsLongMnemonicPayload() throws {
         let payload = try XCTUnwrap(mnemonic.data(using: .ascii))
+        XCTAssertGreaterThan(payload.count, 32)
         assertRejectsPrivateKey(payload)
-        assertRejectsPrivateKey(payload.prefix(32))
     }
 
-    /// 32 bytes of printable ASCII form a valid scalar, so only the guard rejects them.
-    func testKeystoreKeyRejectsAllPrintableASCIIInput() {
-        assertRejectsPrivateKey(Data(repeating: 0x41, count: 32))
+    /// Content heuristics must not reject a valid scalar solely because every byte is printable.
+    func testKeystoreKeyAcceptsPrintableASCIIScalar() throws {
+        let mnemonicPayload = try XCTUnwrap(mnemonic.data(using: .ascii))
+        let privateKey = Data(mnemonicPayload.prefix(32))
+        XCTAssertEqual(privateKey.count, 32)
+        XCTAssertTrue(privateKey.allSatisfy { (0x20 ... 0x7e).contains($0) })
+        XCTAssertTrue(EthereumCrypto.isValidPrivateKey(privateKey))
+        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    }
+
+    func testKeystoreKeyAcceptsScalarImmediatelyBelowCurveOrder() throws {
+        let privateKey = Data([
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+            0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+            0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x40,
+        ])
+        XCTAssertTrue(EthereumCrypto.isValidPrivateKey(privateKey))
+        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
     }
 
     /// The guard must not reject legitimate keys.

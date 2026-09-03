@@ -52,13 +52,10 @@ public struct KeystoreKey {
 
     /// Initializes a `Key` by encrypting a private key with a password.
     ///
-    /// - Important: `key` must be exactly 32 bytes, a raw secp256k1 scalar. Any other length, or
-    ///   a payload that looks like ASCII plaintext (mnemonic bytes routed here by mistake),
-    ///   throws `EncryptError.invalidPrivateKey`. `EthereumCrypto.getPublicKey(from:)` would
-    ///   otherwise silently read just the first 32 bytes of a longer buffer, collapsing the key
-    ///   space to an enumerable range.
+    /// - Important: `key` must be exactly 32 bytes and a scalar in the secp256k1 range
+    ///   `1..<curveOrder`.
     public init(password: String, key: Data) throws {
-        guard key.count == 32 else {
+        guard key.count == 32, EthereumCrypto.isValidPrivateKey(key) else {
             throw EncryptError.invalidPrivateKey
         }
 
@@ -254,9 +251,7 @@ public enum EncryptError: Error {
     case generateKeyPairFail
     /// Retained for source compatibility with clients of the former Security.framework path.
     case extractPrivateKeyFail
-    /// Raw private-key input to `KeystoreKey.init(password:key:)` failed validation: not exactly
-    /// 32 bytes, or entirely printable ASCII, which signals a mnemonic misrouted through the
-    /// raw-key path.
+    /// Raw private-key input is not a 32-byte scalar in the secp256k1 range `1..<curveOrder`.
     case invalidPrivateKey
 }
 
