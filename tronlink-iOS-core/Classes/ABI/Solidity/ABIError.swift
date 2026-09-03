@@ -1,11 +1,12 @@
 
 import Foundation
 
-public enum ABIError: LocalizedError {
+public enum ABIError: LocalizedError, Equatable {
     case integerOverflow
     case invalidUTF8String
     case invalidNumberOfArguments
     case invalidArgumentType
+    case invalidAddress
 
     public var errorDescription: String? {
         switch self {
@@ -17,6 +18,8 @@ public enum ABIError: LocalizedError {
             return NSLocalizedString("Invalid number of arguments", comment: "ABI error description")
         case .invalidArgumentType:
             return NSLocalizedString("Invalid argument type", comment: "ABI error description")
+        case .invalidAddress:
+            return NSLocalizedString("Invalid address encoding", comment: "ABI encoder error")
         }
     }
 }

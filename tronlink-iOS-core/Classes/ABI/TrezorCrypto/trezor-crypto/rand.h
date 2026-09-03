@@ -29,7 +29,8 @@
 
 uint32_t random32(void);
 void random_buffer(uint8_t *buf, size_t len);
-// Returns 1 on success. Requests of 16-32 bytes also reject uniform/fixed output
+// Returns 1 on success. Every non-empty request retries one all-zero sample once
+// and rejects a second. Requests of 16-32 bytes also reject uniform/fixed output
 // and candidates repeated within the last three accepted requests of that length.
 int random_buffer_checked(uint8_t *buf, size_t len);
 

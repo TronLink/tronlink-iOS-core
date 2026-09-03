@@ -1045,6 +1045,69 @@ final class EmbeddedABIGoldenTests: XCTestCase {
                        Data([0xc4, 0x01, 0x82, 0x02, 0x03]))
     }
 
+    func testAddressEncodingAlwaysWrites32ByteSlot() throws {
+        let evm20 = Data(repeating: 0xaa, count: 20)
+        let expected = Data(repeating: 0, count: 12) + evm20
+
+        let encoder20 = ABIEncoder()
+        try encoder20.encode(Address(data: evm20))
+        XCTAssertEqual(encoder20.data, expected)
+
+        let encoder41 = ABIEncoder()
+        try encoder41.encode(Address(data: Data([0x41]) + evm20))
+        XCTAssertEqual(encoder41.data, expected)
+
+        let encoder00 = ABIEncoder()
+        try encoder00.encode(Address(data: Data([0x00]) + evm20))
+        XCTAssertEqual(encoder00.data, expected)
+
+        let encoder32 = ABIEncoder()
+        try encoder32.encode(Address(data: expected))
+        XCTAssertEqual(encoder32.data, expected)
+        XCTAssertEqual(encoder32.data.count, 32)
+    }
+
+    func testEmptyAddressEncodingThrowsWithoutWritingBytes() {
+        let encoder = ABIEncoder()
+        let invalidAddresses = [
+            Data(),
+            Data([0x01]),
+            Data([0x42]) + Data(repeating: 0xaa, count: 20),
+            Data(repeating: 0xaa, count: 19),
+            Data(repeating: 0xaa, count: 22),
+            Data([0x01]) + Data(repeating: 0, count: 31),
+            Data(repeating: 0xaa, count: 33),
+        ]
+
+        for rawAddress in invalidAddresses {
+            XCTAssertThrowsError(try encoder.encode(Address(data: rawAddress))) { error in
+                XCTAssertEqual(error as? ABIError, .invalidAddress)
+            }
+            XCTAssertTrue(encoder.data.isEmpty)
+        }
+    }
+
+    func testTransferFromDoesNotCollapseEmptyToSlot() {
+        let from = Address(data: Data(repeating: 0xaa, count: 20))
+        let encoder = ABIEncoder()
+        let function = Function(name: "transferFrom", parameters: [.address, .address, .uint(bits: 256)])
+        XCTAssertThrowsError(try encoder.encode(function: function, arguments: [from, Address(data: Data()), 12345])) { error in
+            XCTAssertEqual(error as? ABIError, .invalidAddress)
+        }
+    }
+
+    func testERC20ConvenienceEncodersFailClosedForInvalidAddress() {
+        let invalid = Address(data: Data())
+        let valid = Address(data: Data(repeating: 0xaa, count: 20))
+
+        XCTAssertTrue(ERC20Encoder.encodeBalanceOf(address: invalid).isEmpty)
+        XCTAssertTrue(ERC20Encoder.encodeApprove(spender: invalid, tokens: 1).isEmpty)
+        XCTAssertTrue(ERC20Encoder.encodeDepositTRC20(spender: invalid, tokens: 1).isEmpty)
+        XCTAssertTrue(ERC20Encoder.encodeExchangeBalance(contractOwner: valid, tokens: [invalid]).isEmpty)
+
+        XCTAssertEqual(ERC20Encoder.encodeApprove(spender: valid, tokens: 1).count, 68)
+    }
+
     func testEmbeddedTronDerivationAndBase58MatchGoldenValues() throws {
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
         let key = try TLCore.Wallet(mnemonic: mnemonic).getKey(at: 0)
@@ -1174,6 +1237,23 @@ final class EmbeddedKeystoreTests: XCTestCase {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let account = try store.createAccount(password: password, type: .hierarchicalDeterministicWallet)
         XCTAssertTrue(Mnemonic.isValid(try store.exportMnemonic(account: account, password: password)))
+    }
+
+    func testEncryptedKeyGenerationIsRejectedWithoutSideEffects() throws {
+        XCTAssertThrowsError(try KeystoreKey(password: password, type: .encryptedKey)) { error in
+            guard case EncryptError.generateKeyPairFail = error else {
+                return XCTFail("Expected generateKeyPairFail, got \(error)")
+            }
+        }
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertThrowsError(try store.createAccount(password: password, type: .encryptedKey)) { error in
+            guard case EncryptError.generateKeyPairFail = error else {
+                return XCTFail("Expected generateKeyPairFail, got \(error)")
+            }
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: []).isEmpty)
     }
 
     func testDeleteRequiresCorrectPassword() throws {

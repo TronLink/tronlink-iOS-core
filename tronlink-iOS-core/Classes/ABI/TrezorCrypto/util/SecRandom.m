@@ -36,6 +36,18 @@ static int buffer_is_uniform(const uint8_t *buf, size_t len) {
     return 1;
 }
 
+static int buffer_is_all_zero(const uint8_t *buf, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int random_buffer_checked(uint8_t *buf, size_t len) {
     if (!buf && len != 0) {
         return 0;
@@ -53,6 +65,13 @@ int random_buffer_checked(uint8_t *buf, size_t len) {
     os_unfair_lock_lock(&entropy_health_lock);
     int status = SecRandomCopyBytes(kSecRandomDefault, len, buf);
     int healthy = status == errSecSuccess;
+
+    // A four-byte random32 can legitimately be zero, so discard one zero
+    // sample before failing closed. No all-zero sample is accepted as healthy.
+    if (healthy && buffer_is_all_zero(buf, len)) {
+        status = SecRandomCopyBytes(kSecRandomDefault, len, buf);
+        healthy = status == errSecSuccess && !buffer_is_all_zero(buf, len);
+    }
 
     if (healthy && key_sized) {
         status = SecRandomCopyBytes(kSecRandomDefault, len, probe);

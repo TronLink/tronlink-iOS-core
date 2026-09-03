@@ -1,7 +1,6 @@
 
 import CryptoSwift
 import Foundation
-import Security
 
 /// Key definition.
 public struct KeystoreKey {
@@ -25,31 +24,14 @@ public struct KeystoreKey {
 
     /// Creates a new `Key` with a password. Use `generateHDWallet(password:)` when the generated
     /// mnemonic must be returned for backup.
+    /// - Throws: `EncryptError.generateKeyPairFail` for `.encryptedKey`; raw secp256k1
+    ///   accounts must be initialized with `init(password:key:)`.
     public init(password: String, type: AccountType) throws {
         switch type {
         case .encryptedKey:
-            let privateAttributes: [String: Any] = [
-                kSecAttrIsExtractable as String: true,
-            ]
-            let parameters: [String: Any] = [
-                kSecAttrKeyType as String: kSecAttrKeyTypeEC,
-                kSecAttrKeySizeInBits as String: 256,
-                kSecPrivateKeyAttrs as String: privateAttributes,
-            ]
-
-            var pubKey: SecKey?
-            var privKey: SecKey?
-            let status = SecKeyGeneratePair(parameters as CFDictionary, &pubKey, &privKey)
-            guard let privateKey = privKey, status == noErr else {
-                throw EncryptError.generateKeyPairFail
-            }
-
-            guard let keyRepresentation = SecKeyCopyExternalRepresentation(privateKey, nil) as Data? else {
-                throw EncryptError.extractPrivateKeyFail
-            }
-            
-            let key = keyRepresentation[(keyRepresentation.count - 32)...]
-            try self.init(password: password, key: key)
+            // Raw secp256k1 accounts may only be created from caller-supplied key material.
+            // Generating one through Security.framework would produce a P-256 key instead.
+            throw EncryptError.generateKeyPairFail
         case .hierarchicalDeterministicWallet:
             self = try KeystoreKey.generateHDWallet(password: password).key
         }
@@ -268,7 +250,9 @@ public enum DecryptError: Error {
 
 public enum EncryptError: Error {
     case invalidMnemonic
+    /// Raw secp256k1 key generation is unsupported; callers must supply imported key material.
     case generateKeyPairFail
+    /// Retained for source compatibility with clients of the former Security.framework path.
     case extractPrivateKeyFail
     /// Raw private-key input to `KeystoreKey.init(password:key:)` failed validation: not exactly
     /// 32 bytes, or entirely printable ASCII, which signals a mnemonic misrouted through the

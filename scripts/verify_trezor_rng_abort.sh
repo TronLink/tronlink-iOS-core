@@ -92,7 +92,19 @@ if ! "$harness_binary" --expect-exit-zero healthy-sign >/dev/null 2>&1; then
 fi
 printf 'healthy-sign: PASS\n'
 
-for result_name in rng-failure-sign rng-failure-public-key rng-failure-recovery; do
+for result_name in rng-zero-once-checked rng-zero-always-checked rng-zero-then-failure-checked rng-first-failure-checked rng-failure-then-success-checked rng-zero-once-key-sized-checked rng-short-length-checked rng-boundaries-checked; do
+    if ! "$harness_binary" --expect-exit-zero "$result_name" >/dev/null 2>&1; then
+        fail "$result_name" "direct random_buffer_checked contract test failed"
+    fi
+    printf '%s: PASS\n' "$result_name"
+done
+
+if ! "$harness_binary" --expect-exit-zero rng-zero-once-sign >/dev/null 2>&1; then
+    fail "rng-zero-once-sign" "all-zero sample was not retried with a healthy sample"
+fi
+printf 'rng-zero-once-sign: PASS\n'
+
+for result_name in rng-zero-always-sign rng-zero-then-failure-sign rng-failure-sign rng-failure-public-key rng-failure-recovery; do
     if ! "$harness_binary" --expect-sigabrt "$result_name" >/dev/null 2>&1; then
         fail "$result_name" "child did not terminate with SIGABRT"
     fi

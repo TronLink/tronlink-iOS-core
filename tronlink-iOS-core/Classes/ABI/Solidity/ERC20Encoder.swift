@@ -49,9 +49,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function balanceOf(address tokenOwner) public constant returns (uint balance);`
     public static func encodeBalanceOf(address: Address) -> Data {
         let function = Function(name: "balanceOf", parameters: [.address])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [address])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [address])
     }
 
     /// Encodes a function call to `allowance`
@@ -59,9 +57,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function allowance(address tokenOwner, address spender) public constant returns (uint remaining);`
     public static func encodeAllowance(owner: Address, spender: Address) -> Data {
         let function = Function(name: "allowance", parameters: [.address, .address])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [owner, spender])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [owner, spender])
     }
 
     /// Encodes a function call to `transfer`
@@ -69,9 +65,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function transfer(address to, uint tokens) public returns (bool success);`
     public static func encodeTransfer(to: Address, tokens: BigUInt) -> Data {
         let function = Function(name: "transfer", parameters: [.address, .uint(bits: 256)])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [to, tokens])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [to, tokens])
     }
 
     /// Encodes a function call to `approve`
@@ -79,9 +73,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function approve(address spender, uint tokens) public returns (bool success);`
     public static func encodeApprove(spender: Address, tokens: BigUInt) -> Data {
         let function = Function(name: "approve", parameters: [.address, .uint(bits: 256)])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [spender, tokens])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [spender, tokens])
     }
 
     /// Encodes a function call to `transferFrom`
@@ -89,9 +81,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function transferFrom(address from, address to, uint tokens) public returns (bool success);`
     public static func encodeTransfer(from: Address, to: Address, tokens: BigUInt) -> Data {
         let function = Function(name: "transferFrom", parameters: [.address, .address, .uint(bits: 256)])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [from, to, tokens])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [from, to, tokens])
     }
     
     /// Encodes a function call to `depositTRX`
@@ -119,9 +109,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function encodeDepositTRC20(address spender, uint tokens) public returns (bool success);`
     public static func encodeDepositTRC20(spender: Address, tokens: BigUInt) -> Data {
         let function = Function(name: "depositTRC20", parameters: [.address, .uint(bits: 64)])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [spender, tokens])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [spender, tokens])
     }
     
     /// Encodes a function call to `encodeWithdrawTRX`
@@ -169,9 +157,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function getBalance(address contractOwner, array[address] tokens) public returns (array);`
     public static func encodeExchangeBalance(contractOwner: Address, tokens: [Address]) -> Data {
         let function = Function(name: "getBalance", parameters: [.address, .dynamicArray(.address)])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [contractOwner, tokens])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [contractOwner, tokens])
     }
     
     /// Encodes a function call to `trxToTokenSwapInput`
@@ -220,9 +206,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function tokenToTokenSwapInput(uint256 tokens_sold, uint256 min_tokens_bought, uint256 min_trx_bought, uint256 deadline, address token_addr) external returns (uint256);`
     public static func encodeTokenToTokenSwapInput(tokensSold: BigUInt, minTokensBought: BigUInt, minTrxBought: BigUInt, deadline: BigUInt, tokenAddr: Address) -> Data {
         let function = Function(name: "tokenToTokenSwapInput", parameters: [.uint(bits: 256), .uint(bits: 256), .uint(bits: 256), .uint(bits: 256), .address])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [tokensSold, minTokensBought, minTrxBought, deadline, tokenAddr])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [tokensSold, minTokensBought, minTrxBought, deadline, tokenAddr])
     }
     
     /// Encodes a function call to `tokenToTrxSwapOutput`
@@ -230,9 +214,7 @@ public final class ERC20Encoder {
     /// Solidity function: `function tokenToTokenSwapOutput(uint256 tokens_bought, uint256 max_tokens_sold, uint256 max_trx_sold, uint256 deadline, address token_addr) external returns (uint256);`
     public static func encodeTokenToTokenSwapOutput(tokensBought: BigUInt, maxTokensSold: BigUInt, maxTrxSold: BigUInt, deadline: BigUInt, tokenAddr: Address) -> Data {
         let function = Function(name: "tokenToTokenSwapOutput", parameters: [.uint(bits: 256), .uint(bits: 256), .uint(bits: 256), .uint(bits: 256), .address])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [tokensBought, maxTokensSold, maxTrxSold, deadline, tokenAddr])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [tokensBought, maxTokensSold, maxTrxSold, deadline, tokenAddr])
     }
     
     /// Encodes a function call to `queryDIDAddress`
@@ -256,9 +238,7 @@ public final class ERC20Encoder {
                                                                      .dynamicArray(.uint(bits: 256)),
                                                                      .dynamicArray(.uint(bits: 24)),
                                                                      .tuple([.uint(bits: 256), .uint(bits: 256), .address, .uint(bits: 256)])])
-        let encoder = ABIEncoder()
-        try! encoder.encode(function: function, arguments: [path, poolVersion, versionLen, fees, tuple])
-        return encoder.data
+        return encodeSafely(function: function, arguments: [path, poolVersion, versionLen, fees, tuple])
     }
 
     /// Encodes a function call to `ownerOf`
@@ -269,5 +249,16 @@ public final class ERC20Encoder {
         let encoder = ABIEncoder()
         try! encoder.encode(function: function, arguments: [tokenId])
         return encoder.data
+    }
+
+    /// Preserves the legacy non-throwing API while refusing to return partial calldata.
+    private static func encodeSafely(function: Function, arguments: [Any]) -> Data {
+        let encoder = ABIEncoder()
+        do {
+            try encoder.encode(function: function, arguments: arguments)
+            return encoder.data
+        } catch {
+            return Data()
+        }
     }
 }

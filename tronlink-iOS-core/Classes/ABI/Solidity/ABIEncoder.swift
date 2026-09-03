@@ -150,19 +150,31 @@ public final class ABIEncoder: Codable {
         data.append(Data(repeating: 0, count: padding))
     }
 
-    /// Encodes an address
+    /// Encodes an address as a 32-byte ABI slot (12 zero bytes + 20-byte address).
+    ///
+    /// Accepts 20-byte EVM form, 21-byte TRON `0x41` prefix, Permit2-style `0x00`
+    /// prefix, or a 32-byte left-padded word. Empty / other lengths throw instead
+    /// of writing a short slot that would shift later arguments.
     public func encode(_ address: Address) throws {
-        // Strip TRON's network prefix only at the EVM ABI boundary.
-        let addressData: Data
-        if address.data.count == 21, address.data.first == 0x41 {
-            addressData = Data(address.data.dropFirst())
-        } else {
-            addressData = address.data
+        guard let addressData = ABIEncoder.evmAddress20(from: address.data) else {
+            throw ABIError.invalidAddress
         }
-
-        let padding = ((addressData.count + 31) / 32) * 32 - addressData.count
-        data.append(Data(repeating: 0, count: padding))
+        data.append(Data(repeating: 0, count: encodedIntSize - addressData.count))
         data.append(addressData)
+    }
+
+    /// 20-byte EVM address for ABI encoding, or `nil` if `raw` cannot be used as address.
+    static func evmAddress20(from raw: Data) -> Data? {
+        switch raw.count {
+        case 20:
+            return raw
+        case 21 where raw.first == 0x41 || raw.first == 0x00:
+            return Data(raw.dropFirst())
+        case 32 where raw.prefix(12).allSatisfy({ $0 == 0 }):
+            return Data(raw.suffix(20))
+        default:
+            return nil
+        }
     }
 
     /// Encodes a string

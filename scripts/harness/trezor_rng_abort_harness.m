@@ -20,15 +20,49 @@ int tl_fake_SecRandomCopyBytes(SecRandomRef random, size_t count, void *bytes);
 #include <unistd.h>
 
 #include "ecdsa.h"
+#include "rand.h"
 #include "secp256k1.h"
 
-static int tl_rng_should_fail = 0;
+typedef enum {
+    TL_RNG_HEALTHY,
+    TL_RNG_FAIL,
+    TL_RNG_ZERO_ONCE,
+    TL_RNG_ZERO_ALWAYS,
+    TL_RNG_ZERO_THEN_FAIL,
+} tl_rng_behavior;
+
+static tl_rng_behavior tl_rng_behavior_value = TL_RNG_HEALTHY;
+static size_t tl_rng_call_count = 0;
 static uint64_t tl_entropy_state = UINT64_C(0x6a09e667f3bcc909);
+
+static void tl_configure_rng(tl_rng_behavior behavior) {
+    tl_rng_behavior_value = behavior;
+    tl_rng_call_count = 0;
+    tl_entropy_state = UINT64_C(0x6a09e667f3bcc909);
+}
+
+static int tl_buffer_is_all_zero(const uint8_t *buffer, size_t count) {
+    for (size_t index = 0; index < count; index++) {
+        if (buffer[index] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 int tl_fake_SecRandomCopyBytes(SecRandomRef random, size_t count, void *bytes) {
     (void)random;
-    if (tl_rng_should_fail) {
+    tl_rng_call_count++;
+
+    if (tl_rng_behavior_value == TL_RNG_FAIL ||
+        (tl_rng_behavior_value == TL_RNG_ZERO_THEN_FAIL && tl_rng_call_count > 1)) {
         return errSecNotAvailable;
+    }
+    if (tl_rng_behavior_value == TL_RNG_ZERO_ALWAYS ||
+        (tl_rng_behavior_value == TL_RNG_ZERO_ONCE && tl_rng_call_count == 1) ||
+        (tl_rng_behavior_value == TL_RNG_ZERO_THEN_FAIL && tl_rng_call_count == 1)) {
+        memset(bytes, 0, count);
+        return errSecSuccess;
     }
 
     uint8_t *output = bytes;
@@ -89,13 +123,108 @@ static int tl_run_sign(int expect_fixed_signature) {
     return 0;
 }
 
+static int tl_run_checked_rng_test(const char *mode) {
+    uint8_t output[16];
+    memset(output, 0xa5, sizeof(output));
+
+    if (strcmp(mode, "rng-zero-once-checked") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_ONCE);
+        if (!random_buffer_checked(output, 4) || tl_rng_call_count != 2 ||
+            tl_buffer_is_all_zero(output, 4)) {
+            return 86;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-zero-always-checked") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_ALWAYS);
+        if (random_buffer_checked(output, 4) || tl_rng_call_count != 2 ||
+            !tl_buffer_is_all_zero(output, 4)) {
+            return 87;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-zero-then-failure-checked") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_THEN_FAIL);
+        if (random_buffer_checked(output, 4) || tl_rng_call_count != 2 ||
+            !tl_buffer_is_all_zero(output, 4)) {
+            return 88;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-first-failure-checked") == 0) {
+        tl_configure_rng(TL_RNG_FAIL);
+        if (random_buffer_checked(output, 4) || tl_rng_call_count != 1 ||
+            !tl_buffer_is_all_zero(output, 4)) {
+            return 89;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-failure-then-success-checked") == 0) {
+        tl_configure_rng(TL_RNG_FAIL);
+        if (random_buffer_checked(output, 4) || tl_rng_call_count != 1 ||
+            !tl_buffer_is_all_zero(output, 4)) {
+            return 90;
+        }
+        tl_configure_rng(TL_RNG_HEALTHY);
+        if (!random_buffer_checked(output, 4) || tl_rng_call_count != 1 ||
+            tl_buffer_is_all_zero(output, 4)) {
+            return 91;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-zero-once-key-sized-checked") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_ONCE);
+        if (!random_buffer_checked(output, sizeof(output)) || tl_rng_call_count != 3 ||
+            tl_buffer_is_all_zero(output, sizeof(output))) {
+            return 92;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-short-length-checked") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_ONCE);
+        if (!random_buffer_checked(output, 1) || tl_rng_call_count != 2 || output[0] == 0) {
+            return 93;
+        }
+        tl_configure_rng(TL_RNG_ZERO_ALWAYS);
+        if (random_buffer_checked(output, 1) || tl_rng_call_count != 2 || output[0] != 0) {
+            return 94;
+        }
+        return 0;
+    }
+    if (strcmp(mode, "rng-boundaries-checked") == 0) {
+        tl_configure_rng(TL_RNG_FAIL);
+        if (!random_buffer_checked(NULL, 0) || random_buffer_checked(NULL, 1) ||
+            tl_rng_call_count != 0) {
+            return 95;
+        }
+        return 0;
+    }
+    return -1;
+}
+
 static int tl_run_operation(const char *mode) {
+    int checked_result = tl_run_checked_rng_test(mode);
+    if (checked_result >= 0) {
+        return checked_result;
+    }
     if (strcmp(mode, "healthy-sign") == 0) {
-        tl_rng_should_fail = 0;
+        tl_configure_rng(TL_RNG_HEALTHY);
         return tl_run_sign(1);
     }
+    if (strcmp(mode, "rng-zero-once-sign") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_ONCE);
+        return tl_run_sign(1);
+    }
+    if (strcmp(mode, "rng-zero-always-sign") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_ALWAYS);
+        return tl_run_sign(0) == 0 ? 82 : 83;
+    }
+    if (strcmp(mode, "rng-zero-then-failure-sign") == 0) {
+        tl_configure_rng(TL_RNG_ZERO_THEN_FAIL);
+        return tl_run_sign(0) == 0 ? 84 : 85;
+    }
 
-    tl_rng_should_fail = 1;
+    tl_configure_rng(TL_RNG_FAIL);
     if (strcmp(mode, "rng-failure-sign") == 0) {
         return tl_run_sign(0) == 0 ? 67 : 68;
     }
