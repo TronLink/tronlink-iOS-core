@@ -1,9 +1,5 @@
 
-import BigInt
 import Foundation
-
-
-
 extension ABIv2.Element {
     /// Specifies the type that parameters in a contract have.
     public enum ParameterType: ABIv2ElementPropertiesProtocol {
@@ -11,6 +7,10 @@ extension ABIv2.Element {
         case uint(bits: UInt64)
         /// intN type
         case int(bits: UInt64)
+        /// Signed fixedMxN decimal, encoded as an integer scaled by 10^N.
+        case fixed(bits: UInt64, decimals: UInt64)
+        /// Unsigned fixedMxN decimal, encoded as an integer scaled by 10^N.
+        case ufixed(bits: UInt64, decimals: UInt64)
         /// address type
         case address
         /// function type
@@ -19,8 +19,10 @@ extension ABIv2.Element {
         case bool
         /// bytesN type
         case bytes(length: UInt64)
-        /// array[N] or array[] type
+        /// array[N] or array[] type. Zero retains the legacy meaning of [].
         indirect case array(type: ParameterType, length: UInt64)
+        /// Explicit fixed-size array, including [0], which differs from [].
+        indirect case fixedArray(type: ParameterType, length: UInt64)
         /// bytes type
         case dynamicBytes
         /// string type
@@ -29,25 +31,12 @@ extension ABIv2.Element {
         indirect case tuple(types: [ParameterType])
 
         var isStatic: Bool {
-            switch self {
-            case .string:
-                return false
-            case .dynamicBytes:
-                return false
-            case let .array(type: type, length: length):
-                return length > 0 && type.isStatic
-            case let .tuple(types: types):
-                return types.allSatisfy { $0.isStatic }
-            case .bytes(length: _):
-                return true
-            default:
-                return true
-            }
+            return ABIv2Layout.layout(of: self)?.isStatic ?? false
         }
 
         var isArray: Bool {
             switch self {
-            case .array:
+            case .array, .fixedArray:
                 return true
             default:
                 return false
@@ -65,7 +54,7 @@ extension ABIv2.Element {
 
         var subtype: ABIv2.Element.ParameterType? {
             switch self {
-            case .array(type: let type, length: _):
+            case .array(type: let type, length: _), .fixedArray(type: let type, length: _):
                 return type
             default:
                 return nil
@@ -73,53 +62,7 @@ extension ABIv2.Element {
         }
 
         var memoryUsage: UInt64 {
-            switch self {
-            case let .array(_, length: length):
-                if length == 0 {
-                    return 32
-                }
-                if self.isStatic {
-                    return 32 * length
-                }
-                return 32
-            case let .tuple(types: types):
-                if !self.isStatic {
-                    return 32
-                }
-                var sum: UInt64 = 0
-                for t in types {
-                    sum = sum + t.memoryUsage
-                }
-                return sum
-            default:
-                return 32
-            }
-        }
-
-        var emptyValue: Any {
-            switch self {
-            case .uint:
-                return BigUInt(0)
-            case .int:
-                return BigUInt(0)
-            case .address:
-                return Web3Address("0x0000000000000000000000000000000000000000")
-            case .function:
-                return Data(repeating: 0x00, count: 24)
-            case .bool:
-                return false
-            case let .bytes(length: length):
-                return Data(repeating: 0x00, count: Int(length))
-            case let .array(type: type, length: length):
-                let emptyValueOfType = type.emptyValue
-                return Array(repeating: emptyValueOfType, count: Int(length))
-            case .dynamicBytes:
-                return Data()
-            case .string:
-                return ""
-            case .tuple(types: _):
-                return [Any]()
-            }
+            return ABIv2Layout.layout(of: self)?.headSize ?? 0
         }
 
         var arraySize: ABIv2.Element.ArraySize {
@@ -130,6 +73,8 @@ extension ABIv2.Element {
                 } else {
                     return ArraySize.staticSize(length)
                 }
+            case .fixedArray(type: _, length: let length):
+                return ArraySize.staticSize(length)
             default:
                 return ArraySize.notArray
             }
@@ -144,6 +89,9 @@ extension ABIv2.Element.ParameterType: Equatable {
             return length1 == length2
         case let (.int(length1), .int(length2)):
             return length1 == length2
+        case let (.fixed(bits1, decimals1), .fixed(bits2, decimals2)),
+             let (.ufixed(bits1, decimals1), .ufixed(bits2, decimals2)):
+            return bits1 == bits2 && decimals1 == decimals2
         case (.address, .address):
             return true
         case (.bool, .bool):
@@ -154,6 +102,13 @@ extension ABIv2.Element.ParameterType: Equatable {
             return true
         case let (.array(type1, length1), .array(type2, length2)):
             return type1 == type2 && length1 == length2
+        case let (.fixedArray(type1, length1), .fixedArray(type2, length2)):
+            return type1 == type2 && length1 == length2
+        case let (.array(type1, length1), .fixedArray(type2, length2)),
+             let (.fixedArray(type1, length1), .array(type2, length2)):
+            return length1 > 0 && length1 == length2 && type1 == type2
+        case let (.tuple(types1), .tuple(types2)):
+            return types1 == types2
         case (.dynamicBytes, .dynamicBytes):
             return true
         case (.string, .string):
@@ -177,7 +132,22 @@ extension ABIv2.Element.Function {
     
     /// Function hash
     public var methodEncoding: Data {
-        return signature.data(using: .ascii)!.keccak256()[0..<4]
+        return Data(signature.utf8).keccak256()[0..<4]
+    }
+}
+
+extension ABIv2.Element.CustomError {
+    public var signature: String {
+        return "\(name)(\(inputs.map { $0.type.abiRepresentation }.joined(separator: ",")))"
+    }
+
+    /// Full Keccak-256 hash, matching Function.methodString.
+    public var methodString: String {
+        return signature.keccak256().hex
+    }
+
+    public var methodEncoding: Data {
+        return Data(signature.utf8).keccak256()[0..<4]
     }
 }
 
@@ -191,7 +161,7 @@ extension ABIv2.Element.Event {
     
     /// Event hash
     public var topic: Data {
-        return signature.data(using: .ascii)!.keccak256()
+        return Data(signature.utf8).keccak256()
     }
 }
 
@@ -203,6 +173,10 @@ extension ABIv2.Element.ParameterType: ABIv2Encoding {
             return "uint\(bits)"
         case let .int(bits):
             return "int\(bits)"
+        case let .fixed(bits, decimals):
+            return "fixed\(bits)x\(decimals)"
+        case let .ufixed(bits, decimals):
+            return "ufixed\(bits)x\(decimals)"
         case .address:
             return "address"
         case .bool:
@@ -218,10 +192,12 @@ extension ABIv2.Element.ParameterType: ABIv2Encoding {
                 return "\(type.abiRepresentation)[]"
             }
             return "\(type.abiRepresentation)[\(length)]"
+        case let .fixedArray(type: type, length: length):
+            return "\(type.abiRepresentation)[\(length)]"
         case let .tuple(types: types):
             let typesRepresentation = types.map { $0.abiRepresentation }
             let typesJoined = typesRepresentation.joined(separator: ",")
-            return "tuple(\(typesJoined))"
+            return "(\(typesJoined))"
         case .string:
             return "string"
         }
@@ -231,22 +207,6 @@ extension ABIv2.Element.ParameterType: ABIv2Encoding {
 extension ABIv2.Element.ParameterType: ABIv2Validation {
     /// Returns true if type is valid (or false for types like uint257)
     public var isValid: Bool {
-        switch self {
-        case let .uint(bits), let .int(bits):
-            return bits > 0 && bits <= 256 && bits % 8 == 0
-        case let .bytes(length):
-            return length > 0 && length <= 32
-        case .array(type: let type, _):
-            return type.isValid
-        case let .tuple(types: types):
-            for t in types {
-                if !t.isValid {
-                    return false
-                }
-            }
-            return true
-        default:
-            return true
-        }
+        return ABIv2Layout.layout(of: self) != nil
     }
 }

@@ -993,7 +993,8 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
     }
 
     func testABIv2EncodingAndDecodingMatchesGoldenValues() throws {
-        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("(address,uint256[])[]"))
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("(address,uint256[])[]"),
+                       .array(type: .tuple(types: [.address, .array(type: .uint(bits: 256), length: 0)]), length: 0))
         let embeddedType = try TLCore.ABIv2TypeParser.parseTypeString("uint256[][2]")
         guard case let .array(type: embeddedInner, length: embeddedOuterLength) = embeddedType,
               case let .array(type: embeddedLeaf, length: embeddedInnerLength) = embeddedInner,
@@ -1798,5 +1799,765 @@ extension EmbeddedKeystoreTests {
             options: []
         ) as? [String: Any])
         XCTAssertEqual(object["address"] as? String, String(repeating: "0", count: 42))
+    }
+}
+
+// Expected ABI vectors below are independent handwritten words, not encoder output.
+final class ABIv2RegressionTests: XCTestCase {
+    private typealias Parameter = TLCore.ABIv2.Element.ParameterType
+
+    private func word(_ value: UInt64) -> Data {
+        var result = Data(repeating: 0, count: 32)
+        for byte in 0..<8 {
+            result[31 - byte] = UInt8((value >> (byte * 8)) & 0xff)
+        }
+        return result
+    }
+
+    private func words(_ values: [UInt64]) -> Data {
+        return values.reduce(into: Data()) { $0.append(word($1)) }
+    }
+
+    private func rightPaddedWord(_ bytes: Data) -> Data {
+        precondition(bytes.count <= 32)
+        return bytes + Data(repeating: 0, count: 32 - bytes.count)
+    }
+
+    private func signedByteWord(_ value: Int8) -> Data {
+        var result = Data(repeating: value < 0 ? 0xff : 0, count: 32)
+        result[31] = UInt8(bitPattern: value)
+        return result
+    }
+
+    private func parseRecord(_ json: String) throws -> TLCore.ABIv2.Element {
+        return try JSONDecoder().decode(TLCore.ABIv2.Record.self, from: Data(json.utf8)).parse()
+    }
+
+    private func eventLog(data: Data, topics: [Data]) throws -> TLCore.EventLog {
+        let object: [String: Any] = [
+            "address": "0x1111111111111111111111111111111111111111",
+            "blockHash": "0x" + String(repeating: "00", count: 32),
+            "blockNumber": "0x1", "data": "0x" + data.hex,
+            "logIndex": "0x0", "removed": "0x0",
+            "topics": topics.map { "0x" + $0.hex },
+            "transactionHash": "0x" + String(repeating: "00", count: 32),
+            "transactionIndex": "0x0"
+        ]
+        let json = try JSONSerialization.data(withJSONObject: object)
+        return try JSONDecoder().decode(TLCore.EventLog.self, from: json)
+    }
+
+    func testTwoDynamicMatricesMatchBatchBalanceCheckAndBridgeToAppTypes() throws {
+        let uintMatrix: Parameter = .array(type: .array(type: .uint(bits: 256), length: 0), length: 0)
+        let boolMatrix: Parameter = .array(type: .array(type: .bool, length: 0), length: 0)
+        // Each outer tail occupies 320 bytes. Inner offsets start immediately
+        // after the respective outer length word, not at the entire payload.
+        let expected = words([64, 384,
+                              3, 96, 192, 224, 2, 1, 2, 0, 1, 3,
+                              3, 96, 160, 256, 1, 1, 2, 0, 1, 0])
+        let balances: [[BigUInt]] = [[1, 2], [], [3]]
+        let flags = [[true], [false, true], []]
+        let values: [AnyObject] = [balances as AnyObject, flags as AnyObject]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [uintMatrix, boolMatrix], values: values), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [uintMatrix, boolMatrix], data: expected))
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(try XCTUnwrap(decoded[0] as? [[BigUInt]]), balances)
+        XCTAssertEqual(try XCTUnwrap(decoded[1] as? [[Bool]]), flags)
+    }
+
+    func testAllFourArrayDimensionKindsUseIndependentWordLayouts() throws {
+        let fixedRows: [[BigUInt]] = [[1, 2], [3, 4]]
+        let dynamicRows: [[BigUInt]] = [[1, 2], [3]]
+        let cases: [(String, [[BigUInt]], Data)] = [
+            ("uint256[2][2]", fixedRows, words([1, 2, 3, 4])),
+            ("uint256[][2]", dynamicRows, words([32, 64, 160, 2, 1, 2, 1, 3])),
+            ("uint256[2][]", fixedRows, words([32, 2, 1, 2, 3, 4])),
+            ("uint256[][]", dynamicRows, words([32, 2, 64, 160, 2, 1, 2, 1, 3]))
+        ]
+        for (typeString, value, expected) in cases {
+            let type = try TLCore.ABIv2TypeParser.parseTypeString(typeString)
+            XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value as AnyObject]), expected, typeString)
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected), typeString)
+            XCTAssertEqual(try XCTUnwrap(decoded.first as? [[BigUInt]], typeString), value, typeString)
+        }
+    }
+
+    func testStringArrayWithThreeElementsDoesNotSkipFollowingArgument() throws {
+        let strings: Parameter = .array(type: .string, length: 0)
+        let tail = words([3, 96, 160, 224, 1])
+            + rightPaddedWord(Data("a".utf8))
+            + word(2) + rightPaddedWord(Data("bb".utf8))
+            + word(3) + rightPaddedWord(Data("ccc".utf8))
+        let expected = words([64, 9]) + tail
+        let types: [Parameter] = [strings, .uint(bits: 256)]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [["a", "bb", "ccc"] as AnyObject, BigUInt(9) as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? [String], ["a", "bb", "ccc"])
+        XCTAssertEqual(decoded[1] as? BigUInt, BigUInt(9))
+
+        // The old public spelling remains callable. Its consumed count must be
+        // a relative head width even when decoding starts at a nonzero pointer.
+        let nonzeroPointerData = words([7, 96, 9]) + tail
+        let single = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: nonzeroPointerData, pointer: 32)
+        XCTAssertEqual(single.value as? [String], ["a", "bb", "ccc"])
+        XCTAssertEqual(single.bytesConsumed, UInt64(32))
+        let next = TLCore.ABIv2Decoder.decodeSignleType(type: .uint(bits: 256), data: nonzeroPointerData, pointer: 64)
+        XCTAssertEqual(next.value as? BigUInt, BigUInt(9))
+        XCTAssertEqual(next.bytesConsumed, UInt64(32))
+    }
+
+    func testThreeStringArrayRowsUseOffsetsRelativeToEachOwnLengthWord() throws {
+        let type: Parameter = .array(type: .array(type: .string, length: 0), length: 0)
+        let value = [["a", "bb"], ["ccc"], []]
+        // Outer row tails occupy 224, 128 and 32 bytes respectively. The
+        // third row is empty, while the first two have different strings.
+        let expected = words([32, 3, 96, 320, 448, 2, 64, 128, 1])
+            + rightPaddedWord(Data("a".utf8))
+            + word(2) + rightPaddedWord(Data("bb".utf8))
+            + words([1, 32, 3]) + rightPaddedWord(Data("ccc".utf8))
+            + word(0)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
+        XCTAssertEqual(decoded[0] as? [[String]], value)
+    }
+
+    func testDynamicTupleDoesNotAdvancePastFollowingInteger() throws {
+        let tupleType: Parameter = .tuple(types: [.uint(bits: 256), .string])
+        let types: [Parameter] = [tupleType, .uint(bits: 256)]
+        let tuple: [AnyObject] = [BigUInt(7) as AnyObject, "hi" as AnyObject]
+        let expected = words([64, 9, 7, 64, 2]) + rightPaddedWord(Data("hi".utf8))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [tuple as AnyObject, BigUInt(9) as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        let decodedTuple = try XCTUnwrap(decoded[0] as? [AnyObject])
+        XCTAssertEqual(decodedTuple[0] as? BigUInt, BigUInt(7))
+        XCTAssertEqual(decodedTuple[1] as? String, "hi")
+        XCTAssertEqual(decoded[1] as? BigUInt, BigUInt(9))
+    }
+
+    func testStaticTupleArrayContributesItsFullWidthBeforeDynamicString() throws {
+        let arrayType: Parameter = .array(type: .tuple(types: [.uint(bits: 256), .bool]), length: 2)
+        let types: [Parameter] = [arrayType, .string]
+        let rows: [[AnyObject]] = [[BigUInt(1) as AnyObject, true as AnyObject],
+                                  [BigUInt(2) as AnyObject, false as AnyObject]]
+        // Two 64-byte static tuples and one 32-byte offset form a 160-byte head.
+        let expected = words([1, 1, 2, 0, 160, 2]) + rightPaddedWord(Data("ok".utf8))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [rows as AnyObject, "ok" as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        let decodedRows = try XCTUnwrap(decoded[0] as? [[AnyObject]])
+        XCTAssertEqual(decodedRows.count, 2)
+        XCTAssertEqual(decodedRows[0][0] as? BigUInt, BigUInt(1))
+        XCTAssertEqual(decodedRows[0][1] as? Bool, true)
+        XCTAssertEqual(decodedRows[1][0] as? BigUInt, BigUInt(2))
+        XCTAssertEqual(decodedRows[1][1] as? Bool, false)
+        XCTAssertEqual(decoded[1] as? String, "ok")
+    }
+
+    func testTupleWithDynamicArrayUsesTupleRelativeOffsets() throws {
+        let type: Parameter = .tuple(types: [.uint(bits: 256), .array(type: .string, length: 0)])
+        let expected = words([32, 7, 64, 2, 64, 128, 1])
+            + rightPaddedWord(Data("a".utf8))
+            + word(2) + rightPaddedWord(Data("bb".utf8))
+        let tuple: [AnyObject] = [BigUInt(7) as AnyObject, ["a", "bb"] as AnyObject]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [tuple as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
+        let result = try XCTUnwrap(decoded[0] as? [AnyObject])
+        XCTAssertEqual(result[0] as? BigUInt, BigUInt(7))
+        XCTAssertEqual(result[1] as? [String], ["a", "bb"])
+    }
+
+    func testEmptyDynamicArrayAndStringHaveLengthWords() throws {
+        let types: [Parameter] = [.array(type: .uint(bits: 256), length: 0), .string]
+        let expected = words([64, 96, 0, 0])
+        let empty: [BigUInt] = []
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [empty as AnyObject, "" as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? [BigUInt], [])
+        XCTAssertEqual(decoded[1] as? String, "")
+    }
+
+    func testJSONTupleComponentsSurviveEveryArrayDimensionAndNestedTuple() throws {
+        let json = """
+        {"type":"function","name":"f","stateMutability":"view",
+         "inputs":[{"name":"items","type":"tuple[][2][]","components":[
+           {"name":"owner","type":"address"},
+           {"name":"flags","type":"tuple[]","components":[{"name":"n","type":"uint256"},{"name":"ok","type":"bool"}]}]}],
+         "outputs":[{"name":"items","type":"tuple[][2][]","components":[
+           {"name":"owner","type":"address"},
+           {"name":"flags","type":"tuple[]","components":[{"name":"n","type":"uint256"},{"name":"ok","type":"bool"}]}]}]}
+        """
+        guard case let .function(function) = try parseRecord(json) else { return XCTFail("Expected function") }
+        let leaf: Parameter = .tuple(types: [.address, .array(type: .tuple(types: [.uint(bits: 256), .bool]), length: 0)])
+        let expected: Parameter = .array(type: .array(type: .array(type: leaf, length: 0), length: 2), length: 0)
+        XCTAssertEqual(function.inputs.first?.type, expected)
+        XCTAssertEqual(function.outputs.first?.type, expected)
+        XCTAssertEqual(expected.abiRepresentation, "(address,(uint256,bool)[])[][2][]")
+        XCTAssertEqual(function.signature, "f((address,(uint256,bool)[])[][2][])")
+        let canonical = Data("f((address,(uint256,bool)[])[][2][])".utf8)
+        XCTAssertEqual(function.methodEncoding, Data(EthereumCrypto.hash(canonical).prefix(4)))
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("(address,(uint256,bool)[])[][2][]"), expected)
+    }
+
+    func testFunctionSelectorMatchesKnownERC20VectorAndMethodStringStaysFullHash() throws {
+        let json = """
+        {"type":"function","name":"transfer","stateMutability":"nonpayable",
+         "inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"}],"outputs":[]}
+        """
+        guard case let .function(function) = try parseRecord(json) else { return XCTFail("Expected function") }
+        XCTAssertEqual(function.signature, "transfer(address,uint256)")
+        XCTAssertEqual(function.methodEncoding, Data([0xa9, 0x05, 0x9c, 0xbb]))
+        XCTAssertEqual(function.methodString, "a9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c9049b")
+    }
+
+    func testModernJSONMutabilityDoesNotRequireLegacyPayable() throws {
+        for (mutability, isConstant, isPayable) in [("view", true, false), ("pure", true, false), ("nonpayable", false, false), ("payable", false, true)] {
+            let json = "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"\(mutability)\",\"inputs\":[],\"outputs\":[]}"
+            guard case let .function(function) = try parseRecord(json) else { return XCTFail("Expected function") }
+            XCTAssertEqual(function.constant, isConstant)
+            XCTAssertEqual(function.payable, isPayable)
+        }
+        guard case let .fallback(fallback) = try parseRecord("{\"type\":\"fallback\",\"stateMutability\":\"nonpayable\"}") else { return XCTFail("Expected fallback") }
+        XCTAssertFalse(fallback.payable)
+        guard case let .constructor(constructor) = try parseRecord("{\"type\":\"constructor\",\"stateMutability\":\"payable\",\"inputs\":[]}") else { return XCTFail("Expected constructor") }
+        XCTAssertTrue(constructor.payable)
+        XCTAssertThrowsError(try parseRecord("{\"type\":\"function\",\"name\":\"f\",\"inputs\":[{\"type\":\"tuple[]\"}],\"outputs\":[]}"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint7"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("bytes33"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256[00]"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256garbage"))
+    }
+
+    func testReceiveAndCustomErrorJSONSupportIndependentRevertPayload() throws {
+        guard case let .receive(receive) = try parseRecord("{\"type\":\"receive\",\"stateMutability\":\"payable\"}") else {
+            return XCTFail("Expected receive")
+        }
+        XCTAssertTrue(receive.payable)
+        let json = """
+        {"type":"error","name":"Error","inputs":[{"name":"reason","type":"string"}]}
+        """
+        let element = try parseRecord(json)
+        guard case let .error(customError) = element else { return XCTFail("Expected custom error") }
+        let selector = Data([0x08, 0xc3, 0x79, 0xa0])
+        let argumentBytes = words([32, 2]) + rightPaddedWord(Data("no".utf8))
+        let payload = selector + argumentBytes
+        XCTAssertEqual(customError.signature, "Error(string)")
+        XCTAssertEqual(customError.methodEncoding, selector)
+        XCTAssertEqual(element.encodeParameters(["no" as AnyObject]), payload)
+        let decoded = try XCTUnwrap(element.decodeInputData(payload))
+        XCTAssertEqual(decoded["0"] as? String, "no")
+        XCTAssertEqual(decoded["reason"] as? String, "no")
+        XCTAssertNil(element.decodeInputData(Data([0, 0, 0, 0]) + argumentBytes))
+    }
+
+    func testIntegerBoundsAndSignedExtensionMatchWords() throws {
+        let types: [Parameter] = [.uint(bits: 8), .int(bits: 8), .int(bits: 8)]
+        let expected = word(255) + signedByteWord(-128) + word(127)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [BigUInt(255) as AnyObject, BigInt(-128) as AnyObject, BigInt(127) as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? BigUInt, BigUInt(255))
+        XCTAssertEqual(decoded[1] as? BigInt, BigInt(-128))
+        XCTAssertEqual(decoded[2] as? BigInt, BigInt(127))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 8), value: BigUInt(256) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 8), value: BigInt(128) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 8), value: BigInt(-129) as AnyObject))
+        for negative in [Int(-1) as AnyObject, BigInt(-1) as AnyObject, "-1" as AnyObject] {
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: negative))
+        }
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.uint(bits: 8)], data: word(256)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.int(bits: 8)], data: word(128)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.bool], data: word(2)))
+
+        let maximumUnsigned = (BigUInt(1) << 256) - 1
+        let maximumSigned = (BigInt(1) << 255) - 1
+        let minimumSigned = -(BigInt(1) << 255)
+        let allOnes = Data(repeating: 0xff, count: 32)
+        let signedMaximumWord = Data([0x7f]) + Data(repeating: 0xff, count: 31)
+        let signedMinimumWord = Data([0x80]) + Data(repeating: 0, count: 31)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: maximumUnsigned as AnyObject), allOnes)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: maximumSigned as AnyObject), signedMaximumWord)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: minimumSigned as AnyObject), signedMinimumWord)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: (maximumUnsigned + 1) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: (maximumSigned + 1) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: (minimumSigned - 1) as AnyObject))
+    }
+
+    func testEmptyOrSignOnlyIntegerStringsAreRejectedInsteadOfBecomingZero() {
+        // BigInt 3.x accepts some empty digit sequences as zero; ABI values
+        // must contain at least one actual digit after a sign or hex prefix.
+        for value in ["", "0x", "+", "-", "+0x"] {
+            XCTAssertNil(TLCore.ABIv2Encoder.convertToBigUInt(value as AnyObject), value)
+            XCTAssertNil(TLCore.ABIv2Encoder.convertToBigInt(value as AnyObject), value)
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: value as AnyObject), value)
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: value as AnyObject), value)
+        }
+    }
+
+    func testStringBeginningWithHexPrefixIsUTF8AndFunctionIsLeftAligned() throws {
+        let expectedString = words([32, 4]) + rightPaddedWord(Data("0x41".utf8))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.string], values: ["0x41" as AnyObject]), expectedString)
+        let string = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: expectedString))
+        XCTAssertEqual(string[0] as? String, "0x41")
+        let function = Data((1...24).map { UInt8($0) })
+        let expectedFunction = function + Data(repeating: 0, count: 8)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .function, value: function as AnyObject), expectedFunction)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.function], data: expectedFunction))
+        XCTAssertEqual(decoded[0] as? Data, function)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .function, value: Data(repeating: 1, count: 23) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .bytes(length: 2), value: Data([1, 2, 3]) as AnyObject))
+    }
+
+    func testAddressDecodesAsTwentyByteWeb3AddressAndAcceptsExplicitTRONPrefix() throws {
+        let address = Data(repeating: 0x11, count: 20)
+        let expected = Data(repeating: 0, count: 12) + address
+        for raw in [address, Data([0x41]) + address] {
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: raw as AnyObject), expected)
+        }
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.address], data: expected))
+        let result = try XCTUnwrap(decoded[0] as? TLCore.Web3Address)
+        XCTAssertEqual(result.addressData, address)
+        XCTAssertEqual(result.addressData.count, 20)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: Data(repeating: 1, count: 19) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: (Data([0x42]) + address) as AnyObject))
+    }
+
+    func testLegacyTokenBytes32StringCompatibilityIsRestrictedToOneTopLevelString() throws {
+        let tokenWord = rightPaddedWord(Data("USDT".utf8))
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: tokenWord))
+        XCTAssertEqual(result[0] as? String, "USDT")
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string, .uint(bits: 256)], data: tokenWord + word(7)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.array(type: .string, length: 0)], data: words([32, 1]) + tokenWord))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: tokenWord))
+    }
+
+    func testInvalidArrayElementsAndTupleArityFailAsAWhole() {
+        let array: Parameter = .array(type: .uint(bits: 256), length: 0)
+        let invalid: [AnyObject] = [BigUInt(1) as AnyObject, "not-a-number" as AnyObject, BigUInt(3) as AnyObject]
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [array], values: [invalid as AnyObject]))
+        let tuple: Parameter = .tuple(types: [.uint(bits: 256), .bool])
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [tuple], values: [[BigUInt(1)] as AnyObject]))
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [tuple], values: [[BigUInt(1) as AnyObject, true as AnyObject, false as AnyObject] as AnyObject]))
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [.array(type: .uint(bits: 256), length: 2)], values: [[BigUInt(1)] as AnyObject]))
+        // bool[]: the second word is invalid. Returning only [true] is forbidden.
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.array(type: .bool, length: 0)], data: words([32, 2, 1, 2])))
+        // string[]: valid first element followed by an out-of-bounds pointer.
+        let badStrings = words([32, 2, 64, 999_968, 1]) + rightPaddedWord(Data("a".utf8))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.array(type: .string, length: 0)], data: badStrings))
+    }
+
+    func testMalformedOffsetsLengthsAndTruncationReturnNil() {
+        let type: Parameter = .array(type: .uint(bits: 256), length: 0)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([0, 0])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([33, 0, 0])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([96, 0])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([32, 2, 1])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: word(32) + Data(repeating: 0xff, count: 32)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.uint(bits: 256)], data: Data(repeating: 0, count: 31)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: words([32, 64 * 1024 * 1024 + 1])))
+        let string = words([32, 1]) + rightPaddedWord(Data("a".utf8))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: Data(string.dropLast())))
+        let single = TLCore.ABIv2Decoder.decodeSignleType(type: .uint(bits: 256), data: word(1), pointer: UInt64.max)
+        XCTAssertNil(single.value)
+        XCTAssertNil(single.bytesConsumed)
+    }
+
+    func testDataSliceWithNonzeroStartIndexIsDecodedFromItsOwnBeginning() throws {
+        let type: Parameter = .array(type: .uint(bits: 256), length: 0)
+        let expected = words([32, 2, 5, 6])
+        let framed = Data([0xff]) + expected
+        let slice = framed.dropFirst()
+        XCTAssertEqual(slice.startIndex, 1)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: slice))
+        XCTAssertEqual(decoded[0] as? [BigUInt], [5, 6])
+        let bytes = (Data([0xff]) + Data([0xaa, 0xbb])).dropFirst()
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .bytes(length: 2), value: bytes as AnyObject), rightPaddedWord(Data([0xaa, 0xbb])))
+    }
+
+    func testSharedEmptyTupleArraysCannotBypassEncoderOrDecoderNodeBudget() {
+        var type: Parameter = .tuple(types: [])
+        var value = [AnyObject]() as AnyObject
+        // Only three 100-element containers are allocated here. Sharing the
+        // child object produces over one million logical nodes, zero ABI bytes.
+        for _ in 0..<3 {
+            type = .array(type: type, length: 100)
+            value = Array(repeating: value, count: 100) as AnyObject
+        }
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [type], values: [value]))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: Data()))
+    }
+
+    func testSixtyThreeFixedArrayLevelsAroundEmptyTupleHaveConsistentDepthAccounting() throws {
+        var type: Parameter = .tuple(types: [])
+        var value = [AnyObject]() as AnyObject
+        for _ in 0..<63 {
+            type = .array(type: type, length: 1)
+            value = [value] as AnyObject
+        }
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value]), Data())
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: Data()))
+        var nested = try XCTUnwrap(decoded.first)
+        for _ in 0..<63 {
+            let array = try XCTUnwrap(nested as? [AnyObject])
+            XCTAssertEqual(array.count, 1)
+            nested = try XCTUnwrap(array.first)
+        }
+        XCTAssertTrue(try XCTUnwrap(nested as? [AnyObject]).isEmpty)
+    }
+
+    func testInvalidSchemaAndInputCannotUseMetadataFallback() throws {
+        let invalidRecords = [
+            "{\"type\":\"function\",\"inputs\":[]}",
+            "{\"type\":\"event\",\"name\":\"\",\"inputs\":[]}",
+            "{\"type\":\"error\",\"inputs\":[]}",
+            "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"unknown\"}",
+            "{\"type\":\"constructor\",\"stateMutability\":\"view\"}",
+            "{\"type\":\"fallback\",\"stateMutability\":\"pure\"}",
+            "{\"type\":\"receive\",\"stateMutability\":\"nonpayable\"}"
+        ]
+        for json in invalidRecords { XCTAssertThrowsError(try parseRecord(json)) }
+        let json = """
+        {"type":"function","name":"echo","stateMutability":"view",
+         "inputs":[{"name":"value","type":"string"}],
+         "outputs":[{"name":"value","type":"string"}]}
+        """
+        let element = try parseRecord(json)
+        let tokenWord = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertNil(element.decodeInputData(tokenWord))
+        XCTAssertNil(element.decodeInputData(Data()))
+        XCTAssertNil(element.decodeReturnData(Data()))
+        XCTAssertEqual(element.decodeReturnData(tokenWord)?["value"] as? String, "USDT")
+    }
+
+    func testTypedNegativeZeroFromBigIntThreeIsNormalized() throws {
+        let negativeZero = try XCTUnwrap(BigInt("-0"))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToBigUInt(negativeZero as AnyObject), BigUInt(0))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: negativeZero as AnyObject), word(0))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: negativeZero as AnyObject), word(0))
+    }
+
+    func testDepthAndDeclaredElementLimitsRejectSmallAdversarialInputs() {
+        var deeplyNested: Parameter = .uint(bits: 256)
+        for _ in 0..<80 { deeplyNested = .array(type: deeplyNested, length: 1) }
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [deeplyNested], data: word(1)))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256" + String(repeating: "[1]", count: 80)))
+        let zeroWidthElements: Parameter = .array(type: .tuple(types: []), length: 0)
+        // Zero-width tuples prevent payload length from serving as a node bound.
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [zeroWidthElements], data: words([32, 1_000_001])))
+        let impossibleStaticArray: Parameter = .array(type: .uint(bits: 256), length: UInt64.max)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [impossibleStaticArray], data: word(1)))
+    }
+
+    func testAnonymousEventDoesNotRequireSignatureTopic() throws {
+        let json = """
+        {"type":"event","name":"Note","anonymous":true,"inputs":[{"name":"n","type":"uint256","indexed":false}]}
+        """
+        guard case let .event(event) = try parseRecord(json) else { return XCTFail("Expected event") }
+        let log = try eventLog(data: word(7), topics: [])
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: log))
+        XCTAssertEqual(result["0"] as? BigUInt, BigUInt(7))
+        XCTAssertEqual(result["n"] as? BigUInt, BigUInt(7))
+        let extraTopic = try eventLog(data: word(7), topics: [word(1)])
+        XCTAssertNil(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: extraTopic))
+    }
+
+    func testIndexedSingleWordTupleRemainsOpaqueTopicHash() throws {
+        let json = """
+        {"type":"event","name":"Seen","anonymous":false,"inputs":[
+         {"name":"item","type":"tuple","indexed":true,"components":[{"name":"n","type":"uint256"}]},
+         {"name":"count","type":"uint256","indexed":false}]}
+        """
+        guard case let .event(event) = try parseRecord(json) else { return XCTFail("Expected event") }
+        XCTAssertEqual(event.signature, "Seen((uint256),uint256)")
+        let suppliedHash = Data(repeating: 0x11, count: 32)
+        let log = try eventLog(data: word(9), topics: [event.topic, suppliedHash])
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: log))
+        XCTAssertEqual(result["item"] as? Data, suppliedHash)
+        XCTAssertEqual(result["0"] as? Data, suppliedHash)
+        XCTAssertEqual(result["count"] as? BigUInt, BigUInt(9))
+        let missingTopics = try eventLog(data: word(9), topics: [])
+        XCTAssertNil(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: missingTopics))
+        let shortTopic = try eventLog(data: word(9), topics: [event.topic, Data([1])])
+        XCTAssertNil(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: shortTopic))
+    }
+}
+
+// Append in the same Tests.swift file as ABIv2RegressionTests so its private
+// word/words/rightPaddedWord helpers are available. No test has been executed.
+extension ABIv2RegressionTests {
+    func testEveryIntegerWidthHasCorrectBoundaryWordsAndRejectsOverflow() throws {
+        for byteWidth in 1...32 {
+            let bits = UInt64(byteWidth * 8)
+            let unsignedType: Parameter = .uint(bits: bits)
+            let signedType: Parameter = .int(bits: bits)
+            let unsignedMaximum = (BigUInt(1) << Int(bits)) - 1
+            let signedMaximum = (BigInt(1) << Int(bits - 1)) - 1
+            let signedMinimum = -(BigInt(1) << Int(bits - 1))
+
+            // Expected bytes describe the ABI bit pattern directly. They do
+            // not serialize the expected BigInt values or call the encoder.
+            let unsignedMaximumWord = Data(repeating: 0, count: 32 - byteWidth)
+                + Data(repeating: 0xff, count: byteWidth)
+            let signedMaximumWord = Data(repeating: 0, count: 32 - byteWidth)
+                + Data([0x7f]) + Data(repeating: 0xff, count: byteWidth - 1)
+            let signedMinimumWord = Data(repeating: 0xff, count: 32 - byteWidth)
+                + Data([0x80]) + Data(repeating: 0, count: byteWidth - 1)
+
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: BigUInt(0) as AnyObject), word(0), "uint\(bits) minimum")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: unsignedMaximum as AnyObject), unsignedMaximumWord, "uint\(bits) maximum")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: signedMinimum as AnyObject), signedMinimumWord, "int\(bits) minimum")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: signedMaximum as AnyObject), signedMaximumWord, "int\(bits) maximum")
+
+            let unsignedDecoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [unsignedType, unsignedType], data: word(0) + unsignedMaximumWord))
+            XCTAssertEqual(unsignedDecoded[0] as? BigUInt, BigUInt(0), "uint\(bits) minimum")
+            XCTAssertEqual(unsignedDecoded[1] as? BigUInt, unsignedMaximum, "uint\(bits) maximum")
+            let signedDecoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [signedType, signedType], data: signedMinimumWord + signedMaximumWord))
+            XCTAssertEqual(signedDecoded[0] as? BigInt, signedMinimum, "int\(bits) minimum")
+            XCTAssertEqual(signedDecoded[1] as? BigInt, signedMaximum, "int\(bits) maximum")
+
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: BigInt(-1) as AnyObject), "uint\(bits) negative")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: (unsignedMaximum + 1) as AnyObject), "uint\(bits) overflow")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: (signedMinimum - 1) as AnyObject), "int\(bits) underflow")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: (signedMaximum + 1) as AnyObject), "int\(bits) overflow")
+
+            if byteWidth < 32 {
+                // Wider nonzero unsigned bits and inconsistent signed extension
+                // must not be silently reduced modulo the declared bit width.
+                let unsignedOverflowWord = Data(repeating: 0, count: 31 - byteWidth)
+                    + Data([1]) + Data(repeating: 0, count: byteWidth)
+                let signedOverflowWord = Data(repeating: 0, count: 32 - byteWidth)
+                    + Data([0x80]) + Data(repeating: 0, count: byteWidth - 1)
+                let signedUnderflowWord = Data(repeating: 0xff, count: 32 - byteWidth)
+                    + Data([0x7f]) + Data(repeating: 0xff, count: byteWidth - 1)
+                XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [unsignedType], data: unsignedOverflowWord), "uint\(bits) overflow word")
+                XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [signedType], data: signedOverflowWord), "int\(bits) overflow word")
+                XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [signedType], data: signedUnderflowWord), "int\(bits) underflow word")
+            }
+        }
+    }
+
+    func testEveryFixedBytesWidthUsesItsDeclaredPrefixAndOneWord() throws {
+        for length in 1...32 {
+            let type: Parameter = .bytes(length: UInt64(length))
+            let value = Data((1...length).map { UInt8($0) })
+            let expected = value + Data(repeating: 0, count: 32 - length)
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: type, value: value as AnyObject), expected, "bytes\(length)")
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
+            XCTAssertEqual(decoded[0] as? Data, value, "bytes\(length)")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: type, value: Data(repeating: 1, count: length + 1) as AnyObject), "bytes\(length) too long")
+        }
+    }
+
+    func testMultibyteUTF8StringPreservesEmbeddedNULAndUsesByteLength() throws {
+        let value = "钱包💎\u{0}X"
+        let expectedUTF8 = Data([0xe9, 0x92, 0xb1, 0xe5, 0x8c, 0x85,
+                                 0xf0, 0x9f, 0x92, 0x8e, 0x00, 0x58])
+        let expected = words([32, 12]) + rightPaddedWord(expectedUTF8)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.string], values: [value as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: expected))
+        XCTAssertEqual(decoded[0] as? String, value)
+        XCTAssertEqual((decoded[0] as? String)?.utf8.count, 12)
+    }
+
+    func testDynamicBytesAtWordBoundariesUseIndependentLengthAndPadding() throws {
+        for length in [0, 31, 32, 33, 64] {
+            let value = Data(repeating: 0xa5, count: length)
+            let padding = (32 - length % 32) % 32
+            let body = word(UInt64(length)) + value + Data(repeating: 0, count: padding)
+            let expected = word(32) + body
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .dynamicBytes, value: value as AnyObject), body, "length \(length)")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.dynamicBytes], values: [value as AnyObject]), expected, "length \(length)")
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: expected))
+            XCTAssertEqual(decoded[0] as? Data, value, "length \(length)")
+        }
+    }
+
+    func testMalformedHexBytesAreRejectedWithoutChangingStringTextSemantics() throws {
+        let malformed = "0x1g"
+        XCTAssertNil(TLCore.ABIv2Encoder.convertToData(malformed as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .bytes(length: 2), value: malformed as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .dynamicBytes, value: malformed as AnyObject))
+        let expectedText = words([32, 4]) + rightPaddedWord(Data([0x30, 0x78, 0x31, 0x67]))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.string], values: [malformed as AnyObject]), expectedText)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: expectedText))
+        XCTAssertEqual(decoded[0] as? String, malformed)
+    }
+
+    func testInvalidTypedWeb3AddressesAreNotNormalizedAsRawDataAddresses() throws {
+        let address = Data(repeating: 0x11, count: 20)
+        let expected = Data(repeating: 0, count: 12) + address
+        let invalidTRONObject = TLCore.Web3Address(Data([0x41]) + address)
+        let invalidWordObject = TLCore.Web3Address(expected)
+        XCTAssertFalse(invalidTRONObject.isValid)
+        XCTAssertFalse(invalidWordObject.isValid)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: invalidTRONObject as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: invalidWordObject as AnyObject))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: TLCore.Web3Address(address) as AnyObject), expected)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: (Data([0x41]) + address) as AnyObject), expected)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: expected as AnyObject), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.address], data: expected))
+        XCTAssertEqual((decoded[0] as? TLCore.Web3Address)?.addressData, address)
+        let wrongHighBytes = Data(repeating: 0, count: 11) + Data([0x41]) + address
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.address], data: wrongHighBytes))
+    }
+
+    func testOneDimensionalBatchResultsRetainMainAppBigUIntAndBoolCasts() throws {
+        let types: [Parameter] = [.array(type: .uint(bits: 256), length: 0), .array(type: .bool, length: 0)]
+        let expected = words([64, 160, 2, 5, 6, 2, 1, 0])
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? [BigUInt], [BigUInt(5), BigUInt(6)])
+        XCTAssertEqual(decoded[1] as? [Bool], [true, false])
+        let values: [AnyObject] = [[BigUInt(5), BigUInt(6)] as AnyObject, [true, false] as AnyObject]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: values), expected)
+    }
+}
+
+extension ABIv2RegressionTests {
+    func testFixedPointTypesCoverEveryWidthAndDecimalPrecisionExactly() throws {
+        for byteWidth in 1...32 {
+            for decimals in 1...80 {
+                let bits = UInt64(byteWidth * 8)
+                let precision = UInt64(decimals)
+                let signed: Parameter = .fixed(bits: bits, decimals: precision)
+                let unsigned: Parameter = .ufixed(bits: bits, decimals: precision)
+                XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("fixed\(bits)x\(decimals)"), signed)
+                XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("ufixed\(bits)x\(decimals)"), unsigned)
+                let positiveText = "0." + String(repeating: "0", count: decimals - 1) + "1"
+                let negativeText = "-" + positiveText
+                XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: positiveText as AnyObject), word(1))
+                XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: negativeText as AnyObject), Data(repeating: 0xff, count: 32))
+                let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [signed, unsigned], data: Data(repeating: 0xff, count: 32) + word(1)))
+                XCTAssertEqual((decoded[0] as? TLCore.ABIv2.FixedPoint)?.description, negativeText)
+                XCTAssertEqual((decoded[1] as? TLCore.ABIv2.FixedPoint)?.description, positiveText)
+                XCTAssertEqual((decoded[0] as? TLCore.ABIv2.FixedPoint)?.scaledValue, BigInt(-1))
+            }
+        }
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("fixed").abiRepresentation, "fixed128x18")
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("ufixed").abiRepresentation, "ufixed128x18")
+        for invalid in ["fixed8", "fixed8x0", "fixed8x81", "fixed7x2", "ufixed264x2", "fixed08x2", "fixed8x02", "fixedx2"] {
+            XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString(invalid), invalid)
+        }
+    }
+
+    func testFixedPointBoundariesDoNotRoundOrLosePrecision() throws {
+        let signed: Parameter = .fixed(bits: 8, decimals: 2)
+        let unsigned: Parameter = .ufixed(bits: 8, decimals: 2)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "1.27" as AnyObject), signedByteWord(127))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "-1.28" as AnyObject), signedByteWord(-128))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "2.55" as AnyObject), word(255))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "1.2700" as AnyObject), word(127))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "-0.00" as AnyObject), word(0))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "-0" as AnyObject), word(0))
+        for invalid in ["1.28", "-1.29", "0.001", "1e-2", "0x01", "NaN", "", "+", "1.", ".1", " 1"] {
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: invalid as AnyObject), invalid)
+        }
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "-0.01" as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "2.56" as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: Double(0.1) as AnyObject))
+        let wrongScale = try XCTUnwrap(TLCore.ABIv2.FixedPoint(scaledValue: BigInt(1), decimals: 3))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: wrongScale as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [signed], data: word(128)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [unsigned], data: word(256)))
+        let maximum = (BigUInt(1) << 256) - 1
+        let exact = try XCTUnwrap(TLCore.ABIv2.FixedPoint(scaledValue: BigInt(maximum), decimals: 80))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .ufixed(bits: 256, decimals: 80), value: exact as AnyObject), Data(repeating: 0xff, count: 32))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .ufixed(bits: 256, decimals: 80), value: exact.description as AnyObject), Data(repeating: 0xff, count: 32))
+    }
+
+    func testZeroLengthFixedArraysRemainDistinctFromDynamicArrays() throws {
+        let staticZero = try TLCore.ABIv2TypeParser.parseTypeString("uint256[0]")
+        let dynamicZero = try TLCore.ABIv2TypeParser.parseTypeString("string[0]")
+        let empty = [AnyObject]() as AnyObject
+        XCTAssertEqual(staticZero, Parameter.fixedArray(type: .uint(bits: 256), length: 0))
+        XCTAssertNotEqual(staticZero, Parameter.array(type: .uint(bits: 256), length: 0))
+        XCTAssertEqual(Parameter.fixedArray(type: .bool, length: 2), Parameter.array(type: .bool, length: 2))
+        XCTAssertEqual(staticZero.abiRepresentation, "uint256[0]")
+        for (zero, expected) in [(staticZero, word(7)), (dynamicZero, words([64, 7]))] {
+            let types: [Parameter] = [zero, .uint(bits: 256)]
+            XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [empty, BigUInt(7) as AnyObject]), expected)
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+            XCTAssertTrue(try XCTUnwrap(decoded[0] as? [AnyObject]).isEmpty)
+            XCTAssertEqual(decoded[1] as? BigUInt, BigUInt(7))
+        }
+        let array = try TLCore.ABIv2TypeParser.parseTypeString("string[0][]")
+        let values = [empty, empty] as AnyObject
+        // Both zero-sized dynamic tails begin at the end of their container.
+        let expected = words([32, 2, 64, 64])
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [array], values: [values]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [array], data: expected))
+        let rows = try XCTUnwrap(decoded[0] as? [[AnyObject]])
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.allSatisfy { $0.isEmpty })
+        let json = """
+        {"type":"function","name":"f","inputs":[{"name":"zero","type":"tuple[0]","components":[{"name":"s","type":"string"}]}],"outputs":[],"stateMutability":"pure"}
+        """
+        let element = try parseRecord(json)
+        guard case let .function(function) = element else { return XCTFail("Expected function") }
+        XCTAssertEqual(function.signature, "f((string)[0])")
+        XCTAssertEqual(element.encodeParameters([empty]), function.methodEncoding + word(32))
+        XCTAssertNotNil(element.decodeInputData(function.methodEncoding + word(32)))
+    }
+
+    func testGeneralABIDecodingCanExplicitlyDisableLegacyTokenMetadata() throws {
+        let legacy = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: legacy)?.first as? String, "USDT")
+        for invalid in [legacy, word(0), word(32)] {
+            XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: invalid, allowLegacyBytes32: false))
+            XCTAssertNil(TLCore.ABIv2Decoder.decodeSignleType(type: .string, data: invalid, allowLegacyBytes32: false).value)
+        }
+        let standard = words([32, 4]) + legacy
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: standard, allowLegacyBytes32: false)?.first as? String, "USDT")
+    }
+
+    func testABIConversionRejectsMalformedAddressAndNormalizesOddHex() {
+        let malformedAddress = "0x" + String(repeating: "1g", count: 20)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: malformedAddress as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: TLCore.Web3Address(malformedAddress) as AnyObject))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToData("0x1" as AnyObject), Data([1]))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToData("0x123" as AnyObject), Data([0x01, 0x23]))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToData("0XABCD" as AnyObject), Data([0xab, 0xcd]))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: String(repeating: "9", count: 10000) as AnyObject))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: (String(repeating: "0", count: 10000) + "1") as AnyObject), word(1))
+    }
+}
+
+extension ABIv2RegressionTests {
+    func testStaticBytesAndFunctionRejectDirtyRightPadding() throws {
+        for length in 1...31 {
+            let type: Parameter = .bytes(length: UInt64(length))
+            let value = Data(repeating: 0x12, count: length)
+            let dirty = value + Data([1]) + Data(repeating: 0, count: 31 - length)
+            XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: dirty))
+        }
+        let function = Data(repeating: 0x11, count: 24)
+        let dirtyFunction = function + Data([1]) + Data(repeating: 0, count: 7)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.function], data: dirtyFunction))
+        let validFunction = function + Data(repeating: 0, count: 8)
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.function], data: validFunction)?.first as? Data, function)
+    }
+
+    func testContractDeploymentSentinelCannotBecomeAnABIAddress() {
+        var address = TLCore.Web3Address(Data(repeating: 0x11, count: 20))
+        address.type = .contractDeployment
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: address as AnyObject))
+    }
+
+    func testTypeTraversalBudgetIsSharedAcrossRootParameters() {
+        var shared: Parameter = .tuple(types: [])
+        for _ in 0..<18 { shared = .tuple(types: [shared, shared]) }
+        let types = Array(repeating: shared, count: 1000)
+        let values = Array(repeating: [AnyObject]() as AnyObject, count: 1000)
+        // Indirect enum and Array COW let this tiny schema describe hundreds of
+        // millions of visits. Repeated root types must share the work budget.
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: types, values: values))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: types, data: Data()))
+    }
+
+    func testJSONContractReturnCanDisableLegacyMetadataWithoutInternalMembers() throws {
+        let json = """
+        {"type":"function","name":"name","inputs":[],"outputs":[{"name":"value","type":"string"}],"stateMutability":"view"}
+        """
+        let element = try parseRecord(json)
+        let metadata = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertEqual(element.decodeReturnData(metadata)?["value"] as? String, "USDT")
+        XCTAssertNil(element.decodeReturnData(metadata, allowLegacyBytes32: false))
+        XCTAssertEqual(element.decodeReturnData(words([32, 4]) + metadata, allowLegacyBytes32: false)?["value"] as? String, "USDT")
     }
 }

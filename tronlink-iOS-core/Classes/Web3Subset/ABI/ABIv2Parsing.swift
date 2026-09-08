@@ -43,16 +43,13 @@ extension ABIv2 {
         }
     }
 
-    enum TypeParsingExpressions {
-        static var typeEatingRegex = "^((u?int|bytes)([1-9][0-9]*)|(address|bool|string|tuple|bytes)|(\\[([1-9][0-9]*)\\]))"
-        static var arrayEatingRegex = "^(\\[([1-9][0-9]*)?\\])?.*$"
-    }
-
     fileprivate enum ElementType: String {
         case function
         case constructor
         case fallback
         case event
+        case receive
+        case error
     }
 }
 
@@ -62,6 +59,22 @@ extension ABIv2.Record {
         let typeString = self.type != nil ? self.type! : "function"
         guard let type = ABIv2.ElementType(rawValue: typeString) else {
             throw ABIv2.ParsingError.elementTypeInvalid
+        }
+        if let stateMutability = stateMutability {
+            switch stateMutability {
+            case "pure", "view", "nonpayable", "payable":
+                break
+            default:
+                throw ABIv2.ParsingError.abiInvalid
+            }
+            switch type {
+            case .constructor, .fallback:
+                guard stateMutability == "nonpayable" || stateMutability == "payable" else {
+                    throw ABIv2.ParsingError.abiInvalid
+                }
+            default:
+                break
+            }
         }
         return try parseToElement(from: self, type: type)
     }
@@ -81,10 +94,22 @@ fileprivate func parseToElement(from abiRecord: ABIv2.Record, type: ABIv2.Elemen
     case .event:
         let event = try parseEvent(abiRecord: abiRecord)
         return ABIv2.Element.event(event)
+    case .receive:
+        guard abiRecord.inputs?.isEmpty ?? true,
+              abiRecord.outputs?.isEmpty ?? true,
+              abiRecord.stateMutability.map({ $0 == "payable" }) ?? (abiRecord.payable == true) else {
+            throw ABIv2.ParsingError.abiInvalid
+        }
+        return .receive(ABIv2.Element.Receive(payable: true))
+    case .error:
+        guard let name = abiRecord.name, !name.isEmpty else { throw ABIv2.ParsingError.elementNameInvalid }
+        let inputs = try abiRecord.inputs?.map { try $0.parse() } ?? []
+        return .error(ABIv2.Element.CustomError(name: name, inputs: inputs))
     }
 }
 
 fileprivate func parseFunction(abiRecord: ABIv2.Record) throws -> ABIv2.Element.Function {
+    guard let name = abiRecord.name, !name.isEmpty else { throw ABIv2.ParsingError.elementNameInvalid }
     let inputs = try abiRecord.inputs?.map({ (input: ABIv2.Input) throws -> ABIv2.Element.InOut in
         let nativeInput = try input.parse()
         return nativeInput
@@ -95,20 +120,15 @@ fileprivate func parseFunction(abiRecord: ABIv2.Record) throws -> ABIv2.Element.
         return nativeOutput
     })
     let abiOutputs = outputs != nil ? outputs! : [ABIv2.Element.InOut]()
-    let name = abiRecord.name != nil ? abiRecord.name! : ""
-    let payable = abiRecord.stateMutability != nil ?
-        (abiRecord.stateMutability == "payable" || abiRecord.payable!) : false
-    let constant = (abiRecord.constant == true || abiRecord.stateMutability == "view" || abiRecord.stateMutability == "pure")
+    let payable = abiRecord.stateMutability.map { $0 == "payable" } ?? (abiRecord.payable == true)
+    let constant = abiRecord.stateMutability.map { $0 == "view" || $0 == "pure" } ?? (abiRecord.constant == true)
     let functionElement = ABIv2.Element.Function(name: name, inputs: abiInputs, outputs: abiOutputs, constant: constant, payable: payable)
     return functionElement
 }
 
 fileprivate func parseFallback(abiRecord: ABIv2.Record) throws -> ABIv2.Element.Fallback {
-    let payable = (abiRecord.stateMutability == "payable" || abiRecord.payable!)
-    var constant = abiRecord.constant == true
-    if abiRecord.stateMutability == "view" || abiRecord.stateMutability == "pure" {
-        constant = true
-    }
+    let payable = abiRecord.stateMutability.map { $0 == "payable" } ?? (abiRecord.payable == true)
+    let constant = abiRecord.stateMutability.map { $0 == "view" || $0 == "pure" } ?? (abiRecord.constant == true)
     let functionElement = ABIv2.Element.Fallback(constant: constant, payable: payable)
     return functionElement
 }
@@ -119,25 +139,19 @@ fileprivate func parseConstructor(abiRecord: ABIv2.Record) throws -> ABIv2.Eleme
         return nativeInput
     })
     let abiInputs = inputs != nil ? inputs! : [ABIv2.Element.InOut]()
-    var payable = false
-    if abiRecord.payable != nil {
-        payable = abiRecord.payable!
-    }
-    if abiRecord.stateMutability == "payable" {
-        payable = true
-    }
+    let payable = abiRecord.stateMutability.map { $0 == "payable" } ?? (abiRecord.payable == true)
     let constant = false
     let functionElement = ABIv2.Element.Constructor(inputs: abiInputs, constant: constant, payable: payable)
     return functionElement
 }
 
 fileprivate func parseEvent(abiRecord: ABIv2.Record) throws -> ABIv2.Element.Event {
+    guard let name = abiRecord.name, !name.isEmpty else { throw ABIv2.ParsingError.elementNameInvalid }
     let inputs = try abiRecord.inputs?.map({ (input: ABIv2.Input) throws -> ABIv2.Element.Event.Input in
         let nativeInput = try input.parseForEvent()
         return nativeInput
     })
     let abiInputs = inputs != nil ? inputs! : [ABIv2.Element.Event.Input]()
-    let name = abiRecord.name != nil ? abiRecord.name! : ""
     let anonymous = abiRecord.anonymous != nil ? abiRecord.anonymous! : false
     let functionElement = ABIv2.Element.Event(name: name, inputs: abiInputs, anonymous: anonymous)
     return functionElement
@@ -145,61 +159,56 @@ fileprivate func parseEvent(abiRecord: ABIv2.Record) throws -> ABIv2.Element.Eve
 
 extension ABIv2.Input {
     func parse() throws -> ABIv2.Element.InOut {
-        let name = self.name != nil ? self.name! : ""
-        let parameterType = try ABIv2TypeParser.parseTypeString(type)
-        if case .tuple(types: _) = parameterType {
-            let components = try self.components?.compactMap({ (inp: ABIv2.Input) throws -> ABIv2.Element.ParameterType in
-                let input = try inp.parse()
-                return input.type
-            })
-            let type = ABIv2.Element.ParameterType.tuple(types: components!)
-            let nativeInput = ABIv2.Element.InOut(name: name, type: type)
-            return nativeInput
-        } else {
-            let nativeInput = ABIv2.Element.InOut(name: name, type: parameterType)
-            return nativeInput
-        }
+        return ABIv2.Element.InOut(name: name ?? "", type: try parameterType(depth: 0))
     }
 
     func parseForEvent() throws -> ABIv2.Element.Event.Input {
-        let name = self.name != nil ? self.name! : ""
-        let parameterType = try ABIv2TypeParser.parseTypeString(type)
-        let indexed = self.indexed == true
-        return ABIv2.Element.Event.Input(name: name, type: parameterType, indexed: indexed)
+        return ABIv2.Element.Event.Input(name: name ?? "", type: try parameterType(depth: 0), indexed: indexed == true)
+    }
+
+    fileprivate func parameterType(depth: Int) throws -> ABIv2.Element.ParameterType {
+        return try parseABIParameterType(type, depth: depth) { componentDepth in
+            return try self.components?.map { try $0.parameterType(depth: componentDepth) }
+        }
     }
 }
 
 extension ABIv2.Output {
     func parse() throws -> ABIv2.Element.InOut {
-        let name = self.name != nil ? self.name! : ""
-        let parameterType = try ABIv2TypeParser.parseTypeString(type)
-        switch parameterType {
-        case .tuple(types: _):
-            let components = try self.components?.compactMap({ (inp: ABIv2.Output) throws -> ABIv2.Element.ParameterType in
-                let input = try inp.parse()
-                return input.type
-            })
-            let type = ABIv2.Element.ParameterType.tuple(types: components!)
-            let nativeInput = ABIv2.Element.InOut(name: name, type: type)
-            return nativeInput
-        case let .array(type: subtype, length: length):
-            switch subtype {
-            case .tuple(types: _):
-                let components = try self.components?.compactMap({ (inp: ABIv2.Output) throws -> ABIv2.Element.ParameterType in
-                    let input = try inp.parse()
-                    return input.type
-                })
-                let nestedSubtype = ABIv2.Element.ParameterType.tuple(types: components!)
-                let properType = ABIv2.Element.ParameterType.array(type: nestedSubtype, length: length)
-                let nativeInput = ABIv2.Element.InOut(name: name, type: properType)
-                return nativeInput
-            default:
-                let nativeInput = ABIv2.Element.InOut(name: name, type: parameterType)
-                return nativeInput
-            }
-        default:
-            let nativeInput = ABIv2.Element.InOut(name: name, type: parameterType)
-            return nativeInput
+        return ABIv2.Element.InOut(name: name ?? "", type: try parameterType(depth: 0))
+    }
+
+    fileprivate func parameterType(depth: Int) throws -> ABIv2.Element.ParameterType {
+        return try parseABIParameterType(type, depth: depth) { componentDepth in
+            return try self.components?.map { try $0.parameterType(depth: componentDepth) }
         }
+    }
+}
+
+fileprivate func parseABIParameterType(_ string: String, depth: Int, components: (Int) throws -> [ABIv2.Element.ParameterType]?) throws -> ABIv2.Element.ParameterType {
+    guard depth < ABIv2Layout.maxDepth else { throw ABIv2.ParsingError.parameterTypeInvalid }
+    let parsed = try ABIv2TypeParser.parseTypeString(string)
+    let resolved: ABIv2.Element.ParameterType
+    if string.hasPrefix("tuple") {
+        resolved = try resolveTupleComponents(parsed, depth: depth, components: components)
+    } else {
+        resolved = parsed
+    }
+    guard ABIv2Layout.layout(of: resolved, depth: depth) != nil else { throw ABIv2.ParsingError.parameterTypeInvalid }
+    return resolved
+}
+
+fileprivate func resolveTupleComponents(_ type: ABIv2.Element.ParameterType, depth: Int, components: (Int) throws -> [ABIv2.Element.ParameterType]?) throws -> ABIv2.Element.ParameterType {
+    guard depth < ABIv2Layout.maxDepth else { throw ABIv2.ParsingError.parameterTypeInvalid }
+    switch type {
+    case let .array(subtype, length):
+        return .array(type: try resolveTupleComponents(subtype, depth: depth + 1, components: components), length: length)
+    case let .fixedArray(subtype, length):
+        return .fixedArray(type: try resolveTupleComponents(subtype, depth: depth + 1, components: components), length: length)
+    case .tuple:
+        guard let types = try components(depth + 1) else { throw ABIv2.ParsingError.parameterTypeInvalid }
+        return .tuple(types: types)
+    default:
+        throw ABIv2.ParsingError.parameterTypeInvalid
     }
 }

@@ -50,6 +50,10 @@ extension ABIv2 {
         case fallback(Fallback)
         /// Event
         case event(Event)
+        /// Payable receive handler (no selector or arguments).
+        case receive(Receive)
+        /// Solidity custom error.
+        case error(CustomError)
         
         /// Input or output type
         public struct InOut {
@@ -79,6 +83,15 @@ extension ABIv2 {
             let payable: Bool
         }
         
+        public struct Receive {
+            let payable: Bool
+        }
+
+        public struct CustomError {
+            let name: String
+            let inputs: [InOut]
+        }
+
         /// Event type
         public struct Event {
             let name: String
@@ -95,139 +108,99 @@ extension ABIv2 {
 }
 
 extension ABIv2.Element {
-    func encodeParameters(_ parameters: [AnyObject]) -> Data? {
+    public func encodeParameters(_ parameters: [AnyObject]) -> Data? {
         switch self {
         case let .constructor(constructor):
-            guard parameters.count == constructor.inputs.count else { return nil }
-            guard let data = ABIv2Encoder.encode(types: constructor.inputs, values: parameters) else { return nil }
-            return data
-        case .event:
-            return nil
-        case .fallback:
-            return nil
+            return ABIv2Encoder.encode(types: constructor.inputs, values: parameters)
         case let .function(function):
-            guard parameters.count == function.inputs.count else { return nil }
-            let signature = function.methodEncoding
             guard let data = ABIv2Encoder.encode(types: function.inputs, values: parameters) else { return nil }
-            return signature + data
+            return function.methodEncoding + data
+        case let .error(error):
+            guard let data = ABIv2Encoder.encode(types: error.inputs, values: parameters) else { return nil }
+            return error.methodEncoding + data
+        case .receive:
+            return parameters.isEmpty ? Data() : nil
+        case .event, .fallback:
+            return nil
         }
     }
-}
 
-extension ABIv2.Element {
-    func decodeReturnData(_ data: Data) -> [String: Any]? {
+    public func decodeReturnData(_ data: Data) -> [String: Any]? {
+        return decodeReturnData(data, allowLegacyBytes32: true)
+    }
+
+    /// General contract returns should disable the legacy token metadata path.
+    public func decodeReturnData(_ data: Data, allowLegacyBytes32: Bool) -> [String: Any]? {
         switch self {
-        case .constructor:
-            return nil
-        case .event:
-            return nil
-        case .fallback:
-            return nil
         case let .function(function):
-            if data.count == 0 && function.outputs.count == 1 {
-                let name = "0"
-                let value = function.outputs[0].type.emptyValue
-                var returnArray = [String: Any]()
-                returnArray[name] = value
-                if function.outputs[0].name != "" {
-                    returnArray[function.outputs[0].name] = value
-                }
-                return returnArray
-            }
-
-            guard function.outputs.count * 32 <= data.count else { return nil }
-            var returnArray = [String: Any]()
-            var i = 0
-            guard let values = ABIv2Decoder.decode(types: function.outputs, data: data) else { return nil }
-            for output in function.outputs {
-                let name = "\(i)"
-                returnArray[name] = values[i]
-                if output.name != "" {
-                    returnArray[output.name] = values[i]
-                }
-                i = i + 1
-            }
-            return returnArray
+            // A revert payload includes a four-byte selector and is not a
+            // successful ABI return value. Empty data must not invent values.
+            guard data.count % 32 == 0 else { return nil }
+            return ABIv2.Element.decodeValues(function.outputs, data: data, allowLegacyBytes32: allowLegacyBytes32)
+        case .error:
+            return decodeInputData(data)
+        case .constructor, .event, .fallback, .receive:
+            return nil
         }
     }
 
-    func decodeInputData(_ rawData: Data) -> [String: Any]? {
-        var data = rawData
-        var sig: Data?
+    public func decodeInputData(_ rawData: Data) -> [String: Any]? {
+        let data: Data
+        let selector: Data?
         switch rawData.count % 32 {
         case 0:
-            break
+            data = Data(rawData)
+            selector = nil
         case 4:
-            sig = rawData[0 ..< 4]
-            data = Data(rawData[4 ..< rawData.count])
+            selector = Data(rawData.prefix(4))
+            data = Data(rawData.dropFirst(4))
         default:
             return nil
         }
         switch self {
-        case let .constructor(function):
-            if data.count == 0 && function.inputs.count == 1 {
-                let name = "0"
-                let value = function.inputs[0].type.emptyValue
-                var returnArray = [String: Any]()
-                returnArray[name] = value
-                if function.inputs[0].name != "" {
-                    returnArray[function.inputs[0].name] = value
-                }
-                return returnArray
-            }
-
-            guard function.inputs.count * 32 <= data.count else { return nil }
-            var returnArray = [String: Any]()
-            var i = 0
-            guard let values = ABIv2Decoder.decode(types: function.inputs, data: data) else { return nil }
-            for input in function.inputs {
-                let name = "\(i)"
-                returnArray[name] = values[i]
-                if input.name != "" {
-                    returnArray[input.name] = values[i]
-                }
-                i = i + 1
-            }
-            return returnArray
-        case .event:
-            return nil
-        case .fallback:
-            return nil
+        case let .constructor(constructor):
+            guard selector == nil else { return nil }
+            return ABIv2.Element.decodeValues(constructor.inputs, data: data)
         case let .function(function):
-            if sig != nil && sig != function.methodEncoding {
-                return nil
-            }
-            if data.count == 0 && function.inputs.count == 1 {
-                let name = "0"
-                let value = function.inputs[0].type.emptyValue
-                var returnArray = [String: Any]()
-                returnArray[name] = value
-                if function.inputs[0].name != "" {
-                    returnArray[function.inputs[0].name] = value
-                }
-                return returnArray
-            }
-
-            guard function.inputs.count * 32 <= data.count else { return nil }
-            var returnArray = [String: Any]()
-            var i = 0
-            guard let values = ABIv2Decoder.decode(types: function.inputs, data: data) else { return nil }
-            for input in function.inputs {
-                let name = "\(i)"
-                returnArray[name] = values[i]
-                if input.name != "" {
-                    returnArray[input.name] = values[i]
-                }
-                i = i + 1
-            }
-            return returnArray
+            guard ABIv2.Element.validParameterTypes(function.inputs) else { return nil }
+            guard selector == nil || selector == function.methodEncoding else { return nil }
+            return ABIv2.Element.decodeValues(function.inputs, data: data)
+        case let .error(error):
+            guard ABIv2.Element.validParameterTypes(error.inputs) else { return nil }
+            guard selector == nil || selector == error.methodEncoding else { return nil }
+            return ABIv2.Element.decodeValues(error.inputs, data: data)
+        case .receive:
+            return rawData.isEmpty ? [:] : nil
+        case .event, .fallback:
+            return nil
         }
+    }
+
+    private static func validParameterTypes(_ parameters: [InOut]) -> Bool {
+        var nodes = 1_000_000
+        for parameter in parameters {
+            guard ABIv2Layout.layout(of: parameter.type, depth: 0, nodes: &nodes) != nil else { return false }
+        }
+        return true
+    }
+
+    private static func decodeValues(_ parameters: [InOut], data: Data, allowLegacyBytes32: Bool = false) -> [String: Any]? {
+        guard let values = ABIv2Decoder.decode(types: parameters.map { $0.type }, data: data,
+                                              allowLegacyBytes32: allowLegacyBytes32),
+              values.count == parameters.count else { return nil }
+        var result = [String: Any]()
+        for index in parameters.indices {
+            result[String(index)] = values[index]
+            if !parameters[index].name.isEmpty {
+                result[parameters[index].name] = values[index]
+            }
+        }
+        return result
     }
 }
 
 extension ABIv2.Element.Event {
     func decodeReturnedLogs(_ eventLog: EventLog) -> [String: Any]? {
-        guard let eventContent = ABIv2Decoder.decodeLog(event: self, eventLog: eventLog) else { return nil }
-        return eventContent
+        return ABIv2Decoder.decodeLog(event: self, eventLog: eventLog)
     }
 }

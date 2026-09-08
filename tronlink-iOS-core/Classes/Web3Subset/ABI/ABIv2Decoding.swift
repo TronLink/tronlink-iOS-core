@@ -4,296 +4,292 @@ import Foundation
 
 /// Decoding functions
 public struct ABIv2Decoder {
-    /// Decodes solidity data to swift types
-    ///
-    /// - Parameters:
-    ///   - types: Decoding scheme
-    ///   - data: Data to decode
-    /// - Returns: Array of decoded types
+    // Bound allocations even when several offsets point at the same payload, or
+    // arrays contain zero-sized tuples whose count is not bounded by input bytes.
+    private struct Budget {
+        var nodes = 1_000_000
+        var typeNodes = 1_000_000
+        var payloadBytes = 64 * 1024 * 1024
+    }
+
+    /// Decodes Solidity parameters while preserving array and tuple nesting.
     public static func decode(types: [ABIv2.Element.InOut], data: Data) -> [AnyObject]? {
-        let params = types.compactMap { (el) -> ABIv2.Element.ParameterType in
-            return el.type
-        }
-        return decode(types: params, data: data)
+        return decode(types: types.map { $0.type }, data: data)
     }
 
-    /// Decodes solidity data to swift types
-    ///
-    /// - Parameters:
-    ///   - types: Decoding scheme
-    ///   - data: Data to decode
-    /// - Returns: Array of decoded types
+    /// Decodes Solidity parameters while preserving array and tuple nesting.
     public static func decode(types: [ABIv2.Element.ParameterType], data: Data) -> [AnyObject]? {
-//        print("Full data: \n" + data.hex)
-        var toReturn = [AnyObject]()
-        var consumed: UInt64 = 0
-        for i in 0 ..< types.count {
-            let (v, c) = decodeSignleType(type: types[i], data: data, pointer: consumed)
-            guard let valueUnwrapped = v, let consumedUnwrapped = c else { return nil }
-            toReturn.append(valueUnwrapped)
-            consumed = consumed + consumedUnwrapped
-        }
-        
-        guard toReturn.count == types.count else { return nil }
-        return toReturn
+        return decode(types: types, data: data, allowLegacyBytes32: true)
     }
 
-    /// Decodes single solidity type to swift type
-    ///
-    /// - Parameters:
-    ///   - type: Decoding scheme
-    ///   - data: Data to decode
-    ///   - pointer: Data offset
-    /// - Returns: Decoded value and bytes used to decode
+    /// Set allowLegacyBytes32 to false for general ABI decoding. The legacy
+    /// two-argument API retains token name/symbol compatibility: a single string
+    /// may be returned as bytes32. That form cannot distinguish metadata from a
+    /// truncated offset word. Inputs, custom errors and events disable it.
+    public static func decode(types: [ABIv2.Element.ParameterType], data: Data, allowLegacyBytes32: Bool) -> [AnyObject]? {
+        if allowLegacyBytes32, types.count == 1, data.count == 32,
+           let value = decodeLegacyMetadata(type: types[0], data: data) {
+            return [value]
+        }
+        var budget = Budget()
+        return decodeTuple(types: types, data: data, base: 0, depth: 0, budget: &budget)
+    }
+
+    public static func decode(types: [ABIv2.Element.InOut], data: Data, allowLegacyBytes32: Bool) -> [AnyObject]? {
+        return decode(types: types.map { $0.type }, data: data, allowLegacyBytes32: allowLegacyBytes32)
+    }
+
+    /// Decodes one parameter. bytesConsumed is its size in the containing
+    /// head, not the absolute position of the next parameter or its tail size.
+    /// The original method spelling is retained for source compatibility.
     public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0) -> (value: AnyObject?, bytesConsumed: UInt64?) {
-        let (elData, nextPtr) = followTheData(type: type, data: data, pointer: pointer)
-        guard let elementItself = elData, let nextElementPointer = nextPtr else {
-            return (nil, nil)
-        }
-        switch type {
-        case let .uint(bits):
-//            print("Uint256 element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            let mod = BigUInt(1) << bits
-            let dataSlice = elementItself[0 ..< 32]
-            let v = BigUInt(dataSlice) % mod
-//            print("Uint256 element is: \n" + String(v))
-            return (v as AnyObject, type.memoryUsage)
-        case let .int(bits):
-//            print("Int256 element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            let mod = BigInt(1) << bits
-            let dataSlice = elementItself[0 ..< 32]
-            let v = BigInt.fromTwosComplement(data: dataSlice) % mod
-//            print("Int256 element is: \n" + String(v))
-            return (v as AnyObject, type.memoryUsage)
-        case .address:
-//            print("Web3Address element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            let dataSlice = elementItself[12 ..< 32]
-            let address = Web3Address(dataSlice)
-//            print("Web3Address element is: \n" + String(address.address))
-            return (address as AnyObject, type.memoryUsage)
-        case .bool:
-//            print("Bool element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            let dataSlice = elementItself[0 ..< 32]
-            let v = BigUInt(dataSlice)
-//            print("Web3Address element is: \n" + String(v))
-            if v == BigUInt(1) {
-                return (true as AnyObject, type.memoryUsage)
-            } else if v == BigUInt(0) {
-                return (false as AnyObject, type.memoryUsage)
-            }
-        case let .bytes(length):
-//            print("Bytes32 element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            let dataSlice = elementItself[0 ..< length]
-//            print("Bytes32 element is: \n" + String(dataSlice.hex))
-            return (dataSlice as AnyObject, type.memoryUsage)
-        case .string:
-//            print("String element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            var dataSlice = elementItself[0 ..< 32]
-            let length = UInt64(BigUInt(dataSlice))
-            guard elementItself.count >= 32 + length else { break }
-            dataSlice = elementItself[32 ..< 32 + length]
-            guard let string = String(data: dataSlice, encoding: .utf8) else { break }
-//            print("String element is: \n" + String(string))
-            return (string as AnyObject, type.memoryUsage)
-        case .dynamicBytes:
-//            print("Bytes element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            var dataSlice = elementItself[0 ..< 32]
-            let length = UInt64(BigUInt(dataSlice))
-            guard elementItself.count >= 32 + length else { break }
-            dataSlice = elementItself[32 ..< 32 + length]
-//            print("Bytes element is: \n" + String(dataSlice.hex))
-            return (dataSlice as AnyObject, type.memoryUsage)
-        case let .array(type: subType, length: length):
-            switch type.arraySize {
-            case .dynamicSize:
-//                print("Dynamic array element itself: \n" + elementItself.hex)
-                if subType.isStatic {
-                    // uint[] like, expect length and elements
-                    guard elementItself.count >= 32 else { break }
-                    var dataSlice = elementItself[0 ..< 32]
-                    let length = UInt64(BigUInt(dataSlice))
-                    guard elementItself.count >= 32 + subType.memoryUsage * length else { break }
-                    dataSlice = elementItself[32 ..< 32 + subType.memoryUsage * length]
-                    var subpointer: UInt64 = 32
-                    var toReturn = [AnyObject]()
-                    for _ in 0 ..< length {
-                        let (v, c) = decodeSignleType(type: subType, data: elementItself, pointer: subpointer)
-                        guard let valueUnwrapped = v, let consumedUnwrapped = c else { break }
-                        toReturn.append(valueUnwrapped)
-                        subpointer = subpointer + consumedUnwrapped
-                    }
-                    return (toReturn as AnyObject, type.memoryUsage)
-                } else {
-                    // in principle is true for tuple[], so will work for string[] too
-                    guard elementItself.count >= 32 else { break }
-                    var dataSlice = elementItself[0 ..< 32]
-                    let length = UInt64(BigUInt(dataSlice))
-                    guard elementItself.count >= 32 else { break }
-                    dataSlice = Data(elementItself[32 ..< elementItself.count])
-                    var subpointer: UInt64 = 0
-                    var toReturn = [AnyObject]()
-//                    print("Dynamic array sub element itself: \n" + dataSlice.hex)
-                    for _ in 0 ..< length {
-                        let (v, c) = decodeSignleType(type: subType, data: dataSlice, pointer: subpointer)
-                        guard let valueUnwrapped = v, let consumedUnwrapped = c else { break }
-                        toReturn.append(valueUnwrapped)
-                        subpointer = subpointer + consumedUnwrapped
-                    }
-                    return (toReturn as AnyObject, nextElementPointer)
-                }
-            case let .staticSize(staticLength):
-//                print("Static array element itself: \n" + elementItself.hex)
-                guard length == staticLength else { break }
-                var toReturn = [AnyObject]()
-                var consumed: UInt64 = 0
-                for _ in 0 ..< length {
-                    let (v, c) = decodeSignleType(type: subType, data: elementItself, pointer: consumed)
-                    guard let valueUnwrapped = v, let consumedUnwrapped = c else { return (nil, nil) }
-                    toReturn.append(valueUnwrapped)
-                    consumed = consumed + consumedUnwrapped
-                }
-                if subType.isStatic {
-                    return (toReturn as AnyObject, consumed)
-                } else {
-                    return (toReturn as AnyObject, nextElementPointer)
-                }
-            case .notArray:
-                break
-            }
-        case let .tuple(types: subTypes):
-//            print("Tuple element itself: \n" + elementItself.hex)
-            var toReturn = [AnyObject]()
-            var consumed: UInt64 = 0
-            for i in 0 ..< subTypes.count {
-                let (v, c) = decodeSignleType(type: subTypes[i], data: elementItself, pointer: consumed)
-                guard let valueUnwrapped = v, let consumedUnwrapped = c else { return (nil, nil) }
-                toReturn.append(valueUnwrapped)
-                consumed = consumed + consumedUnwrapped
-            }
-//            print("Tuple element is: \n" + String(describing: toReturn))
-            if type.isStatic {
-                return (toReturn as AnyObject, consumed)
-            } else {
-                return (toReturn as AnyObject, nextElementPointer)
-            }
-        case .function:
-//            print("Function element itself: \n" + elementItself.hex)
-            guard elementItself.count >= 32 else { break }
-            let dataSlice = elementItself[8 ..< 32]
-//            print("Function element is: \n" + String(dataSlice.hex))
-            return (dataSlice as AnyObject, type.memoryUsage)
-        }
-        return (nil, nil)
+        return decodeSignleType(type: type, data: data, pointer: pointer, allowLegacyBytes32: true)
     }
 
-    fileprivate static func followTheData(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0) -> (elementEncoding: Data?, nextElementPointer: UInt64?) {
-//        print("Follow the data: \n" + data.hex)
-//        print("At pointer: \n" + String(pointer))
-        if type.isStatic {
-            guard data.count >= pointer + type.memoryUsage else { return (nil, nil) }
-            let elementItself = data[pointer ..< pointer + type.memoryUsage]
-            let nextElement = pointer + type.memoryUsage
-//            print("Got element itself: \n" + elementItself.hex)
-//            print("Next element pointer: \n" + String(nextElement))
-            return (Data(elementItself), nextElement)
+    public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0, allowLegacyBytes32: Bool) -> (value: AnyObject?, bytesConsumed: UInt64?) {
+        var budget = Budget()
+        guard let layout = ABIv2Layout.layout(of: type, depth: 0, nodes: &budget.typeNodes),
+              pointer <= UInt64(data.count),
+              layout.headSize <= UInt64(data.count) - pointer else { return (nil, nil) }
+        if allowLegacyBytes32, pointer == 0, data.count == 32,
+           let value = decodeLegacyMetadata(type: type, data: data) {
+            return (value, layout.headSize)
+        }
+        let head = Int(pointer)
+        let headSize = Int(layout.headSize)
+        guard let value = decodeValue(type: type, data: data, containerBase: 0,
+                                      head: head, minimumTail: head + headSize,
+                                      depth: 0, budget: &budget) else { return (nil, nil) }
+        return (value, layout.headSize)
+    }
+
+    private static func decodeTuple(types: [ABIv2.Element.ParameterType], data: Data, base: Int,
+                                    depth: Int, budget: inout Budget) -> [AnyObject]? {
+        guard depth <= ABIv2Layout.maxDepth, base >= 0, base <= data.count,
+              types.count <= budget.nodes else { return nil }
+        var headSize = 0
+        for type in types {
+            guard let layout = ABIv2Layout.layout(of: type, depth: depth, nodes: &budget.typeNodes),
+                  layout.headSize <= UInt64(data.count - base - headSize) else { return nil }
+            headSize += Int(layout.headSize)
+        }
+        var values = [AnyObject]()
+        var head = base
+        for type in types {
+            guard let layout = ABIv2Layout.layout(of: type, depth: depth, nodes: &budget.typeNodes),
+                  let value = decodeValue(type: type, data: data, containerBase: base,
+                                          head: head, minimumTail: headSize,
+                                          depth: depth, budget: &budget) else { return nil }
+            values.append(value)
+            head += Int(layout.headSize)
+        }
+        return values
+    }
+
+    private static func decodeArray(type: ABIv2.Element.ParameterType, count: UInt64,
+                                    data: Data, base: Int, depth: Int,
+                                    budget: inout Budget) -> [AnyObject]? {
+        guard depth <= ABIv2Layout.maxDepth, base >= 0, base <= data.count,
+              count <= UInt64(budget.nodes),
+              let layout = ABIv2Layout.layout(of: type, depth: depth, nodes: &budget.typeNodes) else { return nil }
+        let (totalHead, overflow) = layout.headSize.multipliedReportingOverflow(by: count)
+        guard !overflow, totalHead <= UInt64(data.count - base) else { return nil }
+        // Count is bounded by the node budget before conversion or allocation.
+        let length = Int(count)
+        let headSize = Int(totalHead)
+        var values = [AnyObject]()
+        var head = base
+        for _ in 0 ..< length {
+            guard let value = decodeValue(type: type, data: data, containerBase: base,
+                                          head: head, minimumTail: headSize,
+                                          depth: depth, budget: &budget) else { return nil }
+            values.append(value)
+            head += Int(layout.headSize)
+        }
+        return values
+    }
+
+    private static func decodeValue(type: ABIv2.Element.ParameterType, data: Data,
+                                    containerBase: Int, head: Int, minimumTail: Int,
+                                    depth: Int, budget: inout Budget) -> AnyObject? {
+        guard depth <= ABIv2Layout.maxDepth, budget.nodes > 0,
+              containerBase >= 0, containerBase <= head, head <= data.count,
+              let layout = ABIv2Layout.layout(of: type, depth: depth, nodes: &budget.typeNodes),
+              layout.headSize <= UInt64(data.count - head) else { return nil }
+        budget.nodes -= 1
+
+        let start: Int
+        if layout.isStatic {
+            start = head
         } else {
-            guard data.count >= pointer + type.memoryUsage else { return (nil, nil) }
-            let dataSlice = data[pointer ..< pointer + type.memoryUsage]
-            let bn = BigUInt(dataSlice)
-            if bn > UInt64.max || bn >= data.count {
-                // there are ERC20 contracts that use bytes32 intead of string. Let's be optimistic and return some data
-                if case .string = type {
-                    let nextElement = pointer + type.memoryUsage
-                    let preambula = BigUInt(32).abiEncode(bits: 256)!
-                    return (preambula + Data(dataSlice), nextElement)
-                } else if case .dynamicBytes = type {
-                    let nextElement = pointer + type.memoryUsage
-                    let preambula = BigUInt(32).abiEncode(bits: 256)!
-                    return (preambula + Data(dataSlice), nextElement)
-                }
-                return (nil, nil)
+            guard let offset = boundedWord(data: data, offset: head, maximum: data.count - containerBase),
+                  offset >= minimumTail, offset % 32 == 0 else { return nil }
+            start = containerBase + offset
+        }
+
+        switch type {
+        case let .uint(bits), let .ufixed(bits, _):
+            guard let word = read(data: data, offset: start, count: 32) else { return nil }
+            let value = BigUInt(word)
+            guard value.bitWidth <= Int(bits) else { return nil }
+            if case let .ufixed(_, decimals) = type {
+                guard let exact = ABIv2.FixedPoint(scaledValue: BigInt(value), decimals: decimals) else { return nil }
+                return exact as AnyObject
             }
-            let elementPointer = UInt64(bn)
-            let elementItself = data[elementPointer ..< UInt64(data.count)]
-            let nextElement = pointer + type.memoryUsage
-//            print("Got element itself: \n" + elementItself.hex)
-//            print("Next element pointer: \n" + String(nextElement))
-            return (Data(elementItself), nextElement)
+            return value as AnyObject
+        case let .int(bits), let .fixed(bits, _):
+            guard let word = read(data: data, offset: start, count: 32),
+                  let first = word.first else { return nil }
+            let unsigned = BigInt(BigUInt(word))
+            let value = (first & 0x80) == 0 ? unsigned : unsigned - (BigInt(1) << 256)
+            let limit = BigInt(1) << Int(bits - 1)
+            guard value >= -limit, value < limit else { return nil }
+            if case let .fixed(_, decimals) = type {
+                guard let exact = ABIv2.FixedPoint(scaledValue: value, decimals: decimals) else { return nil }
+                return exact as AnyObject
+            }
+            return value as AnyObject
+        case .address:
+            guard let word = read(data: data, offset: start, count: 32),
+                  word.prefix(12).allSatisfy({ $0 == 0 }) else { return nil }
+            return Web3Address(Data(word.suffix(20))) as AnyObject
+        case .bool:
+            guard let word = read(data: data, offset: start, count: 32) else { return nil }
+            let value = BigUInt(word)
+            guard value == 0 || value == 1 else { return nil }
+            return (value == 1) as AnyObject
+        case let .bytes(length):
+            guard let word = read(data: data, offset: start, count: 32),
+                  word.dropFirst(Int(length)).allSatisfy({ $0 == 0 }) else { return nil }
+            return Data(word.prefix(Int(length))) as AnyObject
+        case .function:
+            guard let word = read(data: data, offset: start, count: 32),
+                  word.dropFirst(24).allSatisfy({ $0 == 0 }) else { return nil }
+            // A function value is address (20 bytes) + selector (4 bytes), then padding.
+            return Data(word.prefix(24)) as AnyObject
+        case .string, .dynamicBytes:
+            guard start <= data.count, data.count - start >= 32,
+                  let length = boundedWord(data: data, offset: start, maximum: data.count - start - 32) else { return nil }
+            let padding = (32 - length % 32) % 32
+            guard padding <= data.count - start - 32 - length,
+                  length <= budget.payloadBytes else { return nil }
+            budget.payloadBytes -= length
+            guard let bytes = read(data: data, offset: start + 32, count: length) else { return nil }
+            if case .string = type {
+                guard let string = String(data: bytes, encoding: .utf8) else { return nil }
+                return string as AnyObject
+            }
+            return bytes as AnyObject
+        case let .array(subtype, length), let .fixedArray(subtype, length):
+            if case .array(_, 0) = type {
+                guard start <= data.count, data.count - start >= 32,
+                      let count = boundedWord(data: data, offset: start, maximum: budget.nodes) else { return nil }
+                // Array element offsets are relative to the tuple AFTER its length word.
+                guard let values = decodeArray(type: subtype, count: UInt64(count), data: data,
+                                               base: start + 32, depth: depth + 1, budget: &budget) else { return nil }
+                return values as AnyObject
+            }
+            guard let values = decodeArray(type: subtype, count: length, data: data,
+                                           base: start, depth: depth + 1, budget: &budget) else { return nil }
+            return values as AnyObject
+        case let .tuple(types: types):
+            guard let values = decodeTuple(types: types, data: data, base: start,
+                                           depth: depth + 1, budget: &budget) else { return nil }
+            return values as AnyObject
         }
     }
 
-    /// Decodes logs to swift types
-    ///
-    /// - Parameters:
-    ///   - event: Decoding scheme
-    ///   - eventLog: Event log
-    /// - Returns: Decoded logs
+    /// Offsets are relative to this Data value, including when it is a slice
+    /// whose startIndex is not zero. Validate bounds before creating indices.
+    private static func read(data: Data, offset: Int, count: Int) -> Data? {
+        guard offset >= 0, count >= 0, offset <= data.count, count <= data.count - offset else { return nil }
+        let lower = data.index(data.startIndex, offsetBy: offset)
+        let upper = data.index(lower, offsetBy: count)
+        return Data(data[lower ..< upper])
+    }
+
+    private static func boundedWord(data: Data, offset: Int, maximum: Int) -> Int? {
+        guard maximum >= 0, let word = read(data: data, offset: offset, count: 32) else { return nil }
+        let value = BigUInt(word)
+        guard value <= BigUInt(maximum) else { return nil }
+        return Int(value)
+    }
+
+    /// Some token contracts declare string metadata but return a bytes32 word.
+    /// Preserve the historical fallback only for a single, top-level 32-byte
+    /// response. Nested values and event data must never reinterpret a bad offset.
+    private static func decodeLegacyMetadata(type: ABIv2.Element.ParameterType, data: Data) -> AnyObject? {
+        // Only token name/symbol strings have an established compatibility need.
+        // A bytes parameter must always contain the normal ABI offset and length.
+        guard case .string = type, data.count == 32 else { return nil }
+        let word = BigUInt(data)
+        // The old decoder accepted a zero word as an empty value. Other values
+        // inside the word are malformed offsets, not the bytes32 fallback.
+        guard word == 0 || word >= 32 else { return nil }
+        var bytes = word == 0 ? Data() : Data(data)
+        // bytes32 metadata pads text with NUL bytes. Only this compatibility
+        // path trims them; a normal ABI string preserves its declared bytes.
+        while bytes.last == 0 {
+            bytes.removeLast()
+        }
+        guard let string = String(data: bytes, encoding: .utf8) else { return nil }
+        return string as AnyObject
+    }
+
+    /// Decodes log topics and unindexed event parameters.
     public static func decodeLog(event: ABIv2.Element.Event, eventLog: EventLog) -> [String: Any]? {
-        if event.topic != eventLog.topics[0] && !event.anonymous {
-            return nil
-        }
-        var eventContent = [String: Any]()
-        eventContent["name"] = event.name
+        let indexedInputs = event.inputs.filter { $0.indexed }
+        let signatureCount = event.anonymous ? 0 : 1
         let logs = eventLog.topics
-        let dataForProcessing = eventLog.data
-        let indexedInputs = event.inputs.filter { (inp) -> Bool in
-            return inp.indexed
+        guard logs.count == indexedInputs.count + signatureCount,
+              logs.allSatisfy({ $0.count == 32 }) else { return nil }
+        var budget = Budget()
+        guard event.inputs.count <= budget.nodes else { return nil }
+        for input in event.inputs {
+            guard ABIv2Layout.layout(of: input.type, depth: 0, nodes: &budget.typeNodes) != nil else { return nil }
         }
-        if logs.count == 1 && indexedInputs.count > 0 {
-            return nil
+        if !event.anonymous {
+            guard logs.first == event.topic else { return nil }
         }
-        let nonIndexedInputs = event.inputs.filter { (inp) -> Bool in
-            return !inp.indexed
-        }
-        let nonIndexedTypes = nonIndexedInputs.compactMap { (inp) -> ABIv2.Element.ParameterType in
-            return inp.type
-        }
-        guard logs.count == indexedInputs.count + 1 else { return nil }
+
         var indexedValues = [AnyObject]()
-        for i in 0 ..< indexedInputs.count {
-            let data = logs[i + 1]
-            let input = indexedInputs[i]
-            if !input.type.isStatic || input.type.isArray || input.type.memoryUsage != 32 {
-                let (v, _) = ABIv2Decoder.decodeSignleType(type: .bytes(length: 32), data: data)
-                guard let valueUnwrapped = v else { return nil }
-                indexedValues.append(valueUnwrapped)
-            } else {
-                let (v, _) = ABIv2Decoder.decodeSignleType(type: input.type, data: data)
-                guard let valueUnwrapped = v else { return nil }
-                indexedValues.append(valueUnwrapped)
+        for (index, input) in indexedInputs.enumerated() {
+            guard budget.nodes > 0,
+                  ABIv2Layout.layout(of: input.type, depth: 0, nodes: &budget.typeNodes) != nil else { return nil }
+            let topic = logs[index + signatureCount]
+            switch input.type {
+            case .array, .fixedArray, .tuple, .string, .dynamicBytes:
+                // Indexed complex values contain a hash, including static tuples/arrays.
+                budget.nodes -= 1
+                indexedValues.append(Data(topic) as AnyObject)
+            default:
+                guard let value = decodeValue(type: input.type, data: topic, containerBase: 0,
+                                              head: 0, minimumTail: 32, depth: 0,
+                                              budget: &budget) else { return nil }
+                indexedValues.append(value)
             }
         }
-        let v = ABIv2Decoder.decode(types: nonIndexedTypes, data: dataForProcessing)
-        guard let nonIndexedValues = v else { return nil }
-        var indexedInputCounter = 0
-        var nonIndexedInputCounter = 0
-        for i in 0 ..< event.inputs.count {
-            let el = event.inputs[i]
-            if el.indexed {
-                let name = "\(i)"
-                let value = indexedValues[indexedInputCounter]
-                eventContent[name] = value
-                if el.name != "" {
-                    eventContent[el.name] = value
-                }
-                indexedInputCounter = indexedInputCounter + 1
+
+        let nonIndexedTypes = event.inputs.filter { !$0.indexed }.map { $0.type }
+        guard let nonIndexedValues = decodeTuple(types: nonIndexedTypes, data: eventLog.data,
+                                                base: 0, depth: 0, budget: &budget) else { return nil }
+        var content: [String: Any] = ["name": event.name]
+        var indexedIndex = 0
+        var nonIndexedIndex = 0
+        for (index, input) in event.inputs.enumerated() {
+            let value: AnyObject
+            if input.indexed {
+                value = indexedValues[indexedIndex]
+                indexedIndex += 1
             } else {
-                let name = "\(i)"
-                let value = nonIndexedValues[nonIndexedInputCounter]
-                eventContent[name] = value
-                if el.name != "" {
-                    eventContent[el.name] = value
-                }
-                nonIndexedInputCounter = nonIndexedInputCounter + 1
+                value = nonIndexedValues[nonIndexedIndex]
+                nonIndexedIndex += 1
+            }
+            content[String(index)] = value
+            if !input.name.isEmpty {
+                content[input.name] = value
             }
         }
-        return eventContent
+        return content
     }
 }
