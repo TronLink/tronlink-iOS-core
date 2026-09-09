@@ -1847,6 +1847,24 @@ final class ABIv2RegressionTests: XCTestCase {
         return try JSONDecoder().decode(TLCore.EventLog.self, from: json)
     }
 
+    private func decodedUIntRows(_ value: AnyObject) throws -> [[BigUInt]] {
+        try XCTUnwrap(value as? [AnyObject]).map { row in
+            try XCTUnwrap(row as? [AnyObject]).map { try XCTUnwrap($0 as? BigUInt) }
+        }
+    }
+
+    private func decodedBoolRows(_ value: AnyObject) throws -> [[Bool]] {
+        try XCTUnwrap(value as? [AnyObject]).map { row in
+            try XCTUnwrap(row as? [AnyObject]).map { try XCTUnwrap($0 as? Bool) }
+        }
+    }
+
+    private func decodedStringRows(_ value: AnyObject) throws -> [[String]] {
+        try XCTUnwrap(value as? [AnyObject]).map { row in
+            try XCTUnwrap(row as? [AnyObject]).map { try XCTUnwrap($0 as? String) }
+        }
+    }
+
     func testTwoDynamicMatricesMatchBatchBalanceCheckAndBridgeToAppTypes() throws {
         let uintMatrix: Parameter = .array(type: .array(type: .uint(bits: 256), length: 0), length: 0)
         let boolMatrix: Parameter = .array(type: .array(type: .bool, length: 0), length: 0)
@@ -1861,8 +1879,8 @@ final class ABIv2RegressionTests: XCTestCase {
         XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [uintMatrix, boolMatrix], values: values), expected)
         let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [uintMatrix, boolMatrix], data: expected))
         XCTAssertEqual(decoded.count, 2)
-        XCTAssertEqual(try XCTUnwrap(decoded[0] as? [[BigUInt]]), balances)
-        XCTAssertEqual(try XCTUnwrap(decoded[1] as? [[Bool]]), flags)
+        XCTAssertEqual(try decodedUIntRows(decoded[0]), balances)
+        XCTAssertEqual(try decodedBoolRows(decoded[1]), flags)
     }
 
     func testAllFourArrayDimensionKindsUseIndependentWordLayouts() throws {
@@ -1878,7 +1896,7 @@ final class ABIv2RegressionTests: XCTestCase {
             let type = try TLCore.ABIv2TypeParser.parseTypeString(typeString)
             XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value as AnyObject]), expected, typeString)
             let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected), typeString)
-            XCTAssertEqual(try XCTUnwrap(decoded.first as? [[BigUInt]], typeString), value, typeString)
+            XCTAssertEqual(try decodedUIntRows(try XCTUnwrap(decoded.first, typeString)), value, typeString)
         }
     }
 
@@ -1898,10 +1916,10 @@ final class ABIv2RegressionTests: XCTestCase {
         // The old public spelling remains callable. Its consumed count must be
         // a relative head width even when decoding starts at a nonzero pointer.
         let nonzeroPointerData = words([7, 96, 9]) + tail
-        let single = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: nonzeroPointerData, pointer: 32)
+        let single = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: nonzeroPointerData, pointer: 32, allowLegacyBytes32: false, minimumTail: 96)
         XCTAssertEqual(single.value as? [String], ["a", "bb", "ccc"])
         XCTAssertEqual(single.bytesConsumed, UInt64(32))
-        let next = TLCore.ABIv2Decoder.decodeSignleType(type: .uint(bits: 256), data: nonzeroPointerData, pointer: 64)
+        let next = TLCore.ABIv2Decoder.decodeSignleType(type: .uint(bits: 256), data: nonzeroPointerData, pointer: 64, allowLegacyBytes32: false, minimumTail: 96)
         XCTAssertEqual(next.value as? BigUInt, BigUInt(9))
         XCTAssertEqual(next.bytesConsumed, UInt64(32))
     }
@@ -1918,7 +1936,7 @@ final class ABIv2RegressionTests: XCTestCase {
             + word(0)
         XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value as AnyObject]), expected)
         let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
-        XCTAssertEqual(decoded[0] as? [[String]], value)
+        XCTAssertEqual(try decodedStringRows(decoded[0]), value)
     }
 
     func testDynamicTupleDoesNotAdvancePastFollowingInteger() throws {
@@ -2504,6 +2522,31 @@ extension ABIv2RegressionTests {
         }
         let standard = words([32, 4]) + legacy
         XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: standard, allowLegacyBytes32: false)?.first as? String, "USDT")
+    }
+
+    func testLegacyBytes32FallbackRejectsLeftPaddedOffsetWords() {
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: word(32)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: word(64)))
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: word(0))?.first as? String, "")
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: rightPaddedWord(Data("USDT".utf8)))?.first as? String, "USDT")
+    }
+
+    func testDynamicStringAndBytesRejectDirtyPadding() {
+        let dirtyString = words([32, 1]) + Data("a".utf8) + Data(repeating: 0xff, count: 31)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: dirtyString))
+        let dirtyBytes = words([32, 1]) + Data([0xaa]) + Data(repeating: 0xff, count: 31)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: dirtyBytes))
+        let clean = words([32, 1]) + rightPaddedWord(Data("a".utf8))
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: clean)?.first as? String, "a")
+    }
+
+    func testDecodeSingleTypeUsesEnclosingHeadAsOffsetFloor() {
+        let strings: Parameter = .array(type: .string, length: 0)
+        let data = words([32, 0])
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [strings, .uint(bits: 256)], data: data))
+        let rejected = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: data, pointer: 0, allowLegacyBytes32: false, minimumTail: 64)
+        XCTAssertNil(rejected.value)
+        XCTAssertNil(rejected.bytesConsumed)
     }
 
     func testABIConversionRejectsMalformedAddressAndNormalizesOddHex() {

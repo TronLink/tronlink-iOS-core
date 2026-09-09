@@ -23,9 +23,9 @@ public struct ABIv2Decoder {
     }
 
     /// Set allowLegacyBytes32 to false for general ABI decoding. The legacy
-    /// two-argument API retains token name/symbol compatibility: a single string
-    /// may be returned as bytes32. That form cannot distinguish metadata from a
-    /// truncated offset word. Inputs, custom errors and events disable it.
+    /// two-argument API retains token name/symbol compatibility: a single
+    /// right-padded bytes32 string. Left-padded offset words are rejected.
+    /// Inputs, custom errors and events disable it.
     public static func decode(types: [ABIv2.Element.ParameterType], data: Data, allowLegacyBytes32: Bool) -> [AnyObject]? {
         if allowLegacyBytes32, types.count == 1, data.count == 32,
            let value = decodeLegacyMetadata(type: types[0], data: data) {
@@ -41,12 +41,13 @@ public struct ABIv2Decoder {
 
     /// Decodes one parameter. bytesConsumed is its size in the containing
     /// head, not the absolute position of the next parameter or its tail size.
-    /// The original method spelling is retained for source compatibility.
+    /// Pass minimumTail as the enclosing head width when decoding a field
+    /// inside a multi-argument payload. The original spelling is retained.
     public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0) -> (value: AnyObject?, bytesConsumed: UInt64?) {
         return decodeSignleType(type: type, data: data, pointer: pointer, allowLegacyBytes32: true)
     }
 
-    public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0, allowLegacyBytes32: Bool) -> (value: AnyObject?, bytesConsumed: UInt64?) {
+    public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0, allowLegacyBytes32: Bool, minimumTail: UInt64? = nil) -> (value: AnyObject?, bytesConsumed: UInt64?) {
         var budget = Budget()
         guard let layout = ABIv2Layout.layout(of: type, depth: 0, nodes: &budget.typeNodes),
               pointer <= UInt64(data.count),
@@ -57,8 +58,16 @@ public struct ABIv2Decoder {
         }
         let head = Int(pointer)
         let headSize = Int(layout.headSize)
+        let tailFloor: Int
+        if let minimumTail {
+            guard minimumTail >= pointer + layout.headSize,
+                  minimumTail <= UInt64(Int.max) else { return (nil, nil) }
+            tailFloor = Int(minimumTail)
+        } else {
+            tailFloor = head + headSize
+        }
         guard let value = decodeValue(type: type, data: data, containerBase: 0,
-                                      head: head, minimumTail: head + headSize,
+                                      head: head, minimumTail: tailFloor,
                                       depth: 0, budget: &budget) else { return (nil, nil) }
         return (value, layout.headSize)
     }
@@ -173,6 +182,10 @@ public struct ABIv2Decoder {
             let padding = (32 - length % 32) % 32
             guard padding <= data.count - start - 32 - length,
                   length <= budget.payloadBytes else { return nil }
+            if padding > 0 {
+                guard let pad = read(data: data, offset: start + 32 + length, count: padding),
+                      pad.allSatisfy({ $0 == 0 }) else { return nil }
+            }
             budget.payloadBytes -= length
             guard let bytes = read(data: data, offset: start + 32, count: length) else { return nil }
             if case .string = type {
@@ -221,12 +234,11 @@ public struct ABIv2Decoder {
     private static func decodeLegacyMetadata(type: ABIv2.Element.ParameterType, data: Data) -> AnyObject? {
         // Only token name/symbol strings have an established compatibility need.
         // A bytes parameter must always contain the normal ABI offset and length.
-        guard case .string = type, data.count == 32 else { return nil }
-        let word = BigUInt(data)
-        // The old decoder accepted a zero word as an empty value. Other values
-        // inside the word are malformed offsets, not the bytes32 fallback.
-        guard word == 0 || word >= 32 else { return nil }
-        var bytes = word == 0 ? Data() : Data(data)
+        guard case .string = type, data.count == 32, let first = data.first else { return nil }
+        // Token metadata is right-padded ASCII. A truncated ABI offset is
+        // left-padded and must not become a name (offset 32/64 look like 0x20).
+        guard first != 0 || data.allSatisfy({ $0 == 0 }) else { return nil }
+        var bytes = first == 0 ? Data() : Data(data)
         // bytes32 metadata pads text with NUL bytes. Only this compatibility
         // path trims them; a normal ABI string preserves its declared bytes.
         while bytes.last == 0 {
