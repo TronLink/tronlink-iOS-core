@@ -23,26 +23,16 @@
 
 #include "rand.h"
 
-// random32() is deliberately left undefined here. Upstream shipped an
-// srand(time(NULL))/rand() fallback guarded by RAND_PLATFORM_INDEPENDENT, which
-// silently produced brute-forceable entropy whenever that macro went missing --
-// and it feeds mnemonic_generate(). util/SecRandom.m is the only implementation;
-// without it the link fails instead of the wallet degrading unnoticed.
+// random32() and random_buffer() are deliberately left undefined here.
+// Upstream shipped an srand(time(NULL))/rand() fallback guarded by
+// RAND_PLATFORM_INDEPENDENT, which silently produced brute-forceable entropy
+// whenever that macro went missing -- and it feeds mnemonic_generate().
+// util/SecRandom.m is the only implementation; without it the link fails
+// instead of the wallet degrading unnoticed.
 
 //
 // The following code is platform independent
 //
-
-void __attribute__((weak)) random_buffer(uint8_t *buf, size_t len)
-{
-	uint32_t r = 0;
-	for (size_t i = 0; i < len; i++) {
-		if (i % 4 == 0) {
-			r = random32();
-		}
-		buf[i] = (r >> ((i % 4) * 8)) & 0xFF;
-	}
-}
 
 uint32_t random_uniform(uint32_t n)
 {
