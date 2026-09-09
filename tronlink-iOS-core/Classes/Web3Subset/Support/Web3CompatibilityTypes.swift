@@ -109,7 +109,12 @@ public struct EventLog: Decodable {
         transactionHash = decodedTransactionHash
         data = decodedData
         logIndex = decodedLogIndex
-        removed = try decodeHexToBigUInt(container, key: .removed, allowOptional: true) == 1
+        if let decodedRemoved = try? container.decode(Bool.self, forKey: .removed) {
+            removed = decodedRemoved
+        } else {
+            // Preserve legacy hex strings and the false default for missing/null values.
+            removed = try decodeHexToBigUInt(container, key: .removed, allowOptional: true) == 1
+        }
         topics = try container.decode([String].self, forKey: .topics).map {
             guard let topic = Data.fromHex($0) else { throw Web3Error.dataError }
             return topic

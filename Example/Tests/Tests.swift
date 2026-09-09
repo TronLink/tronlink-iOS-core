@@ -1047,6 +1047,32 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
         XCTAssertTrue(log.topics.allSatisfy { $0.count == 32 })
     }
 
+    func testEventLogRemovedAcceptsBooleansAndPreservesLegacyValues() throws {
+        var object: [String: Any] = [
+            "address": "0x1111111111111111111111111111111111111111",
+            "blockHash": "0x" + String(repeating: "00", count: 32),
+            "blockNumber": "0x1", "data": "0x", "logIndex": "0x0",
+            "topics": [String](),
+            "transactionHash": "0x" + String(repeating: "00", count: 32),
+            "transactionIndex": "0x0"
+        ]
+        let cases: [(Any?, Bool)] = [
+            (true, true), (false, false),
+            ("0x1", true), ("0x0", false), ("0x2", false),
+            (nil, false), (NSNull(), false)
+        ]
+        for (removed, expected) in cases {
+            object["removed"] = removed
+            let data = try JSONSerialization.data(withJSONObject: object)
+            let log = try JSONDecoder().decode(TLCore.EventLog.self, from: data)
+            XCTAssertEqual(log.removed, expected, "removed: \(String(describing: removed))")
+        }
+        // Preserve the existing failure for malformed legacy hex strings.
+        object["removed"] = "not-hex"
+        let invalid = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(try JSONDecoder().decode(TLCore.EventLog.self, from: invalid))
+    }
+
     func testPrivateKeyRejectsOutOfRangeRandomScalar() {
         var valid = Data(repeating: 0, count: 32)
         valid[31] = 1
@@ -2547,6 +2573,74 @@ extension ABIv2RegressionTests {
         let rejected = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: data, pointer: 0, allowLegacyBytes32: false, minimumTail: 64)
         XCTAssertNil(rejected.value)
         XCTAssertNil(rejected.bytesConsumed)
+    }
+
+    func testDecodeSingleTypeRejectsIncompleteOrInvalidEnclosingHeads() {
+        let cases: [(Parameter, Data)] = [
+            (.string, rightPaddedWord(Data("USDT".utf8))),
+            (.string, word(0)),
+            (.uint(bits: 256), word(7))
+        ]
+        for (type, data) in cases {
+            for headWidth in [UInt64(0), 31, 64, UInt64.max] {
+                for allowLegacy in [false, true] {
+                    let result = TLCore.ABIv2Decoder.decodeSignleType(
+                        type: type, data: data, allowLegacyBytes32: allowLegacy,
+                        minimumTail: headWidth
+                    )
+                    XCTAssertNil(result.value)
+                    XCTAssertNil(result.bytesConsumed)
+                }
+            }
+        }
+        let truncated = TLCore.ABIv2Decoder.decodeSignleType(
+            type: .uint(bits: 256), data: words([7, 9]), pointer: 32,
+            allowLegacyBytes32: false, minimumTail: 96
+        )
+        XCTAssertNil(truncated.value)
+        XCTAssertNil(truncated.bytesConsumed)
+    }
+
+    func testDecodeSingleTypePreservesValidLegacyAndZeroWidthHeads() throws {
+        let headWidths: [UInt64?] = [nil, 32]
+        for text in ["USDT", ""] {
+            let data = rightPaddedWord(Data(text.utf8))
+            for headWidth in headWidths {
+                let result = TLCore.ABIv2Decoder.decodeSignleType(
+                    type: .string, data: data, allowLegacyBytes32: true,
+                    minimumTail: headWidth
+                )
+                XCTAssertEqual(result.value as? String, text)
+                XCTAssertEqual(result.bytesConsumed, UInt64(32))
+            }
+        }
+        let empty = TLCore.ABIv2Decoder.decodeSignleType(
+            type: .tuple(types: []), data: Data(), allowLegacyBytes32: false,
+            minimumTail: 0
+        )
+        XCTAssertTrue(try XCTUnwrap(empty.value as? [AnyObject]).isEmpty)
+        XCTAssertEqual(empty.bytesConsumed, UInt64(0))
+    }
+
+    func testDecodeSingleTypeKeepsThreeFourAndFiveArgumentFunctionReferences() {
+        typealias Result = (value: AnyObject?, bytesConsumed: UInt64?)
+        let original: (Parameter, Data, UInt64) -> Result = TLCore.ABIv2Decoder.decodeSignleType
+        let withLegacy: (Parameter, Data, UInt64, Bool) -> Result = TLCore.ABIv2Decoder.decodeSignleType
+        let withHead: (Parameter, Data, UInt64, Bool, UInt64?) -> Result = TLCore.ABIv2Decoder.decodeSignleType
+        let data = words([7, 9])
+        let results = [
+            original(.uint(bits: 256), data, 32),
+            withLegacy(.uint(bits: 256), data, 32, false),
+            withHead(.uint(bits: 256), data, 32, false, 64)
+        ]
+        for result in results {
+            XCTAssertEqual(result.value as? BigUInt, BigUInt(9))
+            XCTAssertEqual(result.bytesConsumed, UInt64(32))
+        }
+        let metadata = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertEqual(original(.string, metadata, 0).value as? String, "USDT")
+        XCTAssertEqual(withLegacy(.string, metadata, 0, true).value as? String, "USDT")
+        XCTAssertNil(withLegacy(.string, metadata, 0, false).value)
     }
 
     func testABIConversionRejectsMalformedAddressAndNormalizesOddHex() {

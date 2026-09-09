@@ -47,24 +47,31 @@ public struct ABIv2Decoder {
         return decodeSignleType(type: type, data: data, pointer: pointer, allowLegacyBytes32: true)
     }
 
-    public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0, allowLegacyBytes32: Bool, minimumTail: UInt64? = nil) -> (value: AnyObject?, bytesConsumed: UInt64?) {
+    // Keep this overload so existing four-argument function references remain valid.
+    public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0, allowLegacyBytes32: Bool) -> (value: AnyObject?, bytesConsumed: UInt64?) {
+        return decodeSignleType(type: type, data: data, pointer: pointer, allowLegacyBytes32: allowLegacyBytes32, minimumTail: nil)
+    }
+
+    public static func decodeSignleType(type: ABIv2.Element.ParameterType, data: Data, pointer: UInt64 = 0, allowLegacyBytes32: Bool, minimumTail: UInt64?) -> (value: AnyObject?, bytesConsumed: UInt64?) {
         var budget = Budget()
         guard let layout = ABIv2Layout.layout(of: type, depth: 0, nodes: &budget.typeNodes),
               pointer <= UInt64(data.count),
               layout.headSize <= UInt64(data.count) - pointer else { return (nil, nil) }
-        if allowLegacyBytes32, pointer == 0, data.count == 32,
-           let value = decodeLegacyMetadata(type: type, data: data) {
-            return (value, layout.headSize)
-        }
         let head = Int(pointer)
         let headSize = Int(layout.headSize)
         let tailFloor: Int
         if let minimumTail {
             guard minimumTail >= pointer + layout.headSize,
-                  minimumTail <= UInt64(Int.max) else { return (nil, nil) }
+                  minimumTail <= UInt64(data.count) else { return (nil, nil) }
             tailFloor = Int(minimumTail)
         } else {
             tailFloor = head + headSize
+        }
+        // Validate the complete enclosing head even for static values and
+        // before accepting a single-word legacy metadata response.
+        if allowLegacyBytes32, pointer == 0, data.count == 32,
+           let value = decodeLegacyMetadata(type: type, data: data) {
+            return (value, layout.headSize)
         }
         guard let value = decodeValue(type: type, data: data, containerBase: 0,
                                       head: head, minimumTail: tailFloor,
