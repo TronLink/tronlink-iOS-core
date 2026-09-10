@@ -93,17 +93,14 @@ extension Web3Utils {
         return Web3Address(addressData)._address
     }
 
+    /// Hashes raw message bytes using the EIP-191 personal_sign envelope.
+    /// The prefix is always added, even when the message itself contains prefix-like bytes.
     public static func hashPersonalMessage(_ personalMessage: Data) throws -> Data {
         var prefix = "\u{19}Ethereum Signed Message:\n"
         prefix += String(personalMessage.count)
         guard let prefixData = prefix.data(using: .ascii) else { throw Web3UtilsError.cannotConvertDataToAscii }
-        var data = Data()
-        if personalMessage.count >= prefixData.count && prefixData == personalMessage[0 ..< prefixData.count] {
-            data.append(personalMessage)
-        } else {
-            data.append(prefixData)
-            data.append(personalMessage)
-        }
+        var data = prefixData
+        data.append(personalMessage)
         return data.keccak256()
     }
 

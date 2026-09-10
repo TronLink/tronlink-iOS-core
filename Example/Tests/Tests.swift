@@ -1030,6 +1030,61 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
         XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(messageHash, signature: signature.data.hex), key.address)
     }
 
+    func testPersonalMessageHashMatchesRawByteEnvelopes() throws {
+        let cases: [(Data, Data)] = [
+            (Data(), Data("\u{19}Ethereum Signed Message:\n0".utf8)),
+            (Data("hello".utf8), Data("\u{19}Ethereum Signed Message:\n5hello".utf8)),
+            (Data("你好".utf8), Data("\u{19}Ethereum Signed Message:\n6你好".utf8)),
+            (Data([0x00, 0xff]), Data("\u{19}Ethereum Signed Message:\n2".utf8) + Data([0x00, 0xff]))
+        ]
+        for (message, envelope) in cases {
+            // Use the separate C-backed Keccak implementation as the digest oracle.
+            XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(message),
+                           EthereumCrypto.hash(envelope))
+        }
+    }
+
+    func testPersonalMessageHashDoesNotReuseAnEmbeddedEnvelope() throws {
+        let message = Data("0ab".utf8)
+        // The valid envelope for "0ab" is also a 30-byte message starting with prefix + "30".
+        // The old prefix detection hashed these two different messages identically.
+        let wrappedMessage = Data("\u{19}Ethereum Signed Message:\n30ab".utf8)
+        XCTAssertEqual(wrappedMessage.count, 30)
+        let expectedMessageHash = EthereumCrypto.hash(wrappedMessage)
+        let expectedWrappedHash = EthereumCrypto.hash(
+            Data("\u{19}Ethereum Signed Message:\n30".utf8) + wrappedMessage
+        )
+
+        XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(message), expectedMessageHash)
+        XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(wrappedMessage), expectedWrappedHash)
+        XCTAssertNotEqual(try TLCore.Web3Utils.hashPersonalMessage(message),
+                          try TLCore.Web3Utils.hashPersonalMessage(wrappedMessage))
+
+        let buffer = Data([0xff]) + wrappedMessage
+        XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(buffer.dropFirst()), expectedWrappedHash)
+    }
+
+    func testPersonalRecoveryBindsSignatureToOriginalMessage() throws {
+        let key = TLCore.PrivateKey(privateKeyData)
+        let message = Data("0ab".utf8)
+        let wrappedMessage = Data("\u{19}Ethereum Signed Message:\n30ab".utf8)
+        let signature = try key.sign(hash: EthereumCrypto.hash(wrappedMessage))
+
+        XCTAssertEqual(try TLCore.Web3Utils.personalECRecover(message, signature: signature.data), key.address)
+        XCTAssertEqual(try TLCore.Web3Utils.personalECRecover(message.hex, signature: signature.data.hex), key.address)
+        XCTAssertNotEqual(try TLCore.Web3Utils.personalECRecover(wrappedMessage, signature: signature.data), key.address)
+        XCTAssertNotEqual(try TLCore.Web3Utils.personalECRecover(wrappedMessage.hex, signature: signature.data.hex), key.address)
+
+        let wrappedHash = EthereumCrypto.hash(
+            Data("\u{19}Ethereum Signed Message:\n30".utf8) + wrappedMessage
+        )
+        let wrappedSignature = try key.sign(hash: wrappedHash)
+        XCTAssertEqual(try TLCore.Web3Utils.personalECRecover(wrappedMessage, signature: wrappedSignature.data), key.address)
+        // Main-app callers that supply a digest keep their existing recovery behavior.
+        XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: wrappedHash, signature: wrappedSignature.data), key.address)
+        XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(wrappedHash, signature: wrappedSignature.data.hex), key.address)
+    }
+
     func testABIv2EncodingAndDecodingMatchesGoldenValues() throws {
         XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("(address,uint256[])[]"),
                        .array(type: .tuple(types: [.address, .array(type: .uint(bits: 256), length: 0)]), length: 0))
