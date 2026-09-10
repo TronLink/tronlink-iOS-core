@@ -32,3 +32,6 @@ docs/migration/*-design.md
 docs/migration/*-design-audit.md
 docs/superpowers/specs/
 docs/superpowers/plans/
+
+# Local core-scan / Codex review artifacts
+.codex/
