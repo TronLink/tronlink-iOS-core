@@ -4,19 +4,19 @@ import Foundation
 extension DerivationPath {
     /// Derivation path index.
     public struct Index: Hashable, CustomStringConvertible {
-        /// Index value.
+        /// Index value. Canonical path components use 0...0x7fffffff.
+        /// Legacy values with the hardened bit already set are preserved for wallet recovery.
         public var value: Int
 
-        /// Whether the index is hardened.
+        /// Whether to set the hardened bit (a legacy value may already have it set).
         public var hardened: Bool
 
-        /// The derivation index.
-        public var derivationIndex: UInt32 {
-            if hardened {
-                return UInt32(value) | 0x80000000
-            } else {
-                return UInt32(value)
+        /// The encoded child index, or nil if the value cannot be represented as UInt32.
+        public var derivationIndex: UInt32? {
+            guard let index = UInt32(exactly: value) else {
+                return nil
             }
+            return hardened ? index | 0x80000000 : index
         }
 
         public init(_ value: Int, hardened: Bool = true) {

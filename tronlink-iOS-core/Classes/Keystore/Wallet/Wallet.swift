@@ -52,7 +52,10 @@ public class Wallet {
             throw Error.invalidSeed
         }
         for index in derivationPath.indices {
-            guard hdnode_private_ckd(&node, index.derivationIndex) == 1 else {
+            guard let derivationIndex = index.derivationIndex else {
+                throw Error.invalidDerivationPath
+            }
+            guard hdnode_private_ckd(&node, derivationIndex) == 1 else {
                 throw Error.keyDerivationFailed
             }
         }

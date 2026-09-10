@@ -18,12 +18,12 @@ public struct DerivationPath: Hashable, CustomStringConvertible {
                 continue
             }
             if component.hasSuffix("'") {
-                guard let index = Int(component.dropLast()) else {
+                guard let index = Int(component.dropLast()), UInt32(exactly: index) != nil else {
                     return nil
                 }
                 indices.append(Index(index, hardened: true))
             } else {
-                guard let index = Int(component) else {
+                guard let index = Int(component), UInt32(exactly: index) != nil else {
                     return nil
                 }
                 indices.append(Index(index, hardened: false))

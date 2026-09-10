@@ -1421,6 +1421,101 @@ final class EmbeddedABIGoldenTests: XCTestCase {
         XCTAssertEqual(proto.port, 18888)
     }
 }
+final class DerivationPathIndexTests: XCTestCase {
+    /// Public BIP39 test vector.
+    private let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+    func testIndexRejectsValuesOutsideUInt32WithoutTrapping() {
+        for value in [Int.min, -1, 0x1_0000_0000, Int.max] {
+            for hardened in [false, true] {
+                XCTAssertNil(DerivationPath.Index(value, hardened: hardened).derivationIndex)
+            }
+        }
+
+        var index = DerivationPath.Index(0)
+        index.value = -1
+        XCTAssertNil(index.derivationIndex)
+    }
+
+    func testBoundaryIndicesPreserveTheirEncodedChildNumbers() {
+        let cases: [(Int, Bool, UInt32)] = [
+            (0, false, 0),
+            (0, true, 0x80000000),
+            (0x7fffffff, false, 0x7fffffff),
+            (0x7fffffff, true, 0xffffffff),
+            (0x80000000, false, 0x80000000),
+            (0x80000000, true, 0x80000000),
+            (0xffffffff, false, 0xffffffff),
+            (0xffffffff, true, 0xffffffff)
+        ]
+        for (value, hardened, expected) in cases {
+            let index = DerivationPath.Index(value, hardened: hardened)
+            XCTAssertEqual(index.derivationIndex, expected)
+            let parsed = DerivationPath("m/" + index.description)
+            XCTAssertEqual(parsed?.indices.first?.derivationIndex, expected)
+        }
+    }
+
+    func testPathParserRejectsNegativeAndUnrepresentableComponents() {
+        let values = ["-1", String(Int.min), "4294967296", String(Int.max), "9223372036854775808"]
+        for value in values {
+            for suffix in ["", "'"] {
+                XCTAssertNil(DerivationPath("m/\(value)\(suffix)/0"))
+                XCTAssertNil(DerivationPath("m/44'/195'/0'/0/\(value)\(suffix)"))
+            }
+        }
+    }
+
+    func testWalletRejectsInvalidPathsAndPlaceholderIndicesWithoutFallback() throws {
+        let wallet = try TLCore.Wallet(mnemonic: mnemonic, path: "m/44'/195'/0'/0/x")
+        for index in [-1, 0x1_0000_0000, Int.max] {
+            XCTAssertThrowsError(try wallet.getKey(at: index)) { error in
+                guard case TLCore.Wallet.Error.invalidDerivationPath = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+
+        for component in ["-1", "-1'", "4294967296", "4294967296'"] {
+            wallet.path = "m/44'/195'/0'/0/" + component
+            XCTAssertThrowsError(try wallet.getKey(at: 0)) { error in
+                guard case TLCore.Wallet.Error.invalidDerivationPath = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+
+        // Failed derivations must not alter the wallet's subsequent valid result.
+        wallet.path = TLCore.Wallet.defaultPath
+        XCTAssertEqual(try wallet.getKey(at: 0).privateKey.hexString,
+                       "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
+    }
+
+    func testLegacyEncodedHardenedPathsPreserveDerivedKeys() throws {
+        let paths = [
+            ("m/44'/195'/2147483648'/0/0", "m/44'/195'/0'/0/0"),
+            ("m/44'/195'/0'/0/2147483648", "m/44'/195'/0'/0/0'"),
+            ("m/44'/195'/0'/0/4294967295", "m/44'/195'/0'/0/2147483647'"),
+            ("m/44'/195'/0'/0/4294967295'", "m/44'/195'/0'/0/2147483647'")
+        ]
+        let wallet = try TLCore.Wallet(mnemonic: mnemonic)
+        for (legacy, canonical) in paths {
+            wallet.path = canonical
+            let expected = try wallet.getKey(at: 0)
+            wallet.path = legacy
+            let actual = try wallet.getKey(at: 0)
+            XCTAssertEqual(actual.privateKey, expected.privateKey)
+            XCTAssertEqual(actual.publicKey, expected.publicKey)
+            XCTAssertEqual(DerivationPath(legacy)?.description, legacy)
+        }
+
+        wallet.path = "m/44'/195'/0'/0/x"
+        let placeholderKey = try wallet.getKey(at: 0xffffffff)
+        wallet.path = "m/44'/195'/0'/0/2147483647'"
+        XCTAssertEqual(placeholderKey.privateKey, try wallet.getKey(at: 0).privateKey)
+    }
+}
+
 final class EmbeddedKeystoreTests: XCTestCase {
     /// BIP39 test vector.
     private let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
