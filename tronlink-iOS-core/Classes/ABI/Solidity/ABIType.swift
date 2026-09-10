@@ -26,7 +26,7 @@ public indirect enum ABIType: Equatable, CustomStringConvertible {
     /// An address (20 bytes) followed by a function selector (4 bytes). Encoded identical to `bytes(24)`.
     case function(Function)
 
-    /// Fixed-length array of M elements, `M > 0`, of the given type.
+    /// Fixed-length array of M elements, `M >= 0`, of the given type.
     case array(ABIType, Int)
 
     /// Dynamic-sized byte sequence
@@ -40,6 +40,30 @@ public indirect enum ABIType: Equatable, CustomStringConvertible {
 
     /// Tuple consisting of elements of the given types
     case tuple([ABIType])
+
+    /// Reject invalid declarations before range checks, padding or array encoding.
+    func validate() throws {
+        switch self {
+        case .uint(let bits), .int(let bits):
+            guard (8...256).contains(bits), bits % 8 == 0 else { throw ABIError.invalidArgumentType }
+        case .fixed(let bits, let scale), .ufixed(let bits, let scale):
+            guard (8...256).contains(bits), bits % 8 == 0,
+                  (1...80).contains(scale) else { throw ABIError.invalidArgumentType }
+        case .bytes(let count):
+            guard (1...32).contains(count) else { throw ABIError.invalidArgumentType }
+        case .array(let type, let count):
+            guard count >= 0 else { throw ABIError.invalidArgumentType }
+            try type.validate()
+        case .dynamicArray(let type):
+            try type.validate()
+        case .tuple(let types):
+            for type in types { try type.validate() }
+        case .function(let function):
+            for type in function.parameters { try type.validate() }
+        case .address, .bool, .dynamicBytes, .string:
+            break
+        }
+    }
 
     /// Whether this type uses an offset in its enclosing tuple.
     var isDynamic: Bool {

@@ -1421,6 +1421,164 @@ final class EmbeddedABIGoldenTests: XCTestCase {
         XCTAssertEqual(proto.port, 18888)
     }
 }
+final class ABIValueBoundsTests: XCTestCase {
+    private func encoded(_ value: ABIValue) throws -> Data {
+        let encoder = ABIEncoder()
+        try encoder.encode(value)
+        return encoder.data
+    }
+
+    func testEveryIntegerWidthPreservesBoundaryWordsAndRejectsOverflow() throws {
+        for byteCount in 1...32 {
+            let bits = byteCount * 8
+            let unsignedMaximum = (BigUInt(1) << bits) - 1
+            let signedLimit = BigInt(1) << (bits - 1)
+            let signedMaximum = signedLimit - 1
+            let signedMinimum = -signedLimit
+            let unsignedWord = Data(repeating: 0, count: 32 - byteCount) + Data(repeating: 0xff, count: byteCount)
+            let signedMaxWord = Data(repeating: 0, count: 32 - byteCount)
+                + Data([0x7f]) + Data(repeating: 0xff, count: byteCount - 1)
+            let signedMinWord = Data(repeating: 0xff, count: 32 - byteCount)
+                + Data([0x80]) + Data(repeating: 0, count: byteCount - 1)
+
+            XCTAssertEqual(try encoded(ABIValue(BigUInt(0), type: .uint(bits: bits))), Data(repeating: 0, count: 32))
+            XCTAssertEqual(try encoded(ABIValue(unsignedMaximum, type: .uint(bits: bits))), unsignedWord)
+            XCTAssertEqual(try encoded(ABIValue(signedMaximum, type: .int(bits: bits))), signedMaxWord)
+            XCTAssertEqual(try encoded(ABIValue(signedMinimum, type: .int(bits: bits))), signedMinWord)
+            XCTAssertThrowsError(try ABIValue(unsignedMaximum + 1, type: .uint(bits: bits)))
+            XCTAssertThrowsError(try ABIValue(signedMaximum + 1, type: .int(bits: bits)))
+            XCTAssertThrowsError(try ABIValue(signedMinimum - 1, type: .int(bits: bits)))
+            XCTAssertThrowsError(try encoded(.uint(bits: bits, unsignedMaximum + 1)))
+            XCTAssertThrowsError(try encoded(.int(bits: bits, signedMaximum + 1)))
+            XCTAssertThrowsError(try encoded(.int(bits: bits, signedMinimum - 1)))
+        }
+        XCTAssertThrowsError(try ABIValue(256, type: .uint(bits: 8)))
+        XCTAssertThrowsError(try ABIValue(UInt(256), type: .uint(bits: 8)))
+        XCTAssertThrowsError(try ABIValue(-1, type: .uint(bits: 8)))
+        XCTAssertThrowsError(try ABIValue(128, type: .int(bits: 8)))
+    }
+
+    func testInvalidDeclarationsFailBeforeShiftsOrPadding() {
+        for bits in [Int.min, -8, 0, 7, 9, 257, Int.max] {
+            XCTAssertThrowsError(try ABIValue(BigUInt(0), type: .uint(bits: bits)))
+            XCTAssertThrowsError(try encoded(.int(bits: bits, 0)))
+            XCTAssertThrowsError(try ABIValue([] as [Any], type: .dynamicArray(.uint(bits: bits))))
+        }
+        for length in [Int.min, 0, 33, Int.max] {
+            XCTAssertThrowsError(try ABIValue(Data(), type: .bytes(length)))
+        }
+        XCTAssertThrowsError(try ABIValue([] as [Any], type: .array(.bool, -1)))
+        for scale in [0, 81, Int.max] {
+            XCTAssertThrowsError(try ABIValue(BigInt(0), type: .fixed(128, scale)))
+            XCTAssertThrowsError(try encoded(.ufixed(bits: 128, scale, 0)))
+        }
+    }
+
+    func testFixedPointUsesTheDeclaredBoundsForItsScaledInteger() throws {
+        XCTAssertEqual(try encoded(ABIValue(BigInt(-128), type: .fixed(8, 2))),
+                       Data(repeating: 0xff, count: 31) + Data([0x80]))
+        XCTAssertEqual(try encoded(ABIValue(BigUInt(255), type: .ufixed(8, 2))),
+                       Data(repeating: 0, count: 31) + Data([0xff]))
+        XCTAssertThrowsError(try ABIValue(BigInt(128), type: .fixed(8, 2)))
+        XCTAssertThrowsError(try encoded(.fixed(bits: 8, 2, -129)))
+        XCTAssertThrowsError(try ABIValue(BigUInt(256), type: .ufixed(8, 2)))
+    }
+
+    func testFixedBytesKeepRightPaddingAndTheirDeclaredArrayType() throws {
+        for length in 1...32 {
+            for count in [0, 1, length] {
+                let bytes = Data(repeating: 0xab, count: count)
+                let value = try ABIValue(bytes, type: .bytes(length))
+                XCTAssertEqual(value.type, .bytes(length))
+                XCTAssertEqual(value.length, 32)
+                XCTAssertEqual(try encoded(value), bytes + Data(repeating: 0, count: 32 - count))
+            }
+            XCTAssertThrowsError(try ABIValue(Data(repeating: 1, count: length + 1), type: .bytes(length)))
+        }
+
+        let bytes: [Any] = [Data([0xaa]), Data()]
+        let value = try ABIValue(bytes, type: .array(.bytes(2), 2))
+        XCTAssertEqual(try encoded(value), Data([0xaa]) + Data(repeating: 0, count: 63))
+        XCTAssertThrowsError(try encoded(.bytes(Data())))
+        XCTAssertThrowsError(try encoded(.bytes(Data(repeating: 1, count: 33))))
+
+        let dynamic = ABIEncoder()
+        try dynamic.encode(Data(repeating: 0xab, count: 33), static: false)
+        XCTAssertEqual(dynamic.data.count, 96)
+        XCTAssertEqual(dynamic.data.prefix(32), Data(repeating: 0, count: 31) + Data([33]))
+    }
+
+    func testFixedArrayAndTupleCountsMustMatchAtEveryLevel() throws {
+        let invalidArrays: [[Any]] = [[1], [1, 2, 3]]
+        for values in invalidArrays {
+            XCTAssertThrowsError(try ABIValue(values, type: .array(.uint(bits: 8), 2))) { error in
+                XCTAssertEqual(error as? ABIError, .invalidNumberOfArguments)
+            }
+            XCTAssertThrowsError(try ABIValue(values, type: .tuple([.uint(bits: 8), .uint(bits: 8)]))) { error in
+                XCTAssertEqual(error as? ABIError, .invalidNumberOfArguments)
+            }
+            XCTAssertThrowsError(try ABIValue([values] as [Any], type: .dynamicArray(.array(.uint(bits: 8), 2))))
+        }
+        let values: [Any] = [1, 2]
+        let array = try ABIValue(values, type: .array(.uint(bits: 8), 2))
+        XCTAssertEqual(try encoded(array),
+                       Data(repeating: 0, count: 31) + Data([1]) + Data(repeating: 0, count: 31) + Data([2]))
+    }
+
+    func testDirectEnumValuesFailBeforeWritingTupleOrFunctionData() {
+        let invalidValues: [ABIValue] = [
+            .tuple([.uint(bits: 256, 1), .uint(bits: 8, 256)]),
+            .dynamicArray(.uint(bits: 8), [.uint(bits: 8, 1), .uint(bits: 8, 256)]),
+            .array(.uint(bits: 8), [.bool(true)]),
+            .function(Function(name: "f", parameters: [.uint(bits: 8)]), [])
+        ]
+        for value in invalidValues {
+            let encoder = ABIEncoder()
+            encoder.data = Data([0xde, 0xad])
+            XCTAssertThrowsError(try encoder.encode(value))
+            XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
+        }
+
+        let encoder = ABIEncoder()
+        encoder.data = Data([0xde, 0xad])
+        XCTAssertThrowsError(try encoder.encode(function: Function(name: "f", parameters: [.uint(bits: 8)]), arguments: [256]))
+        XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
+        XCTAssertThrowsError(try encoder.encode(tuple: [.uint(bits: 256, 1), .bytes(Data(repeating: 1, count: 33))]))
+        XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
+    }
+
+    func testRawSignedEncoderRejectsOverflowAndNormalizesNegativeZero() throws {
+        let limit = BigInt(1) << 255
+        for value in [limit, -limit - 1] {
+            let encoder = ABIEncoder()
+            XCTAssertThrowsError(try encoder.encode(value))
+            XCTAssertTrue(encoder.data.isEmpty)
+        }
+        var negativeZero = BigInt(0)
+        negativeZero.sign = .minus
+        let encoder = ABIEncoder()
+        try encoder.encode(negativeZero)
+        XCTAssertEqual(encoder.data, Data(repeating: 0, count: 32))
+    }
+
+    func testPermit2MaximaAndTRC20TransferKeepTheirCalldata() throws {
+        let address = Address(data: Data(repeating: 0xaa, count: 20))
+        let amount = (BigUInt(1) << 160) - 1
+        let expiration = (BigUInt(1) << 48) - 1
+        let function = Function(name: "approve", parameters: [.address, .address, .uint(bits: 160), .uint(bits: 48)])
+        let encoder = ABIEncoder()
+        try encoder.encode(function: function, arguments: [address, address, amount, expiration])
+        XCTAssertEqual(encoder.data.count, 132)
+        XCTAssertEqual(encoder.data.subdata(in: 68..<100), Data(repeating: 0, count: 12) + Data(repeating: 0xff, count: 20))
+        XCTAssertEqual(encoder.data.subdata(in: 100..<132), Data(repeating: 0, count: 26) + Data(repeating: 0xff, count: 6))
+        XCTAssertThrowsError(try ABIValue(amount + 1, type: .uint(bits: 160)))
+        XCTAssertThrowsError(try ABIValue(expiration + 1, type: .uint(bits: 48)))
+        XCTAssertEqual(try ERC20Encoder.encodeTransfer(to: address, tokens: 1).hexString,
+                       "a9059cbb" + String(repeating: "0", count: 24) + String(repeating: "aa", count: 20)
+                       + String(repeating: "0", count: 63) + "1")
+    }
+}
+
 final class DerivationPathIndexTests: XCTestCase {
     /// Public BIP39 test vector.
     private let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"

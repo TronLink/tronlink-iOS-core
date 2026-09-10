@@ -120,8 +120,10 @@ public indirect enum ABIValue {
 
     /// Creates a value from `Any` and an `ABIType`.
     ///
-    /// - Throws: `ABIError.invalidArgumentType` if a value doesn't match the expected type.
+    /// Short fixed bytes are right-padded to their declared size for compatibility.
+    /// - Throws: `ABIError` for invalid types, out-of-range values or mismatched counts.
     public init(_ value: Any, type: ABIType) throws {
+        try type.validate()
         switch (type, value) {
         case (.uint(let bits), let value as Int):
             guard value >= 0 else { throw ABIError.integerOverflow }
@@ -142,11 +144,13 @@ public indirect enum ABIValue {
             self = .fixed(bits: bits, scale, value)
         case (.ufixed(let bits, let scale), let value as BigUInt):
             self = .ufixed(bits: bits, scale, value)
-        case (.bytes, let data as Data):
-            self = .bytes(data)
+        case (.bytes(let count), let data as Data):
+            guard data.count <= count else { throw ABIError.invalidArgumentType }
+            self = .bytes(data + Data(repeating: 0, count: count - data.count))
         case (.function(let f), let args as [Any]):
             self = .function(f, try f.castArguments(args))
-        case (.array(let type, _), let array as [Any]):
+        case (.array(let type, let count), let array as [Any]):
+            guard array.count == count else { throw ABIError.invalidNumberOfArguments }
             self = .array(type, try array.map({ try ABIValue($0, type: type) }))
         case (.dynamicBytes, let data as Data):
             self = .dynamicBytes(data)
@@ -162,5 +166,37 @@ public indirect enum ABIValue {
         default:
             throw ABIError.invalidArgumentType
         }
+        try validate()
+    }
+
+    /// Enum cases are public, so encoding must also validate values built without init(_:type:).
+    func validate() throws {
+        try type.validate()
+        switch self {
+        case .uint(let bits, let value), .ufixed(let bits, _, let value):
+            guard value.bitWidth <= bits else { throw ABIError.integerOverflow }
+        case .int(let bits, let value), .fixed(let bits, _, let value):
+            try ABIValue.validateSignedInteger(value, bits: bits)
+        case .array(let type, let values), .dynamicArray(let type, let values):
+            guard values.allSatisfy({ $0.type == type }) else { throw ABIError.invalidArgumentType }
+            for value in values { try value.validate() }
+        case .tuple(let values):
+            for value in values { try value.validate() }
+        case .function(let function, let values):
+            guard values.count == function.parameters.count else { throw ABIError.invalidNumberOfArguments }
+            for (type, value) in zip(function.parameters, values) {
+                guard value.type == type else { throw ABIError.invalidArgumentType }
+                try value.validate()
+            }
+        case .address, .bool, .bytes, .dynamicBytes, .string:
+            break
+        }
+    }
+
+    static func validateSignedInteger(_ value: BigInt, bits: Int) throws {
+        try ABIType.int(bits: bits).validate()
+        let limit = BigUInt(1) << (bits - 1)
+        let fits = value.sign == .minus ? value.magnitude <= limit : value.magnitude < limit
+        guard fits else { throw ABIError.integerOverflow }
     }
 }

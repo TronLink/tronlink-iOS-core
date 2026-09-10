@@ -16,6 +16,7 @@ public final class ABIEncoder: Codable {
 
     /// Encodes an `ABIValue`
     public func encode(_ value: ABIValue) throws {
+        try value.validate()
         switch value {
         case .uint(_, let value):
             try encode(value)
@@ -34,15 +35,13 @@ public final class ABIEncoder: Codable {
         case .function(let f, let args):
             try encode(signature: f.description)
             try encode(tuple: args)
-        case .array(let type, let array):
-            precondition(!array.contains(where: { $0.type != type }), "Array can only contain values of type \(type)")
+        case .array(_, let array):
             try encode(tuple: array)
         case .dynamicBytes(let data):
             try encode(data, static: false)
         case .string(let string):
             try encode(string)
-        case .dynamicArray(let type, let array):
-            precondition(!array.contains(where: { $0.type != type }), "Array can only contain values of type \(type)")
+        case .dynamicArray(_, let array):
             try encode(array.count)
             try encode(tuple: array)
         case .tuple(let array):
@@ -54,6 +53,7 @@ public final class ABIEncoder: Codable {
     public func encode(tuple: [ABIValue]) throws {
         var headSize = 0
         for subvalue in tuple {
+            try subvalue.validate()
             if subvalue.isDynamic {
                 headSize += 32
             } else {
@@ -78,8 +78,9 @@ public final class ABIEncoder: Codable {
 
     /// Encodes a function call
     public func encode(function: Function, arguments: [Any]) throws {
+        let values = try function.castArguments(arguments)
         try encode(signature: function.description)
-        try encode(tuple: function.castArguments(arguments))
+        try encode(tuple: values)
     }
 
     /// Encodes a boolean field.
@@ -113,14 +114,15 @@ public final class ABIEncoder: Codable {
 
     /// Encodes a `BigInt` field.
     ///
-    /// - Throws: `ABIError.integerOverflow` if the value has more than 256 bits.
+    /// - Throws: `ABIError.integerOverflow` if the value is outside the int256 range.
     public func encode(_ value: BigInt) throws {
+        try ABIValue.validateSignedInteger(value, bits: 256)
         let valueData = twosComplement(value)
         if valueData.count > encodedIntSize {
             throw ABIError.integerOverflow
         }
 
-        if value.sign == .plus {
+        if value.sign == .plus || value.isZero {
             data.append(Data(repeating: 0, count: encodedIntSize - valueData.count))
         } else {
             data.append(Data(repeating: 255, count: encodedIntSize - valueData.count))
@@ -131,7 +133,7 @@ public final class ABIEncoder: Codable {
     // Computes the two's complement for a `BigInt` with 256 bits
     private func twosComplement(_ value: BigInt) -> Data {
         let magnitude = value.magnitude
-        if value.sign == .plus {
+        if value.sign == .plus || value.isZero {
             return magnitude.serialize()
         }
 
@@ -142,6 +144,9 @@ public final class ABIEncoder: Codable {
 
     /// Encodes a static or dynamic byte array
     public func encode(_ bytes: Data, static: Bool) throws {
+        if `static` {
+            try ABIType.bytes(bytes.count).validate()
+        }
         if !`static` {
             try encode(bytes.count)
         }
