@@ -124,6 +124,7 @@ public indirect enum ABIValue {
     public init(_ value: Any, type: ABIType) throws {
         switch (type, value) {
         case (.uint(let bits), let value as Int):
+            guard value >= 0 else { throw ABIError.integerOverflow }
             self = .uint(bits: bits, BigUInt(value))
         case (.uint(let bits), let value as UInt):
             self = .uint(bits: bits, BigUInt(value))
@@ -156,6 +157,7 @@ public indirect enum ABIValue {
         case (.dynamicArray(let type), let array as [Any]):
             self = .dynamicArray(type, try array.map({ try ABIValue($0, type: type) }))
         case (.tuple(let types), let array as [Any]):
+            guard array.count == types.count else { throw ABIError.invalidNumberOfArguments }
             self = .tuple(try zip(types, array).map({ try ABIValue($1, type: $0) }))
         default:
             throw ABIError.invalidArgumentType

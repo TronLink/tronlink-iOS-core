@@ -1262,16 +1262,80 @@ final class EmbeddedABIGoldenTests: XCTestCase {
         }
     }
 
-    func testERC20ConvenienceEncodersFailClosedForInvalidAddress() {
+    func testERC20ConvenienceEncodersThrowForInvalidAddress() throws {
         let invalid = Address(data: Data())
         let valid = Address(data: Data(repeating: 0xaa, count: 20))
+        let encoders: [() throws -> Data] = [
+            { try ERC20Encoder.encodeBalanceOf(address: invalid) },
+            { try ERC20Encoder.encodeAllowance(owner: valid, spender: invalid) },
+            { try ERC20Encoder.encodeTransfer(to: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeTransfer(from: valid, to: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeApprove(spender: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeDepositTRC20(spender: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeExchangeBalance(contractOwner: valid, tokens: [invalid]) }
+        ]
+        for encode in encoders {
+            XCTAssertThrowsError(try encode()) { error in
+                XCTAssertEqual(error as? ABIError, .invalidAddress)
+            }
+        }
+        let addressWord = String(repeating: "0", count: 24) + String(repeating: "aa", count: 20)
+        let amountWord = String(repeating: "0", count: 63) + "1"
+        XCTAssertEqual(try ERC20Encoder.encodeApprove(spender: valid, tokens: 1).hexString,
+                       "095ea7b3" + addressWord + amountWord)
+        XCTAssertEqual(try ERC20Encoder.encodeTransfer(to: valid, tokens: 1).hexString,
+                       "a9059cbb" + addressWord + amountWord)
+        XCTAssertEqual(try ERC20Encoder.encodeTransfer(from: valid, to: valid, tokens: 1).hexString,
+                       "23b872dd" + addressWord + addressWord + amountWord)
+    }
 
-        XCTAssertTrue(ERC20Encoder.encodeBalanceOf(address: invalid).isEmpty)
-        XCTAssertTrue(ERC20Encoder.encodeApprove(spender: invalid, tokens: 1).isEmpty)
-        XCTAssertTrue(ERC20Encoder.encodeDepositTRC20(spender: invalid, tokens: 1).isEmpty)
-        XCTAssertTrue(ERC20Encoder.encodeExchangeBalance(contractOwner: valid, tokens: [invalid]).isEmpty)
+    func testERC20HelpersThrowOnOverflowInsteadOfTrappingOrReturningEmptyData() throws {
+        let valid = Address(data: Data(repeating: 0xaa, count: 20))
+        let overflow = BigUInt(1) << 256
+        let encoders: [() throws -> Data] = [
+            { try ERC20Encoder.encodeOwnerOf(tokenId: overflow) },
+            { try ERC20Encoder.encodeTransfer(to: valid, tokens: overflow) },
+            { try ERC20Encoder.encodeApprove(spender: valid, tokens: overflow) },
+            { try ERC20Encoder.encodeDepositTRC10(tokenId: overflow, tokens: 1) },
+            { try ERC20Encoder.encodeWithdrawTRC10(tokenId: 1, tokens: overflow) },
+            { try ERC20Encoder.encodeWithdrawTRC20(tokens: overflow) },
+            { try ERC20Encoder.encodetTrxToTokenSwapInput(minTokens: overflow, deadline: 1) },
+            { try ERC20Encoder.encodeTokenToTokenSwapInput(tokensSold: overflow, minTokensBought: 1,
+                                                         minTrxBought: 1, deadline: 1, tokenAddr: valid) }
+        ]
+        for encode in encoders {
+            XCTAssertThrowsError(try encode()) { error in
+                XCTAssertEqual(error as? ABIError, .integerOverflow)
+            }
+        }
+        XCTAssertEqual(try ERC20Encoder.encodeOwnerOf(tokenId: overflow - 1).hexString,
+                       "6352211e" + String(repeating: "f", count: 64))
+    }
 
-        XCTAssertEqual(ERC20Encoder.encodeApprove(spender: valid, tokens: 1).count, 68)
+    func testSwapHelperRejectsInvalidTupleArguments() throws {
+        let valid = Address(data: Data(repeating: 0xaa, count: 20))
+        let cases: [([Any], ABIError)] = [
+            ([BigUInt(1), BigUInt(2), valid], .invalidNumberOfArguments),
+            ([BigUInt(1), BigUInt(2), valid, BigUInt(3), BigUInt(4)], .invalidNumberOfArguments),
+            (["invalid", BigUInt(2), valid, BigUInt(3)], .invalidArgumentType),
+            ([-1, BigUInt(2), valid, BigUInt(3)], .integerOverflow)
+        ]
+        for (tuple, expected) in cases {
+            XCTAssertThrowsError(try ERC20Encoder.encodeSwapExactInput(path: [valid], poolVersion: ["v1"],
+                versionLen: [1], fees: [0], tuple: tuple)) { error in
+                XCTAssertEqual(error as? ABIError, expected)
+            }
+        }
+    }
+
+    func testERC20FixedSelectorsRemainNonThrowing() {
+        XCTAssertEqual(ERC20Encoder.encodeTotalSupply().hexString, "18160ddd")
+        XCTAssertEqual(ERC20Encoder.encodeName().hexString, "06fdde03")
+        XCTAssertEqual(ERC20Encoder.encodeSymbol().hexString, "95d89b41")
+        XCTAssertEqual(ERC20Encoder.encodeDecimals().hexString, "313ce567")
+        XCTAssertEqual(ERC20Encoder.encodeDepositTRX().count, 4)
+        XCTAssertEqual(ERC20Encoder.encodeWithdrawTRX().count, 4)
+        XCTAssertEqual(ERC20Encoder.encodeWithdrawFee().count, 4)
     }
 
     func testEmbeddedTronDerivationAndBase58MatchGoldenValues() throws {
