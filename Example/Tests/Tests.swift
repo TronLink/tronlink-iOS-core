@@ -3286,3 +3286,133 @@ final class StringAddressValidationTests: XCTestCase {
         }
     }
 }
+
+final class Blake2sFinalBoundsTests: XCTestCase {
+    private let message = Array("abc".utf8)
+    private let key = Array("key".utf8)
+    private let personal = Array("TLCore01".utf8)
+
+    func testRFC7693DigestWithExactAndLargerOutputCapacities() throws {
+        // RFC 7693, Appendix B: BLAKE2s-256("abc").
+        let expected = Array(try XCTUnwrap(Data(hexString:
+            "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982")))
+        for capacity in [32, 33, 64] {
+            var state = blake2s_state()
+            XCTAssertEqual(blake2s_Init(&state, 32), 0)
+            XCTAssertEqual(message.withUnsafeBufferPointer {
+                blake2s_Update(&state, $0.baseAddress, $0.count)
+            }, 0)
+            var output = [UInt8](repeating: 0xa5, count: capacity + 2)
+            XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                blake2s_Final(&state, $0.baseAddress!.advanced(by: 1), capacity)
+            }, 0)
+            XCTAssertEqual(output, [0xa5] + expected + [UInt8](repeating: 0xa5, count: capacity - 32 + 1))
+        }
+        var output = [UInt8](repeating: 0, count: 32)
+        XCTAssertEqual(message.withUnsafeBufferPointer { input in
+            output.withUnsafeMutableBufferPointer {
+                blake2s(input.baseAddress, UInt32(input.count), $0.baseAddress, $0.count)
+            }
+        }, 0)
+        XCTAssertEqual(output, expected)
+    }
+
+    func testAllDigestLengthsAndInitializationModesWriteOnlyConfiguredBytes() {
+        for digestLength in 1...32 {
+            for mode in 0..<3 {
+                var state = blake2s_state()
+                switch mode {
+                case 0:
+                    XCTAssertEqual(blake2s_Init(&state, digestLength), 0)
+                case 1:
+                    XCTAssertEqual(key.withUnsafeBufferPointer {
+                        blake2s_InitKey(&state, digestLength, $0.baseAddress, $0.count)
+                    }, 0)
+                default:
+                    XCTAssertEqual(personal.withUnsafeBufferPointer {
+                        blake2s_InitPersonal(&state, digestLength, $0.baseAddress, $0.count)
+                    }, 0)
+                }
+                XCTAssertEqual(message.withUnsafeBufferPointer {
+                    blake2s_Update(&state, $0.baseAddress, $0.count)
+                }, 0)
+                var exactState = state
+                var expected = [UInt8](repeating: 0, count: digestLength)
+                XCTAssertEqual(expected.withUnsafeMutableBufferPointer {
+                    blake2s_Final(&exactState, $0.baseAddress, $0.count)
+                }, 0)
+                var output = [UInt8](repeating: 0xa5, count: 66)
+                XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                    blake2s_Final(&state, $0.baseAddress!.advanced(by: 1), 64)
+                }, 0)
+                XCTAssertEqual(output, [0xa5] + expected + [UInt8](repeating: 0xa5, count: 65 - digestLength),
+                               "digestLength=\(digestLength), mode=\(mode)")
+            }
+        }
+    }
+
+    func testInsufficientCapacityAndRepeatedFinalLeaveOutputUnchanged() {
+        var state = blake2s_state()
+        XCTAssertEqual(blake2s_Init(&state, 32), 0)
+        XCTAssertEqual(blake2s_Final(&state, nil, 32), -1)
+        for capacity in [0, 31] {
+            var output = [UInt8](repeating: 0xa5, count: 64)
+            XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                blake2s_Final(&state, $0.baseAddress, capacity)
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+        }
+        // Rejected arguments must not finalize the state; a valid retry still succeeds.
+        var digest = [UInt8](repeating: 0, count: 32)
+        XCTAssertEqual(digest.withUnsafeMutableBufferPointer {
+            blake2s_Final(&state, $0.baseAddress, $0.count)
+        }, 0)
+        var output = [UInt8](repeating: 0xa5, count: 64)
+        XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+            blake2s_Final(&state, $0.baseAddress, $0.count)
+        }, -1)
+        XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+    }
+
+    func testInvalidStateDigestLengthsAreRejectedWithoutWriting() {
+        for digestLength: UInt8 in [0, 33, 255] {
+            var state = blake2s_state()
+            XCTAssertEqual(blake2s_Init(&state, 32), 0)
+            state.outlen = digestLength
+            var output = [UInt8](repeating: 0xa5, count: 256)
+            XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                blake2s_Final(&state, $0.baseAddress, $0.count)
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 256))
+        }
+    }
+
+    func testInitAndOneShotContinueRejectingInvalidDigestLengths() {
+        for digestLength in [0, 33, 64] {
+            var state = blake2s_state()
+            XCTAssertEqual(blake2s_Init(&state, digestLength), -1)
+            XCTAssertEqual(key.withUnsafeBufferPointer {
+                blake2s_InitKey(&state, digestLength, $0.baseAddress, $0.count)
+            }, -1)
+            XCTAssertEqual(personal.withUnsafeBufferPointer {
+                blake2s_InitPersonal(&state, digestLength, $0.baseAddress, $0.count)
+            }, -1)
+            var output = [UInt8](repeating: 0xa5, count: 64)
+            XCTAssertEqual(message.withUnsafeBufferPointer { input in
+                output.withUnsafeMutableBufferPointer {
+                    blake2s(input.baseAddress, UInt32(input.count), $0.baseAddress, digestLength)
+                }
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+            XCTAssertEqual(message.withUnsafeBufferPointer { input in
+                key.withUnsafeBufferPointer { keyBytes in
+                    output.withUnsafeMutableBufferPointer {
+                        blake2s_Key(input.baseAddress, UInt32(input.count), keyBytes.baseAddress,
+                                    keyBytes.count, $0.baseAddress, digestLength)
+                    }
+                }
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+        }
+    }
+}

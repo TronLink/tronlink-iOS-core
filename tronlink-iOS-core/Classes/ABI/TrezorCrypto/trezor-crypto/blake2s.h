@@ -33,6 +33,10 @@ int blake2s_Init(blake2s_state *S, size_t outlen);
 int blake2s_InitKey(blake2s_state *S, size_t outlen, const void *key, size_t keylen);
 int blake2s_InitPersonal(blake2s_state *S, size_t outlen, const void *personal, size_t personal_len);
 int blake2s_Update(blake2s_state *S, const void *pin, size_t inlen);
+/* Final requires a successfully initialized state. outlen is the output buffer
+ * capacity, which must be at least S->outlen and may exceed BLAKE2S_OUTBYTES.
+ * On success, writes exactly the configured 1..BLAKE2S_OUTBYTES digest bytes;
+ * the remaining output buffer is left unchanged. Returns 0 on success, -1 on error. */
 int blake2s_Final(blake2s_state *S, void *out, size_t outlen);
 
 int blake2s(const uint8_t *msg, uint32_t msg_len, void *out, size_t outlen);
