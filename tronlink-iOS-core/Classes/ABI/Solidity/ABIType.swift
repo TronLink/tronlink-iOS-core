@@ -41,6 +41,23 @@ public indirect enum ABIType: Equatable, CustomStringConvertible {
     /// Tuple consisting of elements of the given types
     case tuple([ABIType])
 
+    /// Whether this type uses an offset in its enclosing tuple.
+    var isDynamic: Bool {
+        switch self {
+        case .uint, .int, .address, .bool, .fixed, .ufixed, .bytes:
+            return false
+        case .dynamicBytes, .string, .dynamicArray:
+            return true
+        case .array(let type, _):
+            return type.isDynamic
+        case .tuple(let types):
+            return types.contains(where: { $0.isDynamic })
+        case .function(let function):
+            // ABIValue.function represents a full call, including its arguments.
+            return function.parameters.contains(where: { $0.isDynamic })
+        }
+    }
+
     /// Type description
     ///
     /// This is the string as required for function selectors

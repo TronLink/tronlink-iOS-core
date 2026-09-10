@@ -82,38 +82,35 @@ public indirect enum ABIValue {
         case .bytes(let data):
             return ((data.count + 31) / 32) * 32
         case .function(_, let args):
-            return 4 + args.reduce(0, { $0 + $1.length })
+            return 4 + ABIValue.tupleLength(args)
         case .array(_, let array):
-            return array.reduce(0, { $0 + $1.length })
+            return ABIValue.tupleLength(array)
         case .dynamicBytes(let data):
             return 32 + ((data.count + 31) / 32) * 32
         case .string(let string):
             let dataLength = string.data(using: .utf8)?.count ?? 0
             return 32 + ((dataLength + 31) / 32) * 32
         case .dynamicArray(_, let array):
-            var isDynamic = true
-            for item in array {
-                if !item.isDynamic {
-                    isDynamic = false
-                }
-            }
-            if isDynamic {
-                return 32 + (array.count * 32) + array.reduce(0, { $0 + $1.length })
-            } else {
-                return 32 + array.reduce(0, { $0 + $1.length })
-            }
+            return 32 + ABIValue.tupleLength(array)
         case .tuple(let array):
-            return array.reduce(0, { $0 + $1.length })
+            return ABIValue.tupleLength(array)
         }
+    }
+
+    private static func tupleLength(_ values: [ABIValue]) -> Int {
+        // Dynamic members contribute both a head offset and their encoded tail.
+        return values.reduce(0, { $0 + ($1.isDynamic ? 32 : 0) + $1.length })
     }
 
     /// Whether the value is dynamic
     public var isDynamic: Bool {
         switch self {
-        case .uint, .int, .address, .bool, .fixed, .ufixed, .bytes, .array:
+        case .uint, .int, .address, .bool, .fixed, .ufixed, .bytes:
             return false
         case .dynamicBytes, .string, .dynamicArray:
             return true
+        case .array(let type, _):
+            return type.isDynamic
         case .function(_, let array):
             return array.contains(where: { $0.isDynamic })
         case .tuple(let array):
