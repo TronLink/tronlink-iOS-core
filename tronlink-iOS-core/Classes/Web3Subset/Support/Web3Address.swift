@@ -28,7 +28,7 @@ public enum Web3AddressError: Error {
  If user enters the address you need to check if address is in valid format. To do that use:
  ```
  let inputString = "0x45245bc59219eeaaf6cd3f382e078a461ff9de7b"
- guard inputString.isValid else { return }
+ guard inputString.isAddress else { return }
  // or
  let address = Web3Address("0x45245bc59219eeaaf6cd3f382e078a461ff9de7b")
  guard address.isValid else { return }
@@ -188,9 +188,13 @@ public extension String {
         return hex.count > 0
     }
 
-    /// - Returns: true is address is 20 bytes long
+    /// Checks for exactly 20 bytes of ASCII hex, with an optional `0x` or `0X` prefix.
+    /// Validates format only, without enforcing an EIP-55 checksum.
+    /// Use `isTRXAddress()` for TRON Base58Check addresses.
     var isAddress: Bool {
-        return hex.count == 20
+        let addressHex = hasPrefix("0x") || hasPrefix("0X") ? String(dropFirst(2)) : self
+        guard addressHex.utf8.count == 40 else { return false }
+        return Data(hexString: addressHex)?.count == 20
     }
     
     /// - Returns: Contract deployment address.

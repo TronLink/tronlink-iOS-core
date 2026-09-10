@@ -3229,3 +3229,60 @@ final class HexDecodingRegressionTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(Payload.self, from: json).value, Data([0x00, 0xab]))
     }
 }
+
+final class StringAddressValidationTests: XCTestCase {
+    func testAcceptsCompleteEVMHexAddresses() {
+        let addresses = [
+            "45245bc59219eeaaf6cd3f382e078a461ff9de7b",
+            "45245BC59219EEAAF6CD3F382E078A461FF9DE7B",
+            "45245bC59219eEaAf6Cd3F382e078A461ff9dE7b",
+            String(repeating: "00", count: 20),
+            String(repeating: "ff", count: 20)
+        ]
+        for prefix in ["", "0x", "0X"] {
+            for address in addresses {
+                XCTAssertTrue((prefix + address).isAddress, prefix + address)
+            }
+        }
+    }
+
+    func testRejectsTextPreviouslyAcceptedByUTF8HexLength() {
+        // Each input occupies 10 UTF-8 bytes, which the old predicate accepted.
+        for value in ["helloworld", "1234567890", "0x12345678", "😀😀ab", String(repeating: "é", count: 5)] {
+            XCTAssertFalse(value.isAddress, value)
+        }
+    }
+
+    func testRejectsMalformedHexWithoutRepairingInput() {
+        let valid = String(repeating: "ab", count: 20)
+        let malformed = [
+            "", String(valid.dropLast()), valid + "a", String(valid.dropLast(2)), valid + "ab",
+            String(repeating: "00", count: 32),
+            "g" + String(valid.dropFirst()), String(valid.dropLast()) + "g",
+            " " + valid, valid + "\n",
+            "+1" + String(valid.dropFirst(2)), "-1" + String(valid.dropFirst(2)),
+            String(repeating: "Ａ", count: 40)
+        ]
+        for prefix in ["", "0x", "0X"] {
+            for value in malformed {
+                XCTAssertFalse((prefix + value).isAddress, prefix + value)
+            }
+        }
+        for prefix in ["0x", "0X"] {
+            XCTAssertFalse((prefix + "0x" + valid).isAddress)
+            XCTAssertFalse((prefix + "0X" + valid).isAddress)
+        }
+    }
+
+    func testKeepsTRONValidationSeparateFromEVMHexValidation() {
+        let tronAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+        XCTAssertTrue(tronAddress.isTRXAddress())
+        XCTAssertFalse(tronAddress.isAddress)
+
+        let tronHex = "41" + String(repeating: "00", count: 20)
+        for prefix in ["", "0x", "0X"] {
+            XCTAssertTrue((prefix + tronHex).isEIP712TronAddress())
+            XCTAssertFalse((prefix + tronHex).isAddress)
+        }
+    }
+}
