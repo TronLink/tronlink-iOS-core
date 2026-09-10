@@ -38,10 +38,11 @@ public class TLWalletCore: NSObject {
 
         var newHash: Data = transaction.sha256T()
         if !dappChainId.isEmpty {
-            if let mainGateData = Data(hexString: dappChainId) {
-                newHash.append(mainGateData)
-                newHash = newHash.sha256T()
+            guard let mainGateData = Data(hexString: dappChainId), !mainGateData.isEmpty else {
+                return .failure(KeystoreError.failedToSignTransaction)
             }
+            newHash.append(mainGateData)
+            newHash = newHash.sha256T()
         }
         do {
             var data = try keyStore.signHash(newHash, account: account, password: password)
@@ -86,7 +87,10 @@ public class TLWalletCore: NSObject {
         }
 
         var newHash: Data = hash
-        if !dappChainId.isEmpty, let mainGateData = Data(hexString: dappChainId) {
+        if !dappChainId.isEmpty {
+            guard let mainGateData = Data(hexString: dappChainId), !mainGateData.isEmpty else {
+                return .failure(KeystoreError.failedToSignTransaction)
+            }
             newHash.append(mainGateData)
             newHash = newHash.sha256T()
         }

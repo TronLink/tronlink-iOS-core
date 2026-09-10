@@ -2,7 +2,8 @@
 import Foundation
 
 extension Data {
-    /// Initializes `Data` with a hex string representation.
+    /// Initializes `Data` from complete hex byte pairs, optionally prefixed with `0x`.
+    /// Returns nil for odd-length input or any non-ASCII-hex character.
     public init?(hexString: String) {
         let string: String
         if hexString.hasPrefix("0x") {
@@ -11,22 +12,18 @@ extension Data {
             string = hexString
         }
 
-        // Convert the string to bytes for better performance
-        guard let stringData = string.data(using: .ascii, allowLossyConversion: true) else {
+        let stringBytes = Array(string.utf8)
+        guard stringBytes.count % 2 == 0 else {
             return nil
         }
 
-        self.init(capacity: string.count / 2)
-        let stringBytes = Array(stringData)
+        self.init(capacity: stringBytes.count / 2)
         for i in stride(from: 0, to: stringBytes.count, by: 2) {
-            guard let high = Data.value(of: stringBytes[i]) else {
+            guard let high = Data.value(of: stringBytes[i]),
+                  let low = Data.value(of: stringBytes[i + 1]) else {
                 return nil
             }
-            if i < stringBytes.count - 1, let low = Data.value(of: stringBytes[i + 1]) {
-                append((high << 4) | low)
-            } else {
-                append(high)
-            }
+            append((high << 4) | low)
         }
     }
 

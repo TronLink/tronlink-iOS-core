@@ -136,8 +136,8 @@ public struct ABIv2Encoder {
         }
     }
 
-    // Keep malformed hex away from the shared legacy decoder, which accepts
-    // an invalid low nibble. Odd byte strings are padded on the left: 0x1 -> 01.
+    // Preserve this conversion API's left-padding of odd byte strings: 0x1 -> 01.
+    // The shared hex decoder requires complete byte pairs.
     private static func validatedHexData(_ value: String) -> Data? {
         var digits = value
         if digits.hasPrefix("0x") || digits.hasPrefix("0X") { digits.removeFirst(2) }

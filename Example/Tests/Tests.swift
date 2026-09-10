@@ -772,6 +772,44 @@ class Tests: XCTestCase {
         XCTAssertEqual(try Web3Utils.publicToAddressData(recoveredPublicKey), expectedAddress)
         XCTAssertEqual(try Web3Utils.hashECRecover(hash: digest, signature: signature).addressData,
                        expectedAddress)
+
+        for chainId in ["abc", "0xabc", "1g", "g1", "0x"] {
+            guard case .failure(.failedToSignTransaction) = TLWalletCore.signTranscation(
+                keyStore: store, transaction: serialized, password: password, address: walletAddress, chainId
+            ) else {
+                return XCTFail("Malformed chain ID must not produce a signature: \(chainId)")
+            }
+            let transaction = TronTransaction()
+            transaction.rawData = rawData
+            guard case .failure(.failedToSignTransaction) = TLWalletCore.signTranscation(
+                keyStore: store, transaction: transaction, password: password, address: walletAddress, chainId
+            ) else {
+                return XCTFail("Malformed chain ID must not sign a transaction: \(chainId)")
+            }
+            XCTAssertEqual(transaction.signatureArray.count, 0)
+        }
+
+        let chainBytes = Data(repeating: 0x11, count: 32)
+        let chainId = "0x" + chainBytes.hexString
+        let chainDigest = (digest + chainBytes).sha256T()
+        guard case .success(let chainSignature) = TLWalletCore.signTranscation(
+            keyStore: store, transaction: serialized, password: password, address: walletAddress, chainId
+        ) else {
+            return XCTFail("Valid chain ID should still sign serialized data")
+        }
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: chainDigest, signature: chainSignature).addressData,
+                       expectedAddress)
+        let chainTransaction = TronTransaction()
+        chainTransaction.rawData = rawData
+        guard case .success = TLWalletCore.signTranscation(
+            keyStore: store, transaction: chainTransaction, password: password, address: walletAddress, chainId
+        ) else {
+            return XCTFail("Valid chain ID should still sign a transaction")
+        }
+        XCTAssertEqual(chainTransaction.signatureArray.count, 1)
+        let objectSignature = try XCTUnwrap(chainTransaction.signatureArray.firstObject as? Data)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: chainDigest, signature: objectSignature).addressData,
+                       expectedAddress)
     }
 
     func testSignTransactionAddsOneSignaturePerSigner() throws {
@@ -1017,7 +1055,8 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
     func testMergedHexHelpersPreserveBothRequiredBehaviors() throws {
         XCTAssertEqual(Data([0x00, 0xff]).hex, "00ff")
         XCTAssertEqual("TRON".hex, "54524f4e")
-        XCTAssertEqual(Data.fromHex("0xabc"), Data([0xab, 0x0c]))
+        XCTAssertNil(Data.fromHex("0xabc"))
+        XCTAssertEqual(Data.fromHex("0x0abc"), Data([0x0a, 0xbc]))
         XCTAssertThrowsError(try "0x".dataFromHex())
     }
 
@@ -2762,5 +2801,59 @@ extension ABIv2RegressionTests {
         XCTAssertEqual(element.decodeReturnData(metadata)?["value"] as? String, "USDT")
         XCTAssertNil(element.decodeReturnData(metadata, allowLegacyBytes32: false))
         XCTAssertEqual(element.decodeReturnData(words([32, 4]) + metadata, allowLegacyBytes32: false)?["value"] as? String, "USDT")
+    }
+}
+
+
+final class HexDecodingRegressionTests: XCTestCase {
+    func testHexDecoderRejectsIncompleteAndInvalidBytePairs() {
+        let malformed = ["0", "0x1", "abc", "0xabc", "1g", "g1", "01g2", "012g",
+                         " a", "a ", "+1", "-1", "0x12\n", "aé", "Ａ１"]
+        for value in malformed {
+            XCTAssertNil(Data(hexString: value), value)
+            XCTAssertNil(Data.fromHex(value), value)
+        }
+    }
+
+    func testHexDecoderPreservesCompleteBytesAndEmptyPayloads() {
+        for prefix in ["", "0x"] {
+            XCTAssertEqual(Data(hexString: prefix), Data())
+            XCTAssertEqual(Data.fromHex(prefix), Data())
+            XCTAssertEqual(Data(hexString: prefix + "00aB10fF"), Data([0x00, 0xab, 0x10, 0xff]))
+            XCTAssertEqual(Data.fromHex(prefix + "00aB10fF"), Data([0x00, 0xab, 0x10, 0xff]))
+        }
+    }
+
+    func testAddressesRejectTruncatedAndMalformedHex() {
+        let leadingBytes = String(repeating: "11", count: 19)
+        let valid = leadingBytes + "ab"
+        let expected = Data(repeating: 0x11, count: 19) + Data([0xab])
+        let malformed = [String(valid.dropLast()), leadingBytes + "ag", leadingBytes + "ga",
+                         String(valid.dropLast(2)), valid + "00"]
+        for prefix in ["", "0x"] {
+            XCTAssertEqual(TLCore.Address(string: prefix + valid)?.data, expected)
+            XCTAssertTrue(TLCore.Web3Address(prefix + valid).isValid)
+            for value in malformed {
+                XCTAssertNil(TLCore.Address(string: prefix + value), prefix + value)
+                XCTAssertFalse(TLCore.Web3Address(prefix + value).isValid, prefix + value)
+            }
+        }
+    }
+
+    func testJSONHexFieldsRejectMalformedByteStrings() throws {
+        struct Payload: Decodable {
+            let value: Data
+            enum CodingKeys: String, CodingKey { case value }
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                value = try container.decodeHexString(forKey: .value)
+            }
+        }
+        for value in ["abc", "1g", "g1"] {
+            let json = try JSONSerialization.data(withJSONObject: ["value": value])
+            XCTAssertThrowsError(try JSONDecoder().decode(Payload.self, from: json))
+        }
+        let json = try JSONSerialization.data(withJSONObject: ["value": "00ab"])
+        XCTAssertEqual(try JSONDecoder().decode(Payload.self, from: json).value, Data([0x00, 0xab]))
     }
 }
