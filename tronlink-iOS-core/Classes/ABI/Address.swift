@@ -1,19 +1,20 @@
 
 import Foundation
 
-/// Ethereum address.
+/// Address bytes shared by EVM/TRON accounts and legacy ABI callers.
 public struct Address: Hashable, CustomStringConvertible {
-    /// Raw address bytes, length 20.
+    /// Raw bytes, preserved without normalization or format validation.
     public private(set) var data: Data
 
-    /// EIP55 representation of the address.
+    /// Legacy hex representation with EIP55-style casing; not proof of address validity.
     public let eip55String: String
     public let tronString: String = ""
-    /// Creates an address with `Data`.
+    /// Stores raw address bytes without validating their length or chain prefix.
     ///
-    /// - Precondition: data contains exactly 20 bytes
+    /// Account input must be validated for the intended chain before calling this
+    /// initializer. ABI encoding separately validates its supported representations,
+    /// including legacy TRON and zero-padded address data.
     public init(data: Data) {
-//        precondition(data.count == 20, "Address length should be 20 bytes")
         self.data = data
         eip55String = Address.computeEIP55String(for: data)
     }
