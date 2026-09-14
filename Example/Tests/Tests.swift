@@ -1,4 +1,5 @@
 import XCTest
+import GRPCClient
 @testable import TLCore
 
 private final class AddressMappingStoreStub: TRXAddressMappingStore {
@@ -3255,7 +3256,7 @@ final class StringAddressValidationTests: XCTestCase {
 
     func testRejectsMalformedHexWithoutRepairingInput() {
         let valid = String(repeating: "ab", count: 20)
-        let malformed = [
+        let malformed: [String] = [
             "", String(valid.dropLast()), valid + "a", String(valid.dropLast(2)), valid + "ab",
             String(repeating: "00", count: 32),
             "g" + String(valid.dropFirst()), String(valid.dropLast()) + "g",
@@ -3414,5 +3415,142 @@ final class Blake2sFinalBoundsTests: XCTestCase {
             }, -1)
             XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
         }
+    }
+}
+
+
+// Fixed wire-format fixtures exercise generated metadata independently of
+// encode/decode round trips, including TLCore's custom transaction class name.
+final class ProtobufUpgradeTests: XCTestCase {
+    func testRawTransactionWireBytesAndTxIDStayStable() throws {
+        let transfer = TransferContract()
+        transfer.ownerAddress = Data([0x41]) + Data(repeating: 1, count: 20)
+        transfer.toAddress = Data([0x41]) + Data(repeating: 2, count: 20)
+        transfer.amount = 7
+        let contract = Transaction_Contract()
+        contract.type = .transferContract
+        contract.parameter.typeURL = "type.googleapis.com/protocol.TransferContract"
+        contract.parameter.value = try XCTUnwrap(transfer.data())
+        let raw = Transaction_raw()
+        raw.refBlockBytes = Data([0x12, 0x34])
+        raw.refBlockHash = Data(repeating: 0x11, count: 8)
+        raw.expiration = 1234
+        raw.timestamp = 567
+        raw.contractArray = [contract]
+        let bytes = try XCTUnwrap(raw.data())
+        // Independently encoded from the protocol field numbers and varints.
+        XCTAssertEqual(bytes.hexString, "0a0212342208111111111111111140d2095a65080112610a2d747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e5472616e73666572436f6e747261637412300a154101010101010101010101010101010101010101011215410202020202020202020202020202020202020202180770b704")
+        XCTAssertEqual(bytes.sha256T().hexString, "487872e3c0f728e1bf9a178ba52eee3ff9ad45e686a1273e8194e18998ad95a2")
+    }
+
+    func testZksnarkRetainsWireFormatAndTronTransactionType() throws {
+        let request = ZksnarkRequest()
+        request.transaction = TronTransaction()
+        request.sighash = Data([1, 2])
+        request.valueBalance = 7
+        request.txId = "ab"
+        let fixture = Data([0x0a, 0x00, 0x12, 0x02, 1, 2, 0x18, 7, 0x22, 2, 0x61, 0x62])
+        XCTAssertEqual(request.data(), fixture)
+        let decoded = try ZksnarkRequest.parse(from: fixture)
+        XCTAssertTrue(decoded.hasTransaction)
+        XCTAssertTrue(decoded.transaction.isKind(of: TronTransaction.self))
+        XCTAssertEqual(decoded.sighash, Data([1, 2]))
+        XCTAssertEqual(decoded.valueBalance, 7)
+        XCTAssertEqual(decoded.txId, "ab")
+
+        let unknownEnum = Data([0x08, 0x7b])
+        XCTAssertEqual(try ZksnarkResponse.parse(from: unknownEnum).data(), unknownEnum)
+    }
+
+    func testHTTPRuleRetainsOneofAndNestedBindingWireFormat() throws {
+        let rule = GAPIHttpRule()
+        rule.get = "/v1"
+        rule.body = "*"
+        let binding = GAPIHttpRule()
+        binding.post = "/v2"
+        rule.additionalBindingsArray = [binding]
+        let fixture = Data([0x12, 3, 0x2f, 0x76, 0x31, 0x3a, 1, 0x2a,
+                            0x5a, 5, 0x22, 3, 0x2f, 0x76, 0x32])
+        XCTAssertEqual(rule.data(), fixture)
+        let decoded = try GAPIHttpRule.parse(from: fixture)
+        XCTAssertEqual(decoded.get, "/v1")
+        XCTAssertEqual(decoded.body, "*")
+        let decodedBinding = try XCTUnwrap(decoded.additionalBindingsArray.firstObject as? GAPIHttpRule)
+        XCTAssertEqual(decodedBinding.post, "/v2")
+    }
+
+    func testDescriptorLegacyWeakAccessorsRetainFieldAndPresence() throws {
+        let options = GPBFieldOptions()
+        XCTAssertFalse(options.hasWeak)
+        options.weak = true
+        XCTAssertTrue(options.hasWeak)
+        XCTAssertTrue(options.weak_p)
+        XCTAssertEqual(options.data(), Data([0x50, 1]))
+        let decoded = try GPBFieldOptions.parse(from: Data([0x50, 1]))
+        XCTAssertTrue(decoded.weak)
+        XCTAssertTrue(decoded.hasWeak)
+        decoded.hasWeak = false
+        XCTAssertFalse(decoded.hasWeak_p)
+        XCTAssertEqual(decoded.data(), Data())
+        XCTAssertEqual(GPBFieldOptions_FieldNumber.weak.rawValue, 10)
+    }
+
+    func testHTTPAnnotationRetainsExtensionNumberAndRegistry() throws {
+        let rule = GAPIHttpRule()
+        rule.get = "/v1"
+        let extensionDescriptor = GAPIAnnotationsRoot.http()
+        let options = GPBMethodOptions()
+        options.setExtension(extensionDescriptor, value: rule)
+        // Field 72295728, length-delimited HttpRule with get = "/v1".
+        let fixture = Data([0x82, 0xd3, 0xe4, 0x93, 0x02, 5, 0x12, 3, 0x2f, 0x76, 0x31])
+        XCTAssertEqual(options.data(), fixture)
+        let decoded = try GPBMethodOptions.parse(from: fixture, extensionRegistry: GAPIAnnotationsRoot.extensionRegistry())
+        let decodedRule = try XCTUnwrap(decoded.getExtension(extensionDescriptor) as? GAPIHttpRule)
+        XCTAssertEqual(decodedRule.get, "/v1")
+    }
+}
+
+
+// Opt-in loopback integration: run Tools/grpc_compression_fixture.py and set
+// TLCORE_GRPC_COMPRESSION_FIXTURE=1 in the test runner environment.
+final class GRPCCompressionUpgradeTests: XCTestCase {
+    private func requireFixture() throws {
+        guard ProcessInfo.processInfo.environment["TLCORE_GRPC_COMPRESSION_FIXTURE"] == "1" else {
+            throw XCTSkip("Requires the local compression fixture; see Protos/legacy/README.md")
+        }
+    }
+
+    func testCompressedResponseBelowLimitParses() throws {
+        try requireFixture()
+        let host = "127.0.0.1:19091"
+        GRPCCall.useInsecureConnections(forHost: host)
+        GRPCCall.setResponseSizeLimit(64 * 1024, forHost: host)
+        let done = expectation(description: "compressed valid response")
+        let wallet = TWallet(host: host)
+        wallet.getAccountWithRequest(TronAccount()) { response, error in
+            XCTAssertNil(error)
+            XCTAssertNotNil(response)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 15)
+    }
+
+    func testCompressedResponseAboveLimitReturnsResourceExhausted() throws {
+        try requireFixture()
+        let host = "127.0.0.1:19092"
+        GRPCCall.useInsecureConnections(forHost: host)
+        GRPCCall.setResponseSizeLimit(64 * 1024, forHost: host)
+        let done = expectation(description: "oversized compressed response rejected")
+        let wallet = TWallet(host: host)
+        wallet.getAccountWithRequest(TronAccount()) { response, error in
+            XCTAssertNil(response)
+            let grpcError = error as NSError?
+            XCTAssertEqual(grpcError?.domain, kGRPCErrorDomain)
+            XCTAssertEqual(grpcError?.code, Int(GRPCErrorCode.resourceExhausted.rawValue))
+            // Distinguish the bounded decompressor from a check after full inflation.
+            XCTAssertTrue(grpcError?.localizedDescription.contains("Decompressed message larger than max") == true)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 15)
     }
 }

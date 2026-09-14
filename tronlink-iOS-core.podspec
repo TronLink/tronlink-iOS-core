@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'tronlink-iOS-core'
-  s.version          = '1.0.7'
+  s.version          = '1.0.8'
   s.summary          = 'tronlink-iOS-core is repo of TronLink'
   s.module_name      = 'TLCore'
 
@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.license          = { :type => 'Apache', :file => 'LICENSE' }
   s.author           = 'tronlinkdev'
   s.source           = { :git => 'https://github.com/TronLink/tronlink-iOS-core.git', :tag => s.version.to_s }
-  s.platform = :ios, '13.0'
+  s.platform = :ios, '15.1'
   s.swift_versions = '4.2'
   s.framework = 'Security'
 
@@ -47,17 +47,16 @@ Pod::Spec.new do |s|
     'SWIFT_OPTIMIZATION_LEVEL[config=Debug]' => '-Owholemodule'
   }
 
-  s.dependency 'gRPC', '1.68.1'
-  s.dependency 'Protobuf', '3.29.6'
-  s.dependency 'gRPC-Core', '1.68.1'
-  s.dependency 'gRPC-ProtoRPC', '1.68.1'
-  s.dependency 'gRPC-RxLibrary', '1.68.1'
+  s.dependency 'gRPC', '1.83.1'
+  s.dependency 'Protobuf', '5.36.1'
+  s.dependency 'gRPC-Core', '1.83.1'
+  s.dependency 'gRPC-ProtoRPC', '1.83.1'
+  s.dependency 'gRPC-RxLibrary', '1.83.1'
    
    s.dependency 'FMDB', '2.7.5'
 
   s.dependency 'BigInt', '3.1.0'
   s.dependency 'CryptoSwift', '1.8.4'
-  s.dependency 'SwiftProtobuf', '1.38.1'
 
   s.requires_arc = [
     'tronlink-iOS-core/Classes/gRPC/**/*.pbrpc.m',
