@@ -24,15 +24,16 @@ import BigInt
  11894              2058
  ```
  */
+/// One signing identity. Create a new instance to use a different private key.
 public class PrivateKey {
-    /// Private key data
-    public var privateKey: Data
+    /// Private key data, fixed for the lifetime of this instance.
+    public let privateKey: Data
     
-    /// Singleton that generates public key from private key
-    public lazy var publicKey: Data = try! SECP256K1.privateToPublic(privateKey: privateKey)
+    /// Cached public key derived from this instance's private key.
+    public private(set) lazy var publicKey: Data = try! SECP256K1.privateToPublic(privateKey: privateKey)
     
-    /// Singleton that generates address from public key
-    public lazy var address: Web3Address = try! Web3Utils.publicToAddress(publicKey)
+    /// Cached address derived from this instance's public key.
+    public private(set) lazy var address: Web3Address = try! Web3Utils.publicToAddress(publicKey)
     
     /// Generates random private key. All generated keys are verified
     public init() {

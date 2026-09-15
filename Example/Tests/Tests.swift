@@ -3886,3 +3886,68 @@ final class DataSliceInputRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class PrivateKeyIdentityRegressionTests: XCTestCase {
+    private let firstKey = Data(repeating: 0, count: 31) + Data([1])
+    private let secondKey = Data(repeating: 0, count: 31) + Data([2])
+    private let hash = Data(repeating: 0x11, count: 32)
+    private let firstAddress = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+    private let firstSignature = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
+
+    func testChangingInputDataCannotChangeAnExistingSigningIdentity() throws {
+        var input = firstKey
+        let key = PrivateKey(input)
+        input[input.index(before: input.endIndex)] = 2
+
+        XCTAssertEqual(input, secondKey)
+        XCTAssertEqual(key.privateKey, firstKey)
+        XCTAssertEqual(key.address.address, firstAddress)
+        XCTAssertEqual(try key.sign(hash: hash).data.hex, firstSignature)
+    }
+
+    func testSwitchingAccountsUsesIndependentObjectsWithConsistentIdentities() throws {
+        var selected = PrivateKey(firstKey)
+        let previous = selected
+        let previousPublicKey = previous.publicKey
+        let previousAddress = previous.address
+
+        // CORE-204: changing privateKey/publicKey/address directly is no longer
+        // permitted by the public API. Replace the selected object instead.
+        selected = PrivateKey(secondKey)
+        let expectedPublicKey = try Web3Utils.privateToPublic(secondKey)
+        let expectedAddress = try Web3Utils.publicToAddress(expectedPublicKey)
+        XCTAssertNotEqual(previousAddress, expectedAddress)
+
+        let selectedSignature = try selected.sign(hash: hash).data
+        XCTAssertEqual(selected.publicKey, expectedPublicKey)
+        XCTAssertEqual(selected.address, expectedAddress)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: hash, signature: selectedSignature), selected.address)
+
+        XCTAssertEqual(previous.publicKey, previousPublicKey)
+        XCTAssertEqual(previous.address, previousAddress)
+        XCTAssertEqual(previous.address.address, firstAddress)
+        let previousSignature = try previous.sign(hash: hash).data
+        XCTAssertEqual(previousSignature.hex, firstSignature)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: hash, signature: previousSignature), previous.address)
+    }
+
+    func testMutatingReturnedValuesCannotOverwriteCachedIdentity() throws {
+        let key = PrivateKey(firstKey)
+        let expectedPublicKey = key.publicKey
+        var publicKeyCopy = key.publicKey
+        publicKeyCopy[publicKeyCopy.startIndex] = 0
+        var addressCopy = key.address
+        addressCopy.type = .contractDeployment
+        var privateKeyCopy = key.privateKey
+        privateKeyCopy[privateKeyCopy.index(before: privateKeyCopy.endIndex)] = 2
+
+        XCTAssertNotEqual(publicKeyCopy, key.publicKey)
+        XCTAssertNotEqual(addressCopy, key.address)
+        XCTAssertNotEqual(privateKeyCopy, key.privateKey)
+        XCTAssertEqual(key.publicKey, expectedPublicKey)
+        XCTAssertEqual(key.address.address, firstAddress)
+        XCTAssertEqual(key.privateKey, firstKey)
+        XCTAssertEqual(try key.sign(hash: hash).data.hex, firstSignature)
+    }
+}
