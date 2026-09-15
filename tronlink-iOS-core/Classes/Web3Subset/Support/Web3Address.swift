@@ -83,19 +83,22 @@ public struct Web3Address {
         }
     }
 
-    /// Web3Address string converted to checksum
-    /// returns 0x for contractDeployment address
+    /// Checksummed string for a valid address, or the stored input if invalid.
+    /// Invalid input is not repaired; use isValid/check() before using it as an address.
+    /// Returns 0x for contractDeployment addresses.
     public var address: String {
         switch type {
         case .normal:
-            return Web3Address.toChecksumAddress(_address)!
+            return Web3Address.toChecksumAddress(_address) ?? _address
         case .contractDeployment:
             return "0x"
         }
     }
     
-    /// Converts address to checksum address
+    /// Converts exactly 20 bytes of ASCII hex to a checksum address.
+    /// Accepts an optional 0x/0X prefix; returns nil for invalid input.
     public static func toChecksumAddress(_ addr: String) -> String? {
+        guard addr.isAddress else { return nil }
         let address = addr.lowercased().withoutHex
         guard let hash = address.data(using: .ascii)?.keccak256().hex else { return nil }
         var ret = "0x"
@@ -122,8 +125,10 @@ public struct Web3Address {
     public init(_ addressString: String, type: AddressType = .normal) {
         switch type {
         case .normal:
-            // check for checksum
-            _address = addressString.withHex
+            // Normalize only the prefix; retain the caller's address letter casing.
+            _address = addressString.hasPrefix("0X")
+                ? "0x" + String(addressString.dropFirst(2))
+                : addressString.withHex
             self.type = .normal
         case .contractDeployment:
             _address = "0x"

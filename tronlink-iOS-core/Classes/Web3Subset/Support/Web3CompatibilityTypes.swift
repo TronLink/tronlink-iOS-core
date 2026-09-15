@@ -30,11 +30,24 @@ public enum Web3Error: Error {
 extension Web3Address: Decodable, Encodable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        self.init(try container.decode(String.self))
+        let value = try container.decode(String.self)
+        // Preserve the legacy empty/deployment wire value without making it a
+        // valid normal address or inferring a different AddressType.
+        guard value == "0x" || value.isAddress else {
+            throw DecodingError.dataCorruptedError(
+                in: container, debugDescription: "Expected a 20-byte hex address or the legacy 0x sentinel"
+            )
+        }
+        self.init(value)
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
+        guard isValid || _address == "0x" else {
+            throw EncodingError.invalidValue(self, EncodingError.Context(
+                codingPath: encoder.codingPath, debugDescription: "Cannot encode an invalid Web3Address"
+            ))
+        }
         try container.encode(address.lowercased())
     }
 }

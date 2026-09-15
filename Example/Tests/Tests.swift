@@ -3554,3 +3554,94 @@ final class GRPCCompressionUpgradeTests: XCTestCase {
         wait(for: [done], timeout: 15)
     }
 }
+
+
+final class Web3AddressChecksumSafetyTests: XCTestCase {
+    func testValidAddressesKeepChecksumBytesAndJSONRepresentation() throws {
+        let checksummed = [
+            "0x52908400098527886E0F7030069857D2E4169EE7",
+            "0xde709f2102306220921060314715629080e2fb77",
+            "0x0000000000000000000000000000000000000000"
+        ]
+        for expected in checksummed {
+            let body = String(expected.dropFirst(2))
+            for prefix in ["", "0x", "0X"] {
+                for digits in [body, body.lowercased(), body.uppercased()] {
+                    let input = prefix + digits
+                    let address = TLCore.Web3Address(input)
+                    XCTAssertTrue(address.isValid, input)
+                    XCTAssertNoThrow(try address.check())
+                    XCTAssertEqual(TLCore.Web3Address.toChecksumAddress(input), expected)
+                    XCTAssertEqual(address.address, expected)
+                    XCTAssertEqual(address.addressData, try XCTUnwrap(Data(hexString: body)))
+                    let encoded = try JSONEncoder().encode(address)
+                    XCTAssertEqual(try JSONDecoder().decode(String.self, from: encoded), expected.lowercased())
+                    let source = try JSONEncoder().encode(input)
+                    XCTAssertEqual(try JSONDecoder().decode(TLCore.Web3Address.self, from: source), address)
+                    XCTAssertEqual(Set([address, TLCore.Web3Address(expected)]).count, 1)
+                }
+            }
+        }
+    }
+
+    func testInvalidChecksumInputAndJSONDecodingReturnFailure() throws {
+        let malformed = ["", "0X", "0x0x" + String(repeating: "a", count: 40),
+                         String(repeating: "g", count: 40), String(repeating: "é", count: 20),
+                         String(repeating: "Ａ", count: 40), "41" + String(repeating: "00", count: 20),
+                         " " + String(repeating: "a", count: 39)]
+            + [1, 39, 41, 64, 65, 4096].map { "0x" + String(repeating: "a", count: $0) }
+        for input in malformed {
+            XCTAssertNil(TLCore.Web3Address.toChecksumAddress(input), input)
+            let json = try JSONEncoder().encode(input)
+            XCTAssertThrowsError(try JSONDecoder().decode(TLCore.Web3Address.self, from: json), input)
+        }
+    }
+
+    func testInvalidObjectsCanBeDisplayedAndComparedButCannotBeEncoded() throws {
+        for input in ["0x" + String(repeating: "a", count: 65),
+                      "0x" + String(repeating: "é", count: 20),
+                      "0x" + String(repeating: "g", count: 40)] {
+            let address = TLCore.Web3Address(input)
+            XCTAssertFalse(address.isValid)
+            XCTAssertThrowsError(try address.check())
+            XCTAssertEqual(address.address, input)
+            XCTAssertEqual(String(describing: address), input)
+            XCTAssertEqual(address, TLCore.Web3Address(input))
+            XCTAssertNotEqual(address, TLCore.Web3Address(input + "a"))
+            XCTAssertEqual(Set([address, TLCore.Web3Address(input + "a")]).count, 2)
+            XCTAssertThrowsError(try JSONEncoder().encode(address))
+        }
+        let oversizedData = Data(repeating: 0xab, count: 33)
+        let address = TLCore.Web3Address(oversizedData)
+        XCTAssertEqual(address.address, "0x" + oversizedData.hexString)
+        XCTAssertThrowsError(try JSONEncoder().encode(address))
+    }
+
+    func testLegacyEmptyAndDeploymentWireValuesRemainCompatible() throws {
+        for address in [TLCore.Web3Address("0x"), TLCore.Web3Address.contractDeployment] {
+            XCTAssertEqual(address.address, "0x")
+            XCTAssertEqual(address.addressData, Data())
+            let json = try JSONEncoder().encode(address)
+            XCTAssertEqual(try JSONDecoder().decode(String.self, from: json), "0x")
+            let decoded = try JSONDecoder().decode(TLCore.Web3Address.self, from: json)
+            XCTAssertEqual(decoded.address, "0x")
+            // The legacy decoder did not infer deployment type from the wire value.
+            XCTAssertEqual(decoded.type, .normal)
+            XCTAssertFalse(decoded.isValid)
+            XCTAssertThrowsError(try decoded.check())
+        }
+        XCTAssertTrue(TLCore.Web3Address.contractDeployment.isValid)
+        XCTAssertNil(TLCore.Web3Address.toChecksumAddress("0x"))
+    }
+
+    func testABIAddressDecodingKeepsTheMainAppAddressBytes() throws {
+        let raw = try XCTUnwrap(Data(hexString: "52908400098527886e0f7030069857d2e4169ee7"))
+        let word = Data(repeating: 0, count: 12) + raw
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.address], data: word))
+        let address = try XCTUnwrap(decoded.first as? TLCore.Web3Address)
+        XCTAssertEqual(address.addressData, raw)
+        XCTAssertEqual(address.address, "0x52908400098527886E0F7030069857D2E4169EE7")
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: address as AnyObject), word)
+        XCTAssertEqual("41" + address.addressData.hexString, "4152908400098527886e0f7030069857d2e4169ee7")
+    }
+}
