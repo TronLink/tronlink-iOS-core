@@ -72,7 +72,11 @@ int hdnode_public_ckd_cp(const ecdsa_curve *curve, const curve_point *parent, co
 
 int hdnode_public_ckd(HDNode *inout, uint32_t i);
 
-void hdnode_public_ckd_address_optimized(const curve_point *pub, const uint8_t *chain_code, uint32_t i, uint32_t version, HasherType hasher_pubkey, HasherType hasher_base58, char *addr, int addrsize, int addrformat);
+// Derives an address from a valid secp256k1 parent point and 32-byte chain code.
+// Only non-hardened indices are supported. Returns 1 on success, 0 on failure
+// (including insufficient output space). On failure, addr is an empty C string
+// when addr != NULL and addrsize > 0. addrsize includes the terminating NUL.
+int hdnode_public_ckd_address_optimized(const curve_point *pub, const uint8_t *chain_code, uint32_t i, uint32_t version, HasherType hasher_pubkey, HasherType hasher_base58, char *addr, int addrsize, int addrformat);
 
 int hdnode_private_ckd_cached(HDNode *inout, const uint32_t *i, size_t i_count, uint32_t *fingerprint);
 

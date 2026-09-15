@@ -441,23 +441,43 @@ int hdnode_public_ckd(HDNode *inout, uint32_t i)
 	return 1;
 }
 
-void hdnode_public_ckd_address_optimized(const curve_point *pub, const uint8_t *chain_code, uint32_t i, uint32_t version, HasherType hasher_pubkey, HasherType hasher_base58, char *addr, int addrsize, int addrformat)
+int hdnode_public_ckd_address_optimized(const curve_point *pub, const uint8_t *chain_code, uint32_t i, uint32_t version, HasherType hasher_pubkey, HasherType hasher_base58, char *addr, int addrsize, int addrformat)
 {
+	if (addr == NULL || addrsize <= 0) {
+		return 0;
+	}
+	addr[0] = '\0';
+	if (pub == NULL || chain_code == NULL) {
+		return 0;
+	}
+
 	uint8_t child_pubkey[33];
 	curve_point b;
 
-	hdnode_public_ckd_cp(&secp256k1, pub, chain_code, i, &b, NULL);
+	if (!hdnode_public_ckd_cp(&secp256k1, pub, chain_code, i, &b, NULL)) {
+		return 0;
+	}
 	child_pubkey[0] = 0x02 | (b.y.val[0] & 0x01);
 	bn_write_be(&b.x, child_pubkey + 1);
 
+	uint8_t raw[MAX_ADDR_RAW_SIZE];
 	switch (addrformat) {
 		case 1: // Segwit-in-P2SH
-			ecdsa_get_address_segwit_p2sh(child_pubkey, version, hasher_pubkey, hasher_base58, addr, addrsize);
+			ecdsa_get_address_segwit_p2sh_raw(child_pubkey, version, hasher_pubkey, raw);
 			break;
 		default: // normal address
-			ecdsa_get_address(child_pubkey, version, hasher_pubkey, hasher_base58, addr, addrsize);
+			ecdsa_get_address_raw(child_pubkey, version, hasher_pubkey, raw);
 			break;
 	}
+	int result = base58_encode_check(raw, 20 + address_prefix_bytes_len(version), hasher_base58, addr, addrsize);
+	memzero(raw, sizeof(raw));
+	memzero(child_pubkey, sizeof(child_pubkey));
+	memzero(&b, sizeof(b));
+	if (result == 0) {
+		addr[0] = '\0';
+		return 0;
+	}
+	return 1;
 }
 
 // The parent nodes used to be memoized in a file-scope array of HDNodes. That cache

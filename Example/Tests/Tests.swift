@@ -3951,3 +3951,130 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
         XCTAssertEqual(try key.sign(hash: hash).data.hex, firstSignature)
     }
 }
+
+
+final class PublicChildAddressDerivationRegressionTests: XCTestCase {
+    private func makeParent() throws -> (node: HDNode, point: curve_point, chainCode: [UInt8]) {
+        let seed = (0 ..< 16).map { UInt8($0) } // BIP-32 public test vector seed.
+        var node = HDNode()
+        let created = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), "secp256k1", &node)
+        }
+        node = try XCTUnwrap(created == 1 ? node : nil)
+        hdnode_fill_public_key(&node)
+        let publicKey = withUnsafeBytes(of: &node.public_key) { Array($0) }
+        let chainCode = withUnsafeBytes(of: &node.chain_code) { Array($0) }
+        var point = curve_point()
+        var curve = secp256k1
+        let parsed = publicKey.withUnsafeBufferPointer {
+            ecdsa_read_pubkey(&curve, $0.baseAddress, &point)
+        }
+        return (node, try XCTUnwrap(parsed == 1 ? point : nil), chainCode)
+    }
+
+    private func derive(point: curve_point, chainCode: [UInt8], index: UInt32,
+                        version: UInt32 = 0, format: Int32 = 0, capacity: Int32 = 64)
+        -> (status: Int32, output: [CChar]) {
+        var point = point
+        // The final byte is a canary outside the advertised output capacity.
+        var output = [CChar](repeating: 0x58, count: 65)
+        let status = output.withUnsafeMutableBufferPointer { address in
+            chainCode.withUnsafeBufferPointer { chain in
+                hdnode_public_ckd_address_optimized(&point, chain.baseAddress, index, version,
+                    HASHER_SHA2_RIPEMD, HASHER_SHA2D, address.baseAddress, capacity, format)
+            }
+        }
+        return (status, output)
+    }
+
+    private func addressString(_ bytes: [CChar]) throws -> String {
+        let end = try XCTUnwrap(bytes.firstIndex(of: 0))
+        return try XCTUnwrap(String(bytes: bytes[..<end].map { UInt8(bitPattern: $0) }, encoding: .utf8))
+    }
+
+    func testHardenedPublicDerivationFailsWithAnEmptyAddress() throws {
+        let parent = try makeParent()
+        for index: UInt32 in [0x80000000, 0x80000001, 0xffffffff] {
+            for format: Int32 in [0, 1, 2] {
+                let result = derive(point: parent.point, chainCode: parent.chainCode,
+                                    index: index, format: format)
+                XCTAssertEqual(result.status, 0)
+                XCTAssertEqual(try addressString(result.output), "")
+                XCTAssertEqual(Array(result.output.dropFirst()), [CChar](repeating: 0x58, count: 64))
+            }
+        }
+    }
+
+    func testNonHardenedAddressesMatchOrdinaryPublicAndPrivateDerivation() throws {
+        let parent = try makeParent()
+        for index: UInt32 in [0, 1, 0x7fffffff] {
+            var publicChild = parent.node
+            let publicResult = hdnode_public_ckd(&publicChild, index)
+            publicChild = try XCTUnwrap(publicResult == 1 ? publicChild : nil)
+            let childPublicKey = withUnsafeBytes(of: &publicChild.public_key) { Array($0) }
+
+            var privateChild = parent.node
+            let privateResult = hdnode_private_ckd(&privateChild, index)
+            privateChild = try XCTUnwrap(privateResult == 1 ? privateChild : nil)
+            hdnode_fill_public_key(&privateChild)
+            XCTAssertEqual(withUnsafeBytes(of: &privateChild.public_key) { Array($0) }, childPublicKey)
+
+            for version: UInt32 in [0, 5, 0x12345678] {
+                for format: Int32 in [0, 1, 2] {
+                    var expected = [CChar](repeating: 0, count: 64)
+                    expected.withUnsafeMutableBufferPointer { address in
+                        childPublicKey.withUnsafeBufferPointer { key in
+                            if format == 1 {
+                                ecdsa_get_address_segwit_p2sh(key.baseAddress, version,
+                                    HASHER_SHA2_RIPEMD, HASHER_SHA2D, address.baseAddress, 64)
+                            } else {
+                                ecdsa_get_address(key.baseAddress, version,
+                                    HASHER_SHA2_RIPEMD, HASHER_SHA2D, address.baseAddress, 64)
+                            }
+                        }
+                    }
+                    let result = derive(point: parent.point, chainCode: parent.chainCode,
+                                        index: index, version: version, format: format)
+                    XCTAssertEqual(result.status, 1)
+                    let actual = try addressString(result.output)
+                    XCTAssertFalse(actual.isEmpty)
+                    XCTAssertEqual(actual, try addressString(expected))
+                    XCTAssertEqual(result.output.last, CChar(0x58))
+                }
+            }
+        }
+    }
+
+    func testOutputCapacityFailuresDoNotLeaveAnAddressOrOverwriteTheBuffer() throws {
+        let parent = try makeParent()
+        for format: Int32 in [0, 1] {
+            let success = derive(point: parent.point, chainCode: parent.chainCode, index: 1, format: format)
+            XCTAssertEqual(success.status, 1)
+            let length = try addressString(success.output).utf8.count
+            for capacity in [Int32(1), Int32(length)] {
+                let result = derive(point: parent.point, chainCode: parent.chainCode,
+                                    index: 1, format: format, capacity: capacity)
+                XCTAssertEqual(result.status, 0)
+                XCTAssertEqual(result.output.first, 0)
+                XCTAssertEqual(Array(result.output.dropFirst()), [CChar](repeating: 0x58, count: 64))
+            }
+            let exact = derive(point: parent.point, chainCode: parent.chainCode,
+                               index: 1, format: format, capacity: Int32(length + 1))
+            XCTAssertEqual(exact.status, 1)
+            XCTAssertEqual(try addressString(exact.output), try addressString(success.output))
+            XCTAssertEqual(Array(exact.output.dropFirst(length + 1)),
+                           [CChar](repeating: 0x58, count: 65 - length - 1))
+        }
+        for capacity: Int32 in [0, -1] {
+            let result = derive(point: parent.point, chainCode: parent.chainCode, index: 1, capacity: capacity)
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(result.output, [CChar](repeating: 0x58, count: 65))
+        }
+        var point = parent.point
+        let noOutput = parent.chainCode.withUnsafeBufferPointer { chain in
+            hdnode_public_ckd_address_optimized(&point, chain.baseAddress, 1, 0,
+                HASHER_SHA2_RIPEMD, HASHER_SHA2D, nil, 64, 0)
+        }
+        XCTAssertEqual(noOutput, 0)
+    }
+}
