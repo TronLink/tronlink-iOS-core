@@ -619,6 +619,10 @@ void bn_inverse(bignum256 *x, const bignum256 *prime)
 	// reduce x modulo prime.  This is necessary as it has to fit in 8 limbs.
 	bn_fast_mod(x, prime);
 	bn_mod(x, prime);
+	// Zero has no inverse. Leave it zero; callers must reject this input.
+	if (bn_is_zero(x)) {
+		return;
+	}
 	// convert x and prime to 8x32 bit limb form
 	temp32 = prime->val[0];
 	for (i = 0; i < 8; i++) {
@@ -674,10 +678,8 @@ void bn_inverse(bignum256 *x, const bignum256 *prime)
 		// adjust length of even.
 		while (even->a[even->len1 - 1] == 0) {
 			even->len1--;
-			// if input was 0, return.
-			// This simple check prevents crashing with stack underflow
-			// or worse undesired behaviour for illegal input.
-			if (even->len1 < 0)
+			// Stop before the next loop condition could read a[-1].
+			if (even->len1 <= 0)
 				return;
 		}
 

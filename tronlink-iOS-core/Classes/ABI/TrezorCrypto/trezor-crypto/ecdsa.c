@@ -1065,8 +1065,16 @@ int ecdsa_recover_pub_from_sig (const ecdsa_curve *curve, uint8_t *pub_key, cons
 	scalar_multiply(curve, &e, &cp2);
 	// cp := (s * k - digest) * G = (r*priv) * G = r * Pub
 	point_add(curve, &cp2, &cp);
+	// A cancelling signature has no recoverable public key. Reject it before
+	// point_multiply can send an infinity point into Jacobian inversion.
+	if (point_is_infinity(&cp)) {
+		return 1;
+	}
 	// cp := r^{-1} * r * Pub = Pub
 	point_multiply(curve, &r, &cp, &cp);
+	if (!ecdsa_validate_pubkey(curve, &cp)) {
+		return 1;
+	}
 	pub_key[0] = 0x04;
 	bn_write_be(&cp.x, pub_key + 1);
 	bn_write_be(&cp.y, pub_key + 33);

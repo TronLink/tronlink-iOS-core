@@ -488,3 +488,119 @@ final class Secp256k1BackendTests: XCTestCase {
         XCTAssertNil(firstFailure, firstFailure ?? "")
     }
 }
+
+
+final class Secp256k1RecoverySafetyTests: XCTestCase {
+    private let generatorX = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    private let one = Data(repeating: 0, count: 31) + Data([1])
+
+    func testCancellingSignatureIsRejectedBeforeWritingAPublicKey() throws {
+        // R = G and s = digest, so s*R - digest*G is infinity.
+        // Both scalars are nonzero and in range; this exercises CORE-102,
+        // rather than the existing length or zero-scalar rejection.
+        let r = try XCTUnwrap(Data.fromHex(generatorX))
+        for hash in [one, Data(repeating: 0x11, count: 32)] {
+            let signatureBytes = Array(r + hash)
+            let hashBytes = Array(hash)
+            var curve = secp256k1
+            var output = [UInt8](repeating: 0xa5, count: 65)
+            let result = output.withUnsafeMutableBufferPointer { publicKey in
+                signatureBytes.withUnsafeBufferPointer { signature in
+                    hashBytes.withUnsafeBufferPointer { digest in
+                        ecdsa_recover_pub_from_sig(&curve, publicKey.baseAddress!,
+                                                   signature.baseAddress!, digest.baseAddress!, 0)
+                    }
+                }
+            }
+            XCTAssertEqual(result, 1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 65))
+        }
+    }
+
+    func testCancellingSignatureReturnsTheExistingPublicRecoveryError() throws {
+        let r = try XCTUnwrap(Data.fromHex(generatorX))
+        for hash in [one, Data(repeating: 0x11, count: 32)] {
+            let compact = r + hash
+            for compressed in [false, true] {
+                XCTAssertTrue(EthereumCrypto.recoverPublicKey(
+                    hash: hash, signature: compact, recoveryID: 0, compressed: compressed
+                ).isEmpty)
+            }
+            for recoveryID: UInt8 in [0, 27] {
+                let signature = compact + Data([recoveryID])
+                XCTAssertThrowsError(try TLCore.Web3Utils.hashECRecover(hash: hash, signature: signature)) {
+                    guard case SECP256DataError.cannotRecoverPublicKey = $0 else {
+                        return XCTFail("Unexpected recovery error: \($0)")
+                    }
+                }
+                XCTAssertThrowsError(try TLCore.Web3Utils.getAddressFromSignature(hash, signature: signature.hex)) {
+                    guard case SECP256DataError.cannotRecoverPublicKey = $0 else {
+                        return XCTFail("Unexpected recovery error: \($0)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testValidRecoveryPreservesPublicKeysAddressesAndSignatureForms() throws {
+        let r = try XCTUnwrap(Data.fromHex(generatorX))
+        let uncompressed = try XCTUnwrap(Data.fromHex("04" + generatorX
+            + "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"))
+        let compressed = Data([0x02]) + r
+        // Public test key d=1 and nonce k=1: s = digest + r (mod n).
+        // The equivalent high-S form uses n-s and the opposite recovery parity.
+        let lowS = try XCTUnwrap(Data.fromHex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81799"))
+        let highS = try XCTUnwrap(Data.fromHex("8641998106234453aa5f9d6a3178f4f7b812e00b817a776265dfdd31b93e29a8"))
+        let vectors: [(hash: Data, s: Data, recoveryID: UInt8)] = [
+            (one, lowS, 0), (one, highS, 1), (Data(repeating: 0, count: 32), r, 0)
+        ]
+        let expectedAddress = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+        for vector in vectors {
+            let compact = r + vector.s
+            XCTAssertEqual(EthereumCrypto.recoverPublicKey(
+                hash: vector.hash, signature: compact, recoveryID: vector.recoveryID, compressed: false
+            ), uncompressed)
+            XCTAssertEqual(EthereumCrypto.recoverPublicKey(
+                hash: vector.hash, signature: compact, recoveryID: vector.recoveryID, compressed: true
+            ), compressed)
+            for recoveryID in [vector.recoveryID, vector.recoveryID + 27] {
+                let signature = compact + Data([recoveryID])
+                let address = try TLCore.Web3Utils.hashECRecover(hash: vector.hash, signature: signature)
+                XCTAssertEqual(address.address, expectedAddress)
+                XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(vector.hash, signature: signature.hex), address)
+                XCTAssertEqual("41" + address.addressData.hex, "417e5f4552091a69125d5dfcb7b8c2659029395bdf")
+            }
+        }
+    }
+
+    func testInverseOfZeroAndAModulusMultipleStaysZero() {
+        for originalModulus in [secp256k1.prime, secp256k1.order] {
+            var modulus = originalModulus
+            for input in [bignum256(), originalModulus] {
+                var value = input
+                bn_inverse(&value, &modulus)
+                XCTAssertNotEqual(bn_is_zero(&value), 0)
+            }
+        }
+    }
+
+    func testNonzeroInverseStillMultipliesToOne() throws {
+        let inputs = [one, Data(repeating: 0, count: 31) + Data([2]),
+                      try XCTUnwrap(Data.fromHex(generatorX))]
+        for originalModulus in [secp256k1.prime, secp256k1.order] {
+            var modulus = originalModulus
+            for input in inputs {
+                var value = bignum256()
+                Array(input).withUnsafeBufferPointer { bn_read_be($0.baseAddress!, &value) }
+                var inverse = value
+                bn_inverse(&inverse, &modulus)
+                var product = value
+                bn_multiply(&inverse, &product, &modulus)
+                bn_mod(&product, &modulus)
+                var expected = bignum256()
+                bn_one(&expected)
+                XCTAssertNotEqual(bn_is_equal(&product, &expected), 0)
+            }
+        }
+    }
+}
