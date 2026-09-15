@@ -3743,3 +3743,146 @@ final class SignedIntegerABIEncodingRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class DataSliceInputRegressionTests: XCTestCase {
+    private func slice(_ bytes: Data, offset: Int = 17) -> Data {
+        let buffer = Data(repeating: 0xa5, count: offset) + bytes + Data([0x5a])
+        let result = buffer[offset ..< offset + bytes.count]
+        if !bytes.isEmpty {
+            XCTAssertEqual(result.startIndex, offset)
+        }
+        XCTAssertEqual(result, bytes)
+        return result
+    }
+
+    func testRLPEncodesSlicesUsingTheSameBytesAndHeaders() throws {
+        let cases: [(Data, Data)] = [
+            (Data(), Data([0x80])),
+            (Data([0x00]), Data([0x00])),
+            (Data([0x7f]), Data([0x7f])),
+            (Data([0x80]), Data([0x81, 0x80])),
+            (Data([0xff]), Data([0x81, 0xff])),
+            (Data(repeating: 1, count: 55), Data([0xb7]) + Data(repeating: 1, count: 55)),
+            (Data(repeating: 1, count: 56), Data([0xb8, 0x38]) + Data(repeating: 1, count: 56))
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(try XCTUnwrap(RLP.encode(input)), expected)
+            XCTAssertEqual(try XCTUnwrap(RLP.encode(slice(input))), expected)
+        }
+        XCTAssertEqual(RLP.encode([slice(Data([0x01])), slice(Data([0x80]))] as [Any]),
+                       Data([0xc3, 0x01, 0x81, 0x80]))
+    }
+
+    func testByteComparisonHandlesDifferentSliceOrigins() {
+        let bytes = Data((0 ..< 32).map { UInt8($0) })
+        let left = slice(bytes)
+        XCTAssertTrue(left.constantTimeComparisonTo(bytes))
+        XCTAssertTrue(bytes.constantTimeComparisonTo(left))
+        XCTAssertTrue(left.constantTimeComparisonTo(slice(bytes, offset: 80)))
+        XCTAssertFalse(left.constantTimeComparisonTo(nil))
+        XCTAssertFalse(left.constantTimeComparisonTo(slice(Data(bytes.dropLast()))))
+        XCTAssertTrue(slice(Data()).constantTimeComparisonTo(Data()))
+
+        for index in bytes.indices {
+            var changed = bytes
+            changed[index] ^= 0xff
+            XCTAssertFalse(left.constantTimeComparisonTo(slice(changed, offset: 80)))
+        }
+    }
+
+    func testPublicKeySlicesPreserveAllSupportedAddressForms() throws {
+        let uncompressed = try XCTUnwrap(Data.fromHex(
+            "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                + "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        ))
+        let compressed = Data([0x02]) + uncompressed.dropFirst().prefix(32)
+        let expected = try XCTUnwrap(Data.fromHex("7e5f4552091a69125d5dfcb7b8c2659029395bdf"))
+        for publicKey in [compressed, Data(uncompressed.dropFirst()), uncompressed] {
+            for input in [publicKey, slice(publicKey)] {
+                XCTAssertEqual(try Web3Utils.publicToAddressData(input), expected)
+                XCTAssertEqual(try Web3Utils.publicToAddress(input).addressData, expected)
+                XCTAssertEqual(try Web3Utils.publicToAddressString(input), "0x" + expected.hex)
+            }
+        }
+    }
+
+    func testPublicKeySlicesKeepExistingValidationErrors() {
+        let wrongPrefix = Data([0x03]) + Data(repeating: 0, count: 64)
+        for input in [wrongPrefix, slice(wrongPrefix)] {
+            XCTAssertThrowsError(try Web3Utils.publicToAddressData(input)) {
+                guard case PublicKeyToAddressError.shouldStartWith4 = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+        }
+        for count in [0, 32, 63, 66] {
+            XCTAssertThrowsError(try Web3Utils.publicToAddressData(slice(Data(repeating: 0, count: count)))) {
+                guard case PublicKeyToAddressError.invalidPublicKeySize = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+        }
+    }
+
+    func testRecoveryAcceptsSignatureAndDigestSlicesWithLegacyRecoveryIDs() throws {
+        let hash = Data(repeating: 0x11, count: 32)
+        let signature = try XCTUnwrap(Data.fromHex(
+            "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626"
+                + "aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
+        ))
+        let key = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        for recoveryID: UInt8 in [1, 28] {
+            let input = Data(signature.prefix(64)) + Data([recoveryID])
+            for offset in [0, 1, 17, 80] {
+                let signatureSlice = slice(input, offset: offset)
+                let hashSlice = slice(hash, offset: offset)
+                XCTAssertEqual(try Web3Utils.hashECRecover(hash: hashSlice, signature: signatureSlice).address,
+                               "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
+                XCTAssertEqual(try Web3Utils.getAddressFromSignature(hashSlice, signature: input.hex), key.address)
+                for compressed in [false, true] {
+                    XCTAssertEqual(try SECP256K1.recoverPublicKey(
+                        hash: hashSlice, signature: signatureSlice, compressed: compressed
+                    ), try Web3Utils.privateToPublic(key.privateKey, compressed: compressed))
+                }
+            }
+        }
+    }
+
+    func testPersonalRecoveryAcceptsMessageAndSignatureSlices() throws {
+        let key = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let message = Data("core-203".utf8)
+        let signature = try key.sign(hash: Web3Utils.hashPersonalMessage(message)).data
+        XCTAssertEqual(try Web3Utils.personalECRecover(message, signature: signature), key.address)
+        XCTAssertEqual(try Web3Utils.personalECRecover(slice(message), signature: slice(signature)), key.address)
+    }
+
+    func testRecoverySlicesKeepLengthAndInvalidSignatureErrors() {
+        let hash = slice(Data(repeating: 0x11, count: 32))
+        for count in [0, 64, 66] {
+            let signature = slice(Data(repeating: 0, count: count))
+            XCTAssertThrowsError(try Web3Utils.hashECRecover(hash: hash, signature: signature)) {
+                guard case SECP256K1Error.invalidSignatureSize = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+            XCTAssertThrowsError(try Web3Utils.personalECRecover(Data(), signature: signature)) {
+                guard case Web3UtilsError.invalidSignatureLength = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+        }
+        let invalid = slice(Data(repeating: 0, count: 65))
+        XCTAssertThrowsError(try Web3Utils.hashECRecover(hash: hash, signature: invalid)) {
+            guard case SECP256DataError.cannotRecoverPublicKey = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+        XCTAssertThrowsError(try Web3Utils.hashECRecover(hash: slice(Data(repeating: 0, count: 31)),
+                                                       signature: invalid)) {
+            guard case SECP256K1Error.invalidHashSize = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+    }
+}

@@ -82,7 +82,7 @@ public struct RLP {
     }
 
     static func encodeData(_ data: Data) -> Data {
-        if data.count == 1 && data[0] <= 0x7f {
+        if data.count == 1 && data[data.startIndex] <= 0x7f {
             // Fits in single byte, no header
             return data
         }

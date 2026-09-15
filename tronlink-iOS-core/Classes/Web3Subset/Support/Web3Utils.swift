@@ -67,8 +67,8 @@ extension Web3Utils {
         } else {
             var stipped = publicKey
             if stipped.count == 65 {
-                guard stipped[0] == 4 else { throw PublicKeyToAddressError.shouldStartWith4 }
-                stipped = stipped[1 ... 64]
+                guard stipped.first == 4 else { throw PublicKeyToAddressError.shouldStartWith4 }
+                stipped = stipped.dropFirst()
             }
             guard stipped.count == 64 else { throw PublicKeyToAddressError.invalidPublicKeySize }
             let sha3 = stipped.keccak256()
@@ -124,9 +124,11 @@ extension Web3Utils {
 
     public static func hashECRecover(hash: Data, signature: Data) throws -> Web3Address {
         try signature.checkSignatureSize()
-        let rData = Array(signature[0 ..< 32])
-        let sData = Array(signature[32 ..< 64])
-        let vData = signature[64]
+        // A Data slice can retain a nonzero startIndex; Array rebases the bytes.
+        let bytes = Array(signature)
+        let rData = Array(bytes[0 ..< 32])
+        let sData = Array(bytes[32 ..< 64])
+        let vData = bytes[64]
         let signatureData = try SECP256K1.marshalSignature(v: vData, r: rData, s: sData)
         let publicKey = try SECP256K1.recoverPublicKey(hash: hash, signature: signatureData)
         return try Web3Utils.publicToAddress(publicKey)

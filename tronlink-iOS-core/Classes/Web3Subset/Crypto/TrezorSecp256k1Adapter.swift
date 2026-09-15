@@ -177,7 +177,7 @@ struct SECP256K1 {
                                  compressed: Bool = false) throws -> Data {
         try hash.checkHashSize()
         try signature.checkSignatureSize()
-        let recoveryID = normalizedRecoveryID(signature[64])
+        let recoveryID = normalizedRecoveryID(signature[signature.index(before: signature.endIndex)])
         guard let publicKey = TrezorSecp256k1Backend.recover(
             hash: hash,
             signature: Data(signature.prefix(64)),

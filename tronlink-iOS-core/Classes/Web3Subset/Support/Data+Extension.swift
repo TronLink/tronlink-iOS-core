@@ -35,8 +35,8 @@ public extension Data {
         guard let rhs = other else { return false }
         guard count == rhs.count else { return false }
         var difference = UInt8(0x00)
-        for i in 0 ..< count { // compare full length
-            difference |= self[i] ^ rhs[i] // constant time
+        for (left, right) in zip(self, rhs) { // compare full length, including slices
+            difference |= left ^ right // no early exit for mismatched bytes
         }
         return difference == UInt8(0x00)
     }
