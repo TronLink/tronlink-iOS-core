@@ -3645,3 +3645,101 @@ final class Web3AddressChecksumSafetyTests: XCTestCase {
         XCTAssertEqual("41" + address.addressData.hexString, "4152908400098527886e0f7030069857d2e4169ee7")
     }
 }
+
+
+final class SignedIntegerABIEncodingRegressionTests: XCTestCase {
+    func testEightBitEncodingRejectsSignOverflowAndByteOverflow() throws {
+        for (value, byte) in [(-128, UInt8(0x80)), (-1, 0xff), (0, 0x00), (127, 0x7f)] {
+            let encoded: Data? = BigInt(value).abiEncode(bits: 8)
+            XCTAssertEqual(try XCTUnwrap(encoded), Data([byte]))
+        }
+        for value in [128, -129, 255, -255, 256, -256] {
+            let encoded: Data? = BigInt(value).abiEncode(bits: 8)
+            XCTAssertNil(encoded, String(value))
+        }
+    }
+
+    func testEverySignedWidthPreservesBoundaryValues() throws {
+        for byteCount in 1...32 {
+            let bits = UInt64(byteCount * 8)
+            let limit = BigInt(1) << (byteCount * 8 - 1)
+            let cases: [(BigInt, Data)] = [
+                (-limit, Data([0x80]) + Data(repeating: 0, count: byteCount - 1)),
+                (limit - 1, Data([0x7f]) + Data(repeating: 0xff, count: byteCount - 1)),
+                (-1, Data(repeating: 0xff, count: byteCount)),
+                (0, Data(repeating: 0, count: byteCount))
+            ]
+            for (value, expected) in cases {
+                let encoded: Data? = value.abiEncode(bits: bits)
+                let bytes = try XCTUnwrap(encoded)
+                XCTAssertEqual(bytes, expected)
+                XCTAssertEqual(BigInt.fromTwosComplement(data: bytes), value)
+            }
+            for value in [limit, -limit - 1] {
+                let encoded: Data? = value.abiEncode(bits: bits)
+                XCTAssertNil(encoded)
+            }
+        }
+    }
+
+    func testInvalidWidthsAndHugeValuesReturnNil() {
+        let invalidWidths: [UInt64] = [0, 1, 7, 9, 255, 257, 264, UInt64.max]
+        for bits in invalidWidths {
+            for value in [BigInt(-1), BigInt(0), BigInt(1)] {
+                let encoded: Data? = value.abiEncode(bits: bits)
+                XCTAssertNil(encoded)
+            }
+        }
+        let huge = BigInt(1) << 4096
+        for value in [huge, -huge] {
+            let encoded: Data? = value.abiEncode(bits: 256)
+            XCTAssertNil(encoded)
+        }
+    }
+
+    func testNegativeByteBoundariesKeepZerosInTheirComplement() throws {
+        // -65535 must be ff0001 in int24, not ffff01 (-255).
+        // Repeat at each byte boundary to cover the previous minimal-width loss.
+        for magnitudeBytes in 2...31 {
+            let value = -(BigInt(1) << (magnitudeBytes * 8)) + 1
+            let bits = UInt64((magnitudeBytes + 1) * 8)
+            let tail = Data(repeating: 0, count: magnitudeBytes - 1) + Data([1])
+            let encoded: Data? = value.abiEncode(bits: bits)
+            XCTAssertEqual(try XCTUnwrap(encoded), Data([0xff]) + tail)
+
+            let expectedWord = Data(repeating: 0xff, count: 32 - magnitudeBytes) + tail
+            let encoder = ABIEncoder()
+            try encoder.encode(value)
+            XCTAssertEqual(encoder.data, expectedWord)
+
+            let typedEncoder = ABIEncoder()
+            try typedEncoder.encode(ABIValue(value, type: .int(bits: Int(bits))))
+            XCTAssertEqual(typedEncoder.data, expectedWord)
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(
+                type: .int(bits: bits), value: value as AnyObject
+            ), expectedWord)
+        }
+    }
+
+    func testNegativeZeroAndEncoderFailureRemainCompatible() throws {
+        var negativeZero = BigInt(0)
+        negativeZero.sign = .minus
+        for bits: UInt64 in [8, 256] {
+            let encoded: Data? = negativeZero.abiEncode(bits: bits)
+            XCTAssertEqual(encoded, Data(repeating: 0, count: Int(bits / 8)))
+        }
+        let encoder = ABIEncoder()
+        try encoder.encode(negativeZero)
+        XCTAssertEqual(encoder.data, Data(repeating: 0, count: 32))
+
+        let prefix = Data([0xde, 0xad])
+        let limit = BigInt(1) << 255
+        for value in [limit, -limit - 1] {
+            encoder.data = prefix
+            XCTAssertThrowsError(try encoder.encode(value)) {
+                XCTAssertEqual($0 as? ABIError, .integerOverflow)
+            }
+            XCTAssertEqual(encoder.data, prefix)
+        }
+    }
+}

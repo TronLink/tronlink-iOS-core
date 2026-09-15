@@ -59,13 +59,23 @@ public extension BigInt {
         }
     }
 
-    /// - Returns: Fixed size data of number
+    /// Encodes a signed ABI integer using exactly bits / 8 bytes.
+    /// The width must be a multiple of 8 in 8...256.
+    /// - Returns: nil for an invalid width or a value outside the signed range.
+    ///   Callers must handle the optional result.
     func abiEncode(bits: UInt64) -> Data! {
-        let isNegative = self < (BigInt(0))
-        let data = toTwosComplement()
-        let paddedLength = UInt64(ceil((Double(bits) / 8.0)))
-        let padded = data.setLengthLeft(paddedLength, isNegative: isNegative)!
-        return padded
+        guard bits <= 256 else { return nil }
+        do {
+            try ABIValue.validateSignedInteger(self, bits: Int(bits))
+        } catch {
+            return nil
+        }
+        // Compute the complement at the requested width. A minimal complement
+        // can lose leading zero bytes before sign extension (e.g. -65535).
+        let encoded = sign == .minus && !isZero
+            ? (BigUInt(1) << Int(bits)) - magnitude
+            : magnitude
+        return encoded.serialize().setLengthLeft(bits / 8)
     }
 
     /// Converts data to BigInt

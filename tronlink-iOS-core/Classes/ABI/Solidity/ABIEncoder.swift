@@ -116,30 +116,10 @@ public final class ABIEncoder: Codable {
     ///
     /// - Throws: `ABIError.integerOverflow` if the value is outside the int256 range.
     public func encode(_ value: BigInt) throws {
-        try ABIValue.validateSignedInteger(value, bits: 256)
-        let valueData = twosComplement(value)
-        if valueData.count > encodedIntSize {
+        guard let valueData = value.abiEncode(bits: 256) else {
             throw ABIError.integerOverflow
         }
-
-        if value.sign == .plus || value.isZero {
-            data.append(Data(repeating: 0, count: encodedIntSize - valueData.count))
-        } else {
-            data.append(Data(repeating: 255, count: encodedIntSize - valueData.count))
-        }
         data.append(valueData)
-    }
-
-    // Computes the two's complement for a `BigInt` with 256 bits
-    private func twosComplement(_ value: BigInt) -> Data {
-        let magnitude = value.magnitude
-        if value.sign == .plus || value.isZero {
-            return magnitude.serialize()
-        }
-
-        let serializedLength = magnitude.serialize().count
-        let max = BigUInt(1) << (serializedLength * 8)
-        return (max - magnitude).serialize()
     }
 
     /// Encodes a static or dynamic byte array
