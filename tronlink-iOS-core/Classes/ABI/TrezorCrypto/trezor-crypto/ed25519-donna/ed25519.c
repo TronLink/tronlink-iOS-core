@@ -232,6 +232,10 @@ ed25519_cosi_combine_publickeys(ed25519_public_key res, CONST ed25519_public_key
 	ge25519_pniels sump;
 	ge25519_p1p1 sump1;
 
+	if (n == 0 || res == NULL || pks == NULL) {
+		if (res != NULL) memset(res, 0, sizeof(ed25519_public_key));
+		return -1;
+	}
 	if (n == 1) {
 		memcpy(res, pks, sizeof(ed25519_public_key));
 		return 0;
@@ -256,11 +260,15 @@ ed25519_cosi_combine_publickeys(ed25519_public_key res, CONST ed25519_public_key
 	return 0;
 }
 
-void
-ed25519_cosi_combine_signatures(ed25519_signature res, const ed25519_public_key R, CONST ed25519_cosi_signature *sigs, size_t n) {
+int
+ed25519_cosi_combine_signatures_checked(ed25519_signature res, const ed25519_public_key R, CONST ed25519_cosi_signature *sigs, size_t n) {
 	bignum256modm s, t;
 	size_t i = 0;
 
+	if (n == 0 || res == NULL || R == NULL || sigs == NULL) {
+		if (res != NULL) memset(res, 0, sizeof(ed25519_signature));
+		return -1;
+	}
 	expand256_modm(s, sigs[i++], 32);
 	while (i < n) {
 		expand256_modm(t, sigs[i++], 32);
@@ -268,6 +276,12 @@ ed25519_cosi_combine_signatures(ed25519_signature res, const ed25519_public_key 
 	}
 	memcpy(res, R, 32);
 	contract256_modm(res + 32, s);
+	return 0;
+}
+
+void
+ed25519_cosi_combine_signatures(ed25519_signature res, const ed25519_public_key R, CONST ed25519_cosi_signature *sigs, size_t n) {
+	(void)ed25519_cosi_combine_signatures_checked(res, R, sigs, n);
 }
 
 /*

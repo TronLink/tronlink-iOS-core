@@ -4951,3 +4951,184 @@ final class Bech32SeparatorRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class CosiEmptyInputRegressionTests: XCTestCase {
+    // RFC 8032, section 7.1, test 1 (empty message).
+    // https://www.rfc-editor.org/rfc/rfc8032.html#section-7.1
+    private let referenceKey = Array(Data(hex:
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"))
+    private let referenceSignature = Array(Data(hex:
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155" +
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"))
+
+    private func withBlocks<T>(_ blocks: [[UInt8]],
+                               _ body: (UnsafeMutablePointer<ed25519_public_key>?) -> T) -> T {
+        guard blocks.allSatisfy({ $0.count == 32 }) else {
+            XCTFail("CoSi fixtures must contain 32-byte blocks")
+            return body(nil)
+        }
+        guard !blocks.isEmpty else { return body(nil) }
+        var bytes = blocks.flatMap { $0 }
+        return bytes.withUnsafeMutableBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return body(nil) }
+            // Public keys and signature shares are both C arrays of 32 bytes.
+            return base.withMemoryRebound(to: ed25519_public_key.self, capacity: blocks.count) {
+                body($0)
+            }
+        }
+    }
+
+    private func combineKeys(_ keys: [[UInt8]], count: Int? = nil) -> (status: Int32, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: 34)
+        let status = withBlocks(keys) { input in
+            output.withUnsafeMutableBufferPointer {
+                ed25519_cosi_combine_publickeys($0.baseAddress?.advanced(by: 1), input, count ?? keys.count)
+            }
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (status, Array(output.dropFirst().prefix(32)))
+    }
+
+    private func combineShares(_ shares: [[UInt8]], commitment: [UInt8]?, count: Int? = nil,
+                               legacy: Bool = false) -> (status: Int32?, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: 66)
+        let status: Int32? = withBlocks(shares) { input in
+            output.withUnsafeMutableBufferPointer { destination -> Int32? in
+                let combine: (UnsafePointer<UInt8>?) -> Int32? = { nonce in
+                    if legacy {
+                        ed25519_cosi_combine_signatures(destination.baseAddress?.advanced(by: 1),
+                                                       nonce, input, count ?? shares.count)
+                        return nil
+                    }
+                    return ed25519_cosi_combine_signatures_checked(destination.baseAddress?.advanced(by: 1),
+                                                                   nonce, input, count ?? shares.count)
+                }
+                if let commitment = commitment {
+                    return commitment.withUnsafeBufferPointer { combine($0.baseAddress) }
+                }
+                return combine(nil)
+            }
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (status, Array(output.dropFirst().prefix(64)))
+    }
+
+    private func publicKey(_ secret: [UInt8]) -> [UInt8] {
+        var output = [UInt8](repeating: 0, count: 32)
+        secret.withUnsafeBufferPointer { key in
+            output.withUnsafeMutableBufferPointer { ed25519_publickey(key.baseAddress, $0.baseAddress) }
+        }
+        return output
+    }
+
+    private func verify(_ signature: [UInt8], key: [UInt8], message: [UInt8]) -> Int32 {
+        return signature.withUnsafeBufferPointer { sig in
+            key.withUnsafeBufferPointer { pk in
+                message.withUnsafeBufferPointer {
+                    ed25519_sign_open($0.baseAddress, $0.count, pk.baseAddress, sig.baseAddress)
+                }
+            }
+        }
+    }
+
+    func testEmptyPublicKeySetsAndNullArgumentsFailAndClearOutput() {
+        for (keys, count): ([[UInt8]], Int) in [([], 0), ([referenceKey], 0), ([], 1)] {
+            let result = combineKeys(keys, count: count)
+            XCTAssertEqual(result.status, -1)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: 32))
+        }
+        XCTAssertEqual(ed25519_cosi_combine_publickeys(nil, nil, 0), -1)
+        withBlocks([referenceKey]) {
+            XCTAssertEqual(ed25519_cosi_combine_publickeys(nil, $0, 1), -1)
+        }
+    }
+
+    func testEmptySignatureSetsAndNullArgumentsFailInBothAPIs() {
+        let share = Array(referenceSignature.suffix(32))
+        let commitment = Array(referenceSignature.prefix(32))
+        let cases: [(shares: [[UInt8]], commitment: [UInt8]?, count: Int)] = [
+            ([], nil, 0), ([share], commitment, 0), ([], commitment, 1), ([share], nil, 1)
+        ]
+        for input in cases {
+            let checked = combineShares(input.shares, commitment: input.commitment, count: input.count)
+            XCTAssertEqual(checked.status, -1)
+            XCTAssertEqual(checked.bytes, [UInt8](repeating: 0, count: 64))
+            let legacy = combineShares(input.shares, commitment: input.commitment,
+                                       count: input.count, legacy: true)
+            XCTAssertEqual(legacy.bytes, checked.bytes)
+        }
+        XCTAssertEqual(ed25519_cosi_combine_signatures_checked(nil, nil, nil, 0), -1)
+        ed25519_cosi_combine_signatures(nil, nil, nil, 0)
+        withBlocks([share]) { shares in
+            commitment.withUnsafeBufferPointer {
+                XCTAssertEqual(ed25519_cosi_combine_signatures_checked(nil, $0.baseAddress, shares, 1), -1)
+                ed25519_cosi_combine_signatures(nil, $0.baseAddress, shares, 1)
+            }
+        }
+    }
+
+    func testSingleMemberPreservesThePublishedSignature() {
+        let key = combineKeys([referenceKey])
+        XCTAssertEqual(key.status, 0)
+        XCTAssertEqual(key.bytes, referenceKey)
+        for legacy in [false, true] {
+            let result = combineShares([Array(referenceSignature.suffix(32))],
+                                       commitment: Array(referenceSignature.prefix(32)), legacy: legacy)
+            if !legacy { XCTAssertEqual(result.status, 0) }
+            XCTAssertEqual(result.bytes, referenceSignature)
+            XCTAssertEqual(verify(result.bytes, key: key.bytes, message: []), 0)
+        }
+    }
+
+    func testMultipleSharesPreserveScalarAddition() {
+        let commitment = Array(referenceSignature.prefix(32))
+        let shares = [1, 2, 3].map { [UInt8($0)] + [UInt8](repeating: 0, count: 31) }
+        let expected = commitment + [6] + [UInt8](repeating: 0, count: 31)
+        let result = combineShares(shares, commitment: commitment)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.bytes, expected)
+        XCTAssertEqual(combineShares(shares, commitment: commitment, legacy: true).bytes, expected)
+    }
+
+    func testMultipleMembersProduceVerifiableCombinedSignatures() {
+        let message = Array("CoSi combination regression".utf8)
+        for count in [2, 3] {
+            // Deterministic keys and nonces are test fixtures only.
+            let secrets = (0 ..< count).map { [UInt8](repeating: UInt8(0x11 + $0), count: 32) }
+            let nonces = (0 ..< count).map { [UInt8](repeating: UInt8(0x91 + $0), count: 32) }
+            let keys = secrets.map { publicKey($0) }
+            let key = combineKeys(keys)
+            let commitment = combineKeys(nonces.map { publicKey($0) })
+            XCTAssertEqual(key.status, 0)
+            XCTAssertEqual(commitment.status, 0)
+            XCTAssertEqual(combineKeys(Array(keys.reversed())).bytes, key.bytes)
+            var shares = [[UInt8]]()
+            for index in 0 ..< count {
+                var share = [UInt8](repeating: 0, count: 32)
+                message.withUnsafeBufferPointer { msg in
+                    secrets[index].withUnsafeBufferPointer { secret in
+                        nonces[index].withUnsafeBufferPointer { nonce in
+                            commitment.bytes.withUnsafeBufferPointer { r in
+                                key.bytes.withUnsafeBufferPointer { pk in
+                                    share.withUnsafeMutableBufferPointer {
+                                        ed25519_cosi_sign(msg.baseAddress, msg.count, secret.baseAddress,
+                                                          nonce.baseAddress, r.baseAddress, pk.baseAddress, $0.baseAddress)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                shares.append(share)
+            }
+            let result = combineShares(shares, commitment: commitment.bytes)
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(combineShares(shares, commitment: commitment.bytes, legacy: true).bytes, result.bytes)
+            XCTAssertEqual(verify(result.bytes, key: key.bytes, message: message), 0)
+            XCTAssertEqual(verify(result.bytes, key: key.bytes, message: message + [0]), -1)
+        }
+    }
+}

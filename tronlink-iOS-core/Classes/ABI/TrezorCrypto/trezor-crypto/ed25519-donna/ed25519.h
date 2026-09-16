@@ -37,7 +37,15 @@ void curve25519_scalarmult_basepoint(curve25519_key mypublic, const curve25519_k
 #define CONST
 #endif
 
+/* Requires n >= 1 and non-NULL pointers. Returns 0 on success, -1 on failure.
+ * Empty sets or NULL arguments clear res when non-NULL and return -1. */
 int ed25519_cosi_combine_publickeys(ed25519_public_key res, CONST ed25519_public_key *pks, size_t n);
+/* Combines shares without verifying them. Returns 0 on success; empty sets or
+ * NULL arguments clear res when non-NULL and return -1. Prefer this API when
+ * callers need to distinguish argument errors from a combined signature. */
+int ed25519_cosi_combine_signatures_checked(ed25519_signature res, const ed25519_public_key R, CONST ed25519_cosi_signature *sigs, size_t n);
+/* Compatibility wrapper: same argument checks and output as the checked API,
+ * but no error result. Callers must not treat cleared output as a signature. */
 void ed25519_cosi_combine_signatures(ed25519_signature res, const ed25519_public_key R, CONST ed25519_cosi_signature *sigs, size_t n);
 void ed25519_cosi_sign(const unsigned char *m, size_t mlen, const ed25519_secret_key key, const ed25519_secret_key nonce, const ed25519_public_key R, const ed25519_public_key pk, ed25519_cosi_signature sig);
 
