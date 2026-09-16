@@ -129,6 +129,8 @@ public struct KeystoreKey {
     }
 
     /// Decrypts the key and returns the private key.
+    /// CTR input must fit the IV's remaining 64-bit counter range; otherwise this
+    /// throws `CTR.Error.invalidInitializationVector` after verifying the password.
     public func decrypt(password: String) throws -> Data {
         let derivedKey: Data
         switch crypto.kdf {
@@ -148,6 +150,8 @@ public struct KeystoreKey {
         let decryptedPK: [UInt8]
         switch crypto.cipher {
         case "aes-128-ctr":
+            // Keep MAC/password validation first and reject counter exhaustion before AES.
+            try crypto.cipherParams.validateCTRCapacity(forByteCount: crypto.cipherText.count)
             let aesCipher = try AES(key: decryptionKey.bytes, blockMode: CTR(iv: crypto.cipherParams.iv.bytes), padding: .noPadding)
             decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytes)
         case "aes-128-cbc":

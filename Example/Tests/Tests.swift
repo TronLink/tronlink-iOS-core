@@ -2389,6 +2389,139 @@ extension EmbeddedKeystoreTests {
     }
 }
 
+final class KeystoreCTRCounterRegressionTests: XCTestCase {
+    private let password = "ctr-regression-password"
+    private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+
+    func testCTRDecryptAcceptsTheLastAvailableBlock() throws {
+        let cases: [(Int, UInt64)] = [
+            (1, .max), (16, .max),
+            (17, .max - 1), (32, .max - 1),
+            (33, .max - 2), (64, .max - 3),
+        ]
+        for (count, counter) in cases {
+            let plaintext = Data(repeating: 0x5a, count: count)
+            let key = try makeKey(plaintext: plaintext, iv: iv(counter: counter))
+            XCTAssertEqual(try key.decrypt(password: password), plaintext, "Length: \(count)")
+        }
+    }
+
+    func testCTRDecryptRejectsExhaustionEvenWithAValidMAC() throws {
+        let cases: [(Int, UInt64)] = [
+            (17, .max), (32, .max), (33, .max - 1), (49, .max - 2),
+        ]
+        for (count, counter) in cases {
+            var key = try makeKey(plaintext: Data(repeating: 0x5a, count: count), iv: iv(counter: 0))
+            // V3's MAC does not cover the IV: changing only the IV must not crash.
+            key.crypto.cipherParams.iv = iv(counter: counter)
+            XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+                guard case .invalidInitializationVector? = error as? CTR.Error else {
+                    return XCTFail("Expected invalid CTR IV, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testWrongPasswordStillPrecedesCounterValidation() throws {
+        var key = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        key.crypto.cipherParams.iv = iv(counter: .max)
+        XCTAssertThrowsError(try key.decrypt(password: "wrong-password")) { error in
+            guard case .invalidPassword? = error as? DecryptError else {
+                return XCTFail("Expected invalidPassword, got \(error)")
+            }
+        }
+    }
+
+    func testCTRRejectsInvalidIVLengths() throws {
+        let original = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        for count in [0, 8, 15, 17, 32] {
+            var key = original
+            key.crypto.cipherParams.iv = Data(repeating: 0, count: count)
+            XCTAssertThrowsError(try key.decrypt(password: password))
+        }
+    }
+
+    func testEmptyCiphertextKeepsTheExistingInvalidDataError() throws {
+        let key = try makeKey(plaintext: Data(), iv: iv(counter: .max))
+        XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+            guard case .invalidData? = error as? AES.Error else {
+                return XCTFail("Expected existing invalidData error, got \(error)")
+            }
+        }
+    }
+
+    func testCTRCapacityHandlesLargeCountsAndSlicedIV() throws {
+        var params = CipherParams()
+        let padded = Data([0xaa]) + iv(counter: 0)
+        params.iv = padded.dropFirst()
+        XCTAssertNoThrow(try params.validateCTRCapacity(forByteCount: Int.max))
+        params.iv = iv(counter: .max)
+        XCTAssertThrowsError(try params.validateCTRCapacity(forByteCount: Int.max))
+    }
+
+    func testImportRejectsUnsafeIVAndPreservesValidBoundaryKey() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try KeyStore(keyDirectory: directory)
+        var unsafe = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        unsafe.crypto.cipherParams.iv = iv(counter: .max)
+        XCTAssertThrowsError(try store.import(
+            json: JSONEncoder().encode(unsafe), password: password, newPassword: password
+        )) { error in
+            guard case .invalidInitializationVector? = error as? CTR.Error else {
+                return XCTFail("Expected invalid CTR IV, got \(error)")
+            }
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+
+        let valid = try makeKey(plaintext: privateKey, iv: iv(counter: .max - 1))
+        let account = try store.import(
+            json: JSONEncoder().encode(valid), password: password, newPassword: password
+        )
+        XCTAssertEqual(account.address, valid.address)
+        let reloaded = try KeyStore(keyDirectory: directory)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: password), privateKey)
+    }
+
+    func testCBCDoesNotApplyTheCTRCapacityLimit() throws {
+        let key = try makeKey(plaintext: privateKey, iv: iv(counter: .max), cipher: "aes-128-cbc")
+        XCTAssertEqual(try key.decrypt(password: password), privateKey)
+    }
+
+    private func iv(counter: UInt64) -> Data {
+        let suffix = (0..<8).map { UInt8(truncatingIfNeeded: counter >> (56 - 8 * $0)) }
+        return Data(repeating: 0x12, count: 8) + Data(suffix)
+    }
+
+    /// Encrypt only safe fixtures with the existing CryptoSwift implementation. Low-cost
+    /// scrypt parameters keep these counter tests independent of production KDF presets.
+    private func makeKey(plaintext: Data, iv: Data, cipher: String = "aes-128-ctr") throws -> KeystoreKey {
+        let params = try ScryptParams(salt: Data(repeating: 0x5a, count: 32), n: 16, r: 1, p: 1, desiredKeyLength: 32)
+        let derived = try Scrypt(params: params).calculate(password: password)
+        let ciphertext: Data
+        if cipher == "aes-128-cbc" {
+            ciphertext = Data(try AES(key: Array(derived.prefix(16)), blockMode: CBC(iv: Array(iv)), padding: .noPadding).encrypt(Array(plaintext)))
+        } else {
+            ciphertext = Data(try AES(key: Array(derived.prefix(16)), blockMode: CTR(iv: Array(iv)), padding: .noPadding).encrypt(Array(plaintext)))
+        }
+        var cipherParams = CipherParams()
+        cipherParams.iv = iv
+        var header = KeystoreKeyHeader(
+            cipherText: ciphertext, cipherParams: cipherParams, kdfParams: params,
+            mac: KeystoreKey.computeMAC(prefix: Data(derived.suffix(16)), key: ciphertext)
+        )
+        header.cipher = cipher
+        let crypto = try JSONSerialization.jsonObject(with: JSONEncoder().encode(header))
+        let json: [String: Any] = [
+            // secp256k1 scalar 1, with the TRON address prefix.
+            "address": "417e5f4552091a69125d5dfcb7b8c2659029395bdf",
+            "id": "00000000-0000-0000-0000-000000000401",
+            "type": "private-key", "version": 3, "crypto": crypto,
+        ]
+        return try JSONDecoder().decode(KeystoreKey.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+}
+
 // Expected ABI vectors below are independent handwritten words, not encoder output.
 final class ABIv2RegressionTests: XCTestCase {
     private typealias Parameter = TLCore.ABIv2.Element.ParameterType

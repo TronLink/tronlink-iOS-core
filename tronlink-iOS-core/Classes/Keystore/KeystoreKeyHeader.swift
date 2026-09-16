@@ -33,6 +33,7 @@ public struct KeystoreKeyHeader {
     /// Initializes a `KeystoreKeyHeader` by encrypting data with a password with standard values.
     public init(password: String, data: Data) throws {
         let cipherParams = CipherParams()
+        try cipherParams.validateCTRCapacity(forByteCount: data.count)
         let kdfParams = ScryptParams()
 
         let scrypt = Scrypt(params: kdfParams)
@@ -92,6 +93,22 @@ public struct CipherParams {
             SecRandomCopyBytes(kSecRandomDefault, CipherParams.blockSize, p)
         }
         precondition(result == errSecSuccess, "Failed to generate random number")
+    }
+
+    /// CryptoSwift 1.8.4 increments only the IV's final 64 bits and traps on overflow.
+    /// Reject exhaustion before starting CTR; the first block uses the initial value.
+    func validateCTRCapacity(forByteCount byteCount: Int) throws {
+        guard iv.count == CipherParams.blockSize else {
+            throw CTR.Error.invalidInitializationVector
+        }
+        guard byteCount > 0 else { return }
+
+        let counter = iv.suffix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        // This form also avoids overflowing Int when rounding the byte count up.
+        let increments = UInt64((byteCount - 1) / CipherParams.blockSize)
+        guard increments <= UInt64.max - counter else {
+            throw CTR.Error.invalidInitializationVector
+        }
     }
 }
 
