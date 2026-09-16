@@ -1106,19 +1106,16 @@ int ecdsa_verify_digest(const ecdsa_curve *curve, const uint8_t *pub_key, const 
 	bn_multiply(&r, &s, &curve->order); // r*s^-1
 	bn_mod(&s, &curve->order);
 
-	int result = 0;
-	if (bn_is_zero(&z)) {
-		// our message hashes to zero
-		// I don't expect this to happen any time soon
-		result = 3;
-	} else {
-		scalar_multiply(curve, &z, &res);
-	}
+	// A zero message term is valid: scalar_multiply returns infinity for 0*G.
+	// Only the final sum must be a finite point (SEC 1, section 4.1.4).
+	scalar_multiply(curve, &z, &res);
+	point_multiply(curve, &s, &pub, &pub);
+	point_add(curve, &pub, &res);
 
-	if (result == 0) {
-		// both pub and res can be infinity, can have y = 0 OR can be equal -> false negative
-		point_multiply(curve, &s, &pub, &pub);
-		point_add(curve, &pub, &res);
+	int result = 0;
+	if (point_is_infinity(&res)) {
+		result = 5;
+	} else {
 		bn_mod(&(res.x), &curve->order);
 		// signature does not match
 		if (!bn_is_equal(&res.x, &r)) {

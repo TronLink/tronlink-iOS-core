@@ -1,4 +1,5 @@
 import XCTest
+import BigInt
 @testable import TLCore
 
 final class Secp256k1BackendTests: XCTestCase {
@@ -600,6 +601,116 @@ final class Secp256k1RecoverySafetyTests: XCTestCase {
                 var expected = bignum256()
                 bn_one(&expected)
                 XCTAssertNotEqual(bn_is_equal(&product, &expected), 0)
+            }
+        }
+    }
+}
+
+
+final class ECDSADigestVerificationTests: XCTestCase {
+    // SEC 2 sections 2.4.1 and 2.4.2: https://www.secg.org/sec2-v2.pdf
+    private let vectors: [(curve: ecdsa_curve, x: String, y: String, order: String, prefix: UInt8)] = [
+        (secp256k1,
+         "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+         "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+         "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 2),
+        (nist256p1,
+         "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+         "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+         "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", 3)
+    ]
+    private let zero = Data(repeating: 0, count: 32)
+    private let one = Data(repeating: 0, count: 31) + Data([1])
+
+    private func verify(curve: ecdsa_curve, publicKey: Data, signature: Data, digest: Data) -> Int32 {
+        var parameters = curve
+        return Array(publicKey).withUnsafeBufferPointer { key in
+            Array(signature).withUnsafeBufferPointer { sig in
+                Array(digest).withUnsafeBufferPointer { hash in
+                    ecdsa_verify_digest(&parameters, key.baseAddress, sig.baseAddress, hash.baseAddress)
+                }
+            }
+        }
+    }
+
+    func testAnalyticZeroModuloDigestSignaturesVerifyOnBothCurves() throws {
+        for vector in vectors {
+            let r = try XCTUnwrap(Data.fromHex(vector.x))
+            let order = try XCTUnwrap(Data.fromHex(vector.order))
+            let uncompressed = try XCTUnwrap(Data.fromHex("04" + vector.x + vector.y))
+            // Synthetic fixture d=1, k=1, Q=G: for e=0 or e=n, s=r=G.x.
+            // This signature is derived algebraically, independently of the library signer.
+            let signature = r + r
+            for digest in [zero, order] {
+                for publicKey in [Data([vector.prefix]) + r, uncompressed] {
+                    XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
+                                          signature: signature, digest: digest), 0)
+                }
+            }
+        }
+    }
+
+    func testInvalidScalarsAndFinalInfinityRemainRejected() throws {
+        for vector in vectors {
+            let r = try XCTUnwrap(Data.fromHex(vector.x))
+            let order = try XCTUnwrap(Data.fromHex(vector.order))
+            let publicKey = Data([vector.prefix]) + r
+            for digest in [zero, order] {
+                for invalid in [zero + r, r + zero, order + r, r + order] {
+                    XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
+                                          signature: invalid, digest: digest), 2)
+                }
+                let invalidPublicKey = Data([4]) + Data(repeating: 0, count: 64)
+                XCTAssertEqual(verify(curve: vector.curve, publicKey: invalidPublicKey,
+                                      signature: r + r, digest: digest), 1)
+            }
+            // e=n-r and Q=G make (e/s)*G + (r/s)*Q cancel to infinity.
+            let negativeR = (BigUInt(order) - BigUInt(r)).serialize()
+            let cancellingDigest = Data(repeating: 0, count: 32 - negativeR.count) + negativeR
+            XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
+                                  signature: r + r, digest: cancellingDigest), 5)
+            // The valid zero-digest signature must not validate a different message.
+            XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
+                                  signature: r + r, digest: one), 5)
+        }
+    }
+
+    func testPublicVerifierAndAddressRecoveryAgreeForZeroModuloDigests() throws {
+        let vector = try XCTUnwrap(vectors.first)
+        let r = try XCTUnwrap(Data.fromHex(vector.x))
+        let order = try XCTUnwrap(Data.fromHex(vector.order))
+        let uncompressed = try XCTUnwrap(Data.fromHex("04" + vector.x + vector.y))
+        let expectedAddress = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+        for digest in [zero, order] {
+            for publicKey in [Data([2]) + r, uncompressed] {
+                for signature in [r + r, r + r + Data([0])] {
+                    XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: digest, publicKey: publicKey))
+                    XCTAssertFalse(EthereumCrypto.verify(signature: signature, message: one, publicKey: publicKey))
+                }
+            }
+            for recoveryID: UInt8 in [0, 27] {
+                let signature = r + r + Data([recoveryID])
+                // These are the same recovery APIs used by the app's verification paths.
+                let address = try TLCore.Web3Utils.hashECRecover(hash: digest, signature: signature)
+                XCTAssertEqual(address.address, expectedAddress)
+                XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(digest, signature: signature.hex), address)
+            }
+        }
+    }
+
+    func testGeneratedBoundaryAndOrdinarySignaturesStillVerify() throws {
+        let vector = try XCTUnwrap(vectors.first)
+        let order = try XCTUnwrap(Data.fromHex(vector.order))
+        let key = TLCore.PrivateKey(one)
+        let ordinaryHash = Data(repeating: 0x11, count: 32)
+        for digest in [zero, order, one, Data(repeating: 0xff, count: 32), ordinaryHash] {
+            let signature = try key.sign(hash: digest).data
+            XCTAssertEqual(signature.count, 65)
+            XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: digest, publicKey: key.publicKey))
+            XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: digest, signature: signature), key.address)
+            if digest == ordinaryHash {
+                XCTAssertEqual(signature.hex,
+                               "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01")
             }
         }
     }
