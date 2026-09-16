@@ -4452,6 +4452,150 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
 }
 
 
+final class HDNodeDeserializationBoundsTests: XCTestCase {
+    private let publicVersion: UInt32 = 0x0488b21e
+    private let privateVersion: UInt32 = 0x0488ade4
+    private let chainCode = (0..<32).map { UInt8($0) }
+    private let generator = Array(Data(hex:
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
+
+    private func encodedKey(_ key: [UInt8], version: UInt32 = 0x0488b21e) -> String {
+        let versionBytes = [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: version >> $0) }
+        // depth = 1, fingerprint = a1b2c3d4, child number = 01020304.
+        let metadata = Array(Data(hex: "01a1b2c3d401020304"))
+        return String(base58CheckEncoding: Data(versionBytes + metadata + chainCode + key))
+    }
+
+    private func makeNode(curve: String = "secp256k1") throws -> HDNode {
+        let seed = (0..<16).map { UInt8($0) }
+        var node = HDNode()
+        let status = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), curve, &node)
+        }
+        return try XCTUnwrap(status == 1 ? node : nil)
+    }
+
+    private func decode(_ encoded: String, curve: String = "secp256k1") throws -> HDNode {
+        var node = HDNode()
+        let status = hdnode_deserialize(encoded, publicVersion, privateVersion, curve, &node, nil)
+        return try XCTUnwrap(status == 0 ? node : nil)
+    }
+
+    private func publicKey(_ node: HDNode) -> [UInt8] {
+        var key = node.public_key
+        return withUnsafeBytes(of: &key) { Array($0) }
+    }
+
+    private func serializedPublic(_ node: HDNode) throws -> String {
+        var node = node
+        hdnode_fill_public_key(&node)
+        var output = [CChar](repeating: 0, count: 128)
+        let status = output.withUnsafeMutableBufferPointer {
+            hdnode_serialize_public(&node, 0xa1b2c3d4, publicVersion, $0.baseAddress, Int32($0.count))
+        }
+        _ = try XCTUnwrap(status > 0 ? status : nil)
+        let end = try XCTUnwrap(output.firstIndex(of: 0))
+        return try XCTUnwrap(String(bytes: output[..<end].map { UInt8(bitPattern: $0) }, encoding: .utf8))
+    }
+
+    private func assertRejected(_ encoded: String, curve: String = "secp256k1",
+                                error: Int32 = -2) throws {
+        // Start with a live node to check that failure cannot leave stale key material.
+        var node = try makeNode()
+        var fingerprint: UInt32 = 0xa5a5a5a5
+        XCTAssertEqual(hdnode_deserialize(encoded, publicVersion, privateVersion, curve, &node, &fingerprint), error)
+        XCTAssertTrue(withUnsafeBytes(of: &node) { $0.allSatisfy { $0 == 0 } })
+        XCTAssertEqual(fingerprint, 0xa5a5a5a5)
+    }
+
+    func testValidChecksumDoesNotAllowAnInvalidCompressedKeyPrefix() throws {
+        for value in 0...255 where value != 2 && value != 3 {
+            var key = generator
+            key[0] = UInt8(value)
+            // The 0x04 case used to import successfully, then read 65 bytes from 33.
+            try assertRejected(encodedKey(key))
+        }
+    }
+
+    func testCompressedPrefixDoesNotBypassCurvePointValidation() throws {
+        for prefix: UInt8 in [2, 3] {
+            // x = 2^256 - 1 is outside the secp256k1 field.
+            try assertRejected(encodedKey([prefix] + [UInt8](repeating: 0xff, count: 32)))
+        }
+    }
+
+    func testBothValidCompressedPrefixesPreserveMetadataAndEncoding() throws {
+        for prefix: UInt8 in [2, 3] {
+            var key = generator
+            key[0] = prefix
+            let encoded = encodedKey(key)
+            var node = try decode(encoded)
+            var fingerprint: UInt32 = 0
+            XCTAssertEqual(hdnode_deserialize(encoded, publicVersion, privateVersion,
+                                              "secp256k1", &node, &fingerprint), 0)
+            XCTAssertEqual(node.depth, 1)
+            XCTAssertEqual(node.child_num, 0x01020304)
+            XCTAssertEqual(fingerprint, 0xa1b2c3d4)
+            XCTAssertEqual(publicKey(node), key)
+            XCTAssertEqual(withUnsafeBytes(of: &node.chain_code) { Array($0) }, chainCode)
+            XCTAssertTrue(withUnsafeBytes(of: &node.private_key) { $0.allSatisfy { $0 == 0 } })
+            XCTAssertEqual(try serializedPublic(node), encoded)
+        }
+    }
+
+    func testImportedPublicKeyRetainsItsAddressAndChildDerivation() throws {
+        var publicNode = try decode(encodedKey(generator))
+        var address = [UInt8](repeating: 0xa5, count: 22)
+        address.withUnsafeMutableBufferPointer { hdnode_get_address_raw(&publicNode, 0, $0.baseAddress) }
+        XCTAssertEqual(Array(address.prefix(21)), Array(Data(hex: "00751e76e8199196d454941c45d1b3a323f1433bd6")))
+        XCTAssertEqual(address.last, 0xa5)
+
+        // The same chain code and private scalar 1 must produce the same public child.
+        let privateData = [UInt8](repeating: 0, count: 32) + [1]
+        var privateNode = try decode(encodedKey(privateData, version: privateVersion))
+        XCTAssertEqual(hdnode_public_ckd(&publicNode, 7), 1)
+        XCTAssertEqual(hdnode_private_ckd(&privateNode, 7), 1)
+        hdnode_fill_public_key(&privateNode)
+        XCTAssertEqual(publicKey(publicNode), publicKey(privateNode))
+        XCTAssertEqual(withUnsafeBytes(of: &publicNode.chain_code) { Array($0) },
+                       withUnsafeBytes(of: &privateNode.chain_code) { Array($0) })
+    }
+
+    func testPrivateExtendedKeyImportKeepsItsExistingValidResult() throws {
+        let privateData = [UInt8](repeating: 0, count: 32) + [1]
+        var node = try decode(encodedKey(privateData, version: privateVersion))
+        XCTAssertEqual(withUnsafeBytes(of: &node.private_key) { Array($0) }, Array(privateData.dropFirst()))
+        XCTAssertTrue(publicKey(node).allSatisfy { $0 == 0 })
+        hdnode_fill_public_key(&node)
+        XCTAssertEqual(publicKey(node), generator)
+    }
+
+    func testNISTAnd25519PublicExportImportRemainCompatible() throws {
+        for curve in ["nist256p1", "ed25519", "ed25519-sha3", "ed25519-keccak", "curve25519"] {
+            var original = try makeNode(curve: curve)
+            hdnode_fill_public_key(&original)
+            let encoded = try serializedPublic(original)
+            let imported = try decode(encoded, curve: curve)
+            XCTAssertEqual(publicKey(imported), publicKey(original), curve)
+            XCTAssertEqual(try serializedPublic(imported), encoded, curve)
+            if curve != "nist256p1" {
+                XCTAssertEqual(publicKey(imported).first, 1)
+                var badKey = publicKey(original)
+                badKey[0] = 4
+                try assertRejected(encodedKey(badKey), curve: curve)
+            }
+        }
+    }
+
+    func testDecodeFailuresClearTheNodeAndPreserveTheFingerprint() throws {
+        try assertRejected("!", error: -1)
+        try assertRejected(encodedKey(generator, version: 0x0488b21f), error: -3)
+        try assertRejected(encodedKey(generator, version: privateVersion), error: -2)
+        try assertRejected(encodedKey(generator), curve: "unknown-curve", error: -4)
+    }
+}
+
+
 final class PublicChildAddressDerivationRegressionTests: XCTestCase {
     private func makeParent() throws -> (node: HDNode, point: curve_point, chainCode: [UInt8]) {
         let seed = (0 ..< 16).map { UInt8($0) } // BIP-32 public test vector seed.

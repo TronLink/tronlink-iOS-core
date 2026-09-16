@@ -750,35 +750,59 @@ int hdnode_serialize_private(const HDNode *node, uint32_t fingerprint, uint32_t 
 	return hdnode_serialize(node, fingerprint, version, 0, str, strsize);
 }
 
-// check for validity of curve point in case of public data not performed
 int hdnode_deserialize(const char *str, uint32_t version_public, uint32_t version_private, const char *curve, HDNode *node, uint32_t *fingerprint)
 {
 	uint8_t node_data[78];
+	int ret = -1;
 	memset(node, 0, sizeof(HDNode));
-	node->curve = get_curve_by_name(curve);
-	if (base58_decode_check(str, node->curve->hasher_base58, node_data, sizeof(node_data)) != sizeof(node_data)) {
-		return -1;
+	const curve_info *info = get_curve_by_name(curve);
+	if (info == NULL) {
+		return -4;
+	}
+	if (base58_decode_check(str, info->hasher_base58, node_data, sizeof(node_data)) != sizeof(node_data)) {
+		goto cleanup;
 	}
 	uint32_t version = read_be(node_data);
 	if (version == version_public) {
-		memzero(node->private_key, sizeof(node->private_key));
+		ret = -2;
+		if (info->params) {
+			// HDNode stores only 33 bytes. Check the encoding before the point
+			// reader, which would read 65 bytes for an uncompressed 0x04 key.
+			if (node_data[45] != 0x02 && node_data[45] != 0x03) {
+				goto cleanup;
+			}
+			curve_point point;
+			int valid = ecdsa_read_pubkey(info->params, node_data + 45, &point);
+			memzero(&point, sizeof(point));
+			if (!valid) {
+				goto cleanup;
+			}
+		} else if (node_data[45] != 0x01) {
+			// hdnode_fill_public_key uses 0x01 + 32 bytes for 25519 curves.
+			goto cleanup;
+		}
 		memcpy(node->public_key, node_data + 45, 33);
 	} else if (version == version_private) { // private node
 		if (node_data[45]) { // invalid data
-			return -2;
+			ret = -2;
+			goto cleanup;
 		}
 		memcpy(node->private_key, node_data + 46, 32);
-		memzero(node->public_key, sizeof(node->public_key));
 	} else {
-		return -3; // invalid version
+		ret = -3; // invalid version
+		goto cleanup;
 	}
+	node->curve = info;
 	node->depth = node_data[4];
 	if (fingerprint) {
 		*fingerprint = read_be(node_data + 5);
 	}
 	node->child_num = read_be(node_data + 9);
 	memcpy(node->chain_code, node_data + 13, 32);
-	return 0;
+	ret = 0;
+cleanup:
+	memzero(node_data, sizeof(node_data));
+	return ret;
 }
 
 const curve_info *get_curve_by_name(const char *curve_name) {
