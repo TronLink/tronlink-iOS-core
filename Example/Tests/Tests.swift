@@ -4461,3 +4461,126 @@ final class Base58DecodingBoundsRegressionTests: XCTestCase {
         XCTAssertEqual(fingerprint, 0xa5a5a5a5)
     }
 }
+
+
+final class CashAddressDecodingBoundsRegressionTests: XCTestCase {
+    private func encode(_ data: [UInt8], hrp: String, base32: Bool = false) -> String {
+        let capacity = hrp.utf8.count + (base32 ? data.count + 10 : 114)
+        var output = [CChar](repeating: 0x58, count: capacity + 2)
+        let result = output.withUnsafeMutableBufferPointer { buffer in
+            data.withUnsafeBufferPointer { input in
+                if base32 {
+                    return cash_encode(buffer.baseAddress?.advanced(by: 1), hrp, input.baseAddress, input.count)
+                }
+                return cash_addr_encode(buffer.baseAddress?.advanced(by: 1), hrp, input.baseAddress, input.count)
+            }
+        }
+        XCTAssertEqual(result, 1)
+        XCTAssertEqual(output.first, CChar(0x58))
+        XCTAssertEqual(output.last, CChar(0x58))
+        let encoded = output.dropFirst().prefix(capacity)
+        XCTAssertTrue(encoded.contains(0))
+        return String(decoding: encoded.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    private func assertRawDecode(_ address: String, expected: [UInt8], status: Int32 = 1) {
+        // Leave two canaries after the 104-byte output to detect both extra writes.
+        var data = [UInt8](repeating: 0xa5, count: 107)
+        var hrp = [CChar](repeating: 0x58, count: 23)
+        var length = 0
+        let result = data.withUnsafeMutableBufferPointer { output in
+            hrp.withUnsafeMutableBufferPointer { prefix in
+                cash_decode(prefix.baseAddress?.advanced(by: 1), output.baseAddress?.advanced(by: 1), &length, address)
+            }
+        }
+        XCTAssertEqual(result, status)
+        XCTAssertEqual(data.first, 0xa5)
+        XCTAssertEqual(hrp.first, CChar(0x58))
+        XCTAssertEqual(hrp.last, CChar(0x58))
+        XCTAssertEqual(Array(data.dropFirst().prefix(expected.count)), expected)
+        XCTAssertEqual(Array(data.dropFirst(expected.count + 1)),
+                       [UInt8](repeating: 0xa5, count: 106 - expected.count))
+        if status == 1 {
+            XCTAssertEqual(length, expected.count)
+            let decodedPrefix = hrp.dropFirst().prefix(21).prefix(while: { $0 != 0 })
+            XCTAssertEqual(String(decoding: decodedPrefix.map { UInt8(bitPattern: $0) }, as: UTF8.self),
+                           String(address.prefix(while: { $0 != ":" })).lowercased())
+        }
+    }
+
+    private func decodeAddress(_ address: String, hrp: String) -> (status: Int32, length: Int, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: 68)
+        var length = 0
+        let status = output.withUnsafeMutableBufferPointer {
+            cash_addr_decode($0.baseAddress?.advanced(by: 1), &length, hrp, address)
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(Array(output.suffix(2)), [0xa5, 0xa5])
+        return (status, length, Array(output.dropFirst().prefix(65)))
+    }
+
+    func testRawDecoderWritesOnlyDataIncludingAtTheMaximumLength() {
+        for count in [0, 1, 34, 102, 103, 104] {
+            let expected = (0 ..< count).map { UInt8($0 % 32) }
+            let address = encode(expected, hrp: "bitcoincash", base32: true)
+            assertRawDecode(address, expected: expected)
+        }
+        let maximum = (0 ..< 104).map { UInt8($0 % 32) }
+        let longestAddress = encode(maximum, hrp: "abcdefghijklmnop", base32: true)
+        XCTAssertEqual(longestAddress.utf8.count, 129)
+        assertRawDecode(longestAddress, expected: maximum)
+
+        // Checksum-only vectors from the specification contain no payload data.
+        assertRawDecode("prefix:x64nx6hz", expected: [])
+        assertRawDecode("p:gpf8m4h7", expected: [])
+    }
+
+    func testInvalidChecksumCannotWritePastTheMaximumDataBuffer() {
+        let data = (0 ..< 104).map { UInt8($0 % 32) }
+        let valid = encode(data, hrp: "bitcoincash", base32: true)
+        let invalid = String(valid.dropLast()) + (valid.last == "q" ? "p" : "q")
+        assertRawDecode(invalid, expected: data, status: 0)
+        let result = decodeAddress(invalid, hrp: "bitcoincash")
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: 65))
+    }
+
+    func testPublishedVectorsPreserveEncodingDecodingAndCaseRules() {
+        // Fixed vectors: https://github.com/bitcoincashorg/bitcoincash.org/blob/master/spec/cashaddr.md
+        let smallHash = "F5BF48B397DAE70BE82B3CCA4793F8EB2B6CDAC9"
+        let largeHash = "D0F346310D5513D9E01E299978624BA883E6BDA8F4C60883C10F28C2967E67EC77ECC7EEEAEAFC6DA89FAD72D11AC961E164678B868AEEEC5F2C1DA08884175B"
+        let vectors: [(hrp: String, version: UInt8, hash: String, address: String)] = [
+            ("bitcoincash", 0, smallHash, "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"),
+            ("bchtest", 8, smallHash, "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t"),
+            ("bitcoincash", 7, largeHash, "bitcoincash:qlg0x333p4238k0qrc5ej7rzfw5g8e4a4r6vvzyrcy8j3s5k0en7calvclhw46hudk5flttj6ydvjc0pv3nchp52amk97tqa5zygg96mtky5sv5w")
+        ]
+        for vector in vectors {
+            let expected = [vector.version] + Array(Data(hex: vector.hash))
+            XCTAssertEqual(encode(expected, hrp: vector.hrp), vector.address)
+            for address in [vector.address, vector.address.uppercased()] {
+                let result = decodeAddress(address, hrp: vector.hrp)
+                XCTAssertEqual(result.status, 1)
+                XCTAssertEqual(result.length, expected.count)
+                XCTAssertEqual(Array(result.bytes.prefix(expected.count)), expected)
+                XCTAssertEqual(Array(result.bytes.dropFirst(expected.count)),
+                               [UInt8](repeating: 0xa5, count: 65 - expected.count))
+            }
+            let mixedCase = String(vector.address.prefix(1)).uppercased() + String(vector.address.dropFirst())
+            XCTAssertEqual(decodeAddress(mixedCase, hrp: vector.hrp).status, 0)
+            XCTAssertEqual(decodeAddress(vector.address, hrp: "wrong").status, 0)
+        }
+    }
+
+    func testOversizedInputIsRejectedBeforeWritingData() {
+        // Fits the total string limit, but exceeds the 104-value data limit.
+        let oversizedData = encode([UInt8](repeating: 0, count: 105), hrp: "bitcoincash", base32: true)
+        // Fits the prefix/data limits, but exceeds the 129-character string limit.
+        let oversizedString = String(repeating: "a", count: 17) + ":" + String(repeating: "q", count: 112)
+        for address in [oversizedData, oversizedString] {
+            assertRawDecode(address, expected: [], status: 0)
+            let result = decodeAddress(address, hrp: "bitcoincash")
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: 65))
+        }
+    }
+}

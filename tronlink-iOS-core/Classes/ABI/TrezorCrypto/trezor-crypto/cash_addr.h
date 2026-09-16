@@ -26,8 +26,10 @@
 
 /** Encode a Cashaddr address
  *
- *  Out: output:   Pointer to a buffer of size 105 + strlen(hrp) that will be
+ *  Out: output:   Pointer to a buffer of size 114 + strlen(hrp) that will be
  *                 updated to contain the null-terminated address.
+ *                 This includes up to 104 data characters, the separator,
+ *                 eight checksum characters, and the terminating NUL.
  *  In:  hrp:      Pointer to the null-terminated human readable part to use
  *                 (chain/network specific).
  *       prog:     Data bytes for the hash (between 21 and 65 bytes).
@@ -44,7 +46,7 @@ int cash_addr_encode(
 /** Decode a CashAddr address
  *
  *  Out: prog:     Pointer to a buffer of size 65 that will be updated to
- *                 contain the witness program bytes.
+ *                 contain the decoded data bytes.
  *       prog_len: Pointer to a size_t that will be updated to contain the length
  *                 of bytes in prog.
  *       hrp:      Pointer to the null-terminated human readable part that is
@@ -61,8 +63,10 @@ int cash_addr_decode(
 
 /** Encode a Cash string
  *
- *  Out: output:  Pointer to a buffer of size strlen(hrp) + data_len + 8 that
+ *  Out: output:  Pointer to a buffer of size strlen(hrp) + data_len + 10 that
  *                will be updated to contain the null-terminated Cash string.
+ *                This includes the separator, eight checksum characters,
+ *                and the terminating NUL.
  *  In: hrp :     Pointer to the null-terminated human readable part.
  *      data :    Pointer to an array of 5-bit values.
  *      data_len: Length of the data array.
@@ -77,10 +81,11 @@ int cash_encode(
 
 /** Decode a Cash string
  *
- *  Out: hrp:      Pointer to a buffer of size strlen(input) - 6. Will be
+ *  Out: hrp:      Pointer to a buffer of size 21. Will be
  *                 updated to contain the null-terminated human readable part.
- *       data:     Pointer to a buffer of size strlen(input) - 8 that will
- *                 hold the encoded 5-bit data values.
+ *       data:     Pointer to a buffer of size 104, sufficient for the maximum
+ *                 accepted number of 5-bit data values. On success, only
+ *                 data_len entries are written; checksum values are excluded.
  *       data_len: Pointer to a size_t that will be updated to be the number
  *                 of entries in data.
  *  In: input:     Pointer to a null-terminated Cash string.
