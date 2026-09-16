@@ -112,12 +112,7 @@ public indirect enum ABIType: Equatable, CustomStringConvertible {
         case .dynamicArray(let type):
             return "\(type)[]"
         case .tuple(let types):
-            var typeString = "("
-            for type in types {
-                typeString.append(type.description + ",")
-            }
-            typeString.removeLast()
-            return typeString + ")"
+            return "(" + types.map { $0.description }.joined(separator: ",") + ")"
         }
     }
 }
