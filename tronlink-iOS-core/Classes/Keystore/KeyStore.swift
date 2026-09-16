@@ -136,7 +136,7 @@ public final class KeyStore {
             guard Mnemonic.isValid(mnemonic) else {
                 throw Error.invalidMnemonic
             }
-            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
+            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath, normalization: .legacy)
         }
 
         // The address declared inside the JSON must match the address derived from the decrypted
@@ -162,11 +162,13 @@ public final class KeyStore {
     ///
     /// - Parameters:
     ///   - mnemonic: wallet's mnemonic phrase
-    ///   - passphrase: wallet's password
+    ///   - passphrase: BIP39 passphrase, separate from the keystore encryption password
     ///   - derivationPath: wallet's derivation path
     ///   - encryptPassword: password to use for encrypting
+    ///   - normalization: Defaults to BIP39 NFKD; select `.legacy` only when restoring
+    ///     a wallet previously created from unnormalized inputs.
     /// - Returns: new account
-    public func `import`(mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, encryptPassword: String) throws -> Account {
+    public func `import`(mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, encryptPassword: String, normalization: Mnemonic.Normalization = .bip39) throws -> Account {
         mutationLock.lock()
         defer { mutationLock.unlock() }
 
@@ -174,14 +176,14 @@ public final class KeyStore {
             throw Error.invalidMnemonic
         }
 
-        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: normalization)
         let pubKey = try wallet.getKey(at: 0).publicKey
         let address = try KeystoreKey.decodeAddress(from: pubKey)
         if self.account(for: address) != nil {
             throw Error.accountAlreadyExists
         }
 
-        let newKey = try KeystoreKey(password: encryptPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath)
+        let newKey = try KeystoreKey(password: encryptPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath, normalization: normalization)
         let url = makeAccountURL(for: address)
         let account = Account(address: address, type: .hierarchicalDeterministicWallet, url: url)
 
@@ -220,7 +222,7 @@ public final class KeyStore {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
-            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
+            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath, normalization: .legacy)
         }
         return try JSONEncoder().encode(newKey)
     }
@@ -249,7 +251,7 @@ public final class KeyStore {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
-            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: key.derivationPath).getKey(at: 0).privateKey
+            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: key.derivationPath, normalization: .legacy).getKey(at: 0).privateKey
         }
     }
     
@@ -309,7 +311,8 @@ public final class KeyStore {
             newKey = try KeystoreKey(password: newPassword,
                                       mnemonic: mnemonic,
                                       passphrase: passphrase,
-                                      derivationPath: derivationPath ?? key.derivationPath)
+                                      derivationPath: derivationPath ?? key.derivationPath,
+                                      normalization: .legacy)
         }
         guard newKey.address == key.address else {
             throw Error.invalidKey
@@ -424,12 +427,12 @@ extension KeyStore {
         return false
     }
 
-    public func checkingAccountAlreadyExists(mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, encryptPassword: String) throws -> Bool {
+    public func checkingAccountAlreadyExists(mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, encryptPassword: String, normalization: Mnemonic.Normalization = .bip39) throws -> Bool {
         if !Mnemonic.isValid(mnemonic) {
             throw Error.invalidMnemonic
         }
         
-        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: normalization)
         let pubKey = try wallet.getKey(at: 0).publicKey
         let address = try KeystoreKey.decodeAddress(from: pubKey)
         if self.account(for: address) != nil {
@@ -439,8 +442,9 @@ extension KeyStore {
     }
     
     /// Generate an address with mnemonic derivationPath.
-    public func generateWalletAddress(derivationPath:String = Wallet.defaultPath,mnemonic:String,password:String = "") throws -> Address{
-        let wallet = try Wallet(mnemonic: mnemonic, passphrase: password, path: derivationPath)
+    /// `password` is the BIP39 passphrase. Use the same normalization when importing the wallet.
+    public func generateWalletAddress(derivationPath:String = Wallet.defaultPath,mnemonic:String,password:String = "", normalization: Mnemonic.Normalization = .bip39) throws -> Address{
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: password, path: derivationPath, normalization: normalization)
         let pubKey = try wallet.getKey(at: 0).publicKey
         return try KeystoreKey.decodeAddress(from: pubKey)
     }

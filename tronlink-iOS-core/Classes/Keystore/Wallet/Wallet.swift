@@ -14,8 +14,9 @@ public class Wallet {
     public var path: String
 
     /// Initializes a wallet from a mnemonic string and a passphrase.
-    public init(mnemonic: String, passphrase: String = "", path: String = Wallet.defaultPath) throws {
-        seed = try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase)
+    /// Select `.legacy` when recovering an existing wallet created without NFKD normalization.
+    public init(mnemonic: String, passphrase: String = "", path: String = Wallet.defaultPath, normalization: Mnemonic.Normalization = .bip39) throws {
+        seed = try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase, normalization: normalization)
         self.path = path
     }
 
@@ -24,8 +25,8 @@ public class Wallet {
     }
 
     /// Initializes a wallet from a mnemonic string and a passphrase.
-    public convenience init(mnemonic: String, newPassphrase: String) throws {
-        try self.init(mnemonic: mnemonic, passphrase: newPassphrase, path: Wallet.defaultPath)
+    public convenience init(mnemonic: String, newPassphrase: String, normalization: Mnemonic.Normalization = .bip39) throws {
+        try self.init(mnemonic: mnemonic, passphrase: newPassphrase, path: Wallet.defaultPath, normalization: normalization)
     }
 
     private func getDerivationPath(for index: Int) throws -> DerivationPath {

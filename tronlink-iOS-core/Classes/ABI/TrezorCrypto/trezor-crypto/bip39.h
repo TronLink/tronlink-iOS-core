@@ -47,6 +47,9 @@ int mnemonic_check(const char *mnemonic);
 
 int mnemonic_to_entropy(const char *mnemonic, uint8_t *entropy);
 
+// Low-level byte-oriented primitive: callers supplying new BIP39 inputs must first apply
+// UTF-8 NFKD normalization to both strings. This function intentionally preserves the input
+// bytes so existing keystores written without normalization remain recoverable.
 // Returns 1 on success. Returns 0 and leaves seed zeroed when either string is NULL or the
 // passphrase exceeds BIP39_MAX_PASSPHRASE_LENGTH, so the result must be checked before use:
 // an unchecked failure would derive every wallet from an all-zero seed.

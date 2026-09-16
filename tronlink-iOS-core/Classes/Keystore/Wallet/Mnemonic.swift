@@ -6,7 +6,8 @@ public final class Mnemonic {
     /// `BIP39_MAX_WORDS * (BIP39_MAX_WORD_LENGTH + 1)`.
     private static let bufferLength = 240
 
-    /// Maximum passphrase length in UTF-8 bytes, matching `BIP39_MAX_PASSPHRASE_LENGTH`.
+    /// Maximum passphrase length in UTF-8 bytes after the selected normalization,
+    /// matching `BIP39_MAX_PASSPHRASE_LENGTH`.
     /// The C layer measures bytes with `strlen`, so this must never be compared against
     /// `String.count`, which counts characters: 65 four-byte emoji are 65 characters but 260 bytes.
     public static let maxPassphraseByteCount = 256
@@ -72,14 +73,18 @@ public final class Mnemonic {
         return mnemonic_check(asciiCString) != 0
     }
 
-    /// Derives the wallet seed.
+    /// Derives the wallet seed using BIP39 NFKD normalization by default.
     ///
     /// - Parameters:
     ///   - mnemonic: mnemonic string
     ///   - passphrase: mnemonic passphrase
+    ///   - normalization: Use `.legacy` only to recover a wallet created from unnormalized
+    ///     inputs, or to derive from the exact bytes already stored in a keystore.
     /// - Returns: wallet seed
     /// - Throws: `Mnemonic.Error`
-    public static func deriveSeed(mnemonic: String, passphrase: String) throws -> Data {
+    public static func deriveSeed(mnemonic: String, passphrase: String, normalization: Normalization = .bip39) throws -> Data {
+        let mnemonic = normalize(mnemonic, using: normalization)
+        let passphrase = normalize(passphrase, using: normalization)
         guard passphrase.utf8.count <= maxPassphraseByteCount else {
             throw Error.passphraseTooLong
         }
@@ -95,9 +100,25 @@ public final class Mnemonic {
         }
         return seed
     }
+
+    static func normalize(_ string: String, using normalization: Normalization) -> String {
+        switch normalization {
+        case .bip39:
+            return string.decomposedStringWithCompatibilityMapping
+        case .legacy:
+            return string
+        }
+    }
 }
 
 extension Mnemonic {
+    public enum Normalization {
+        /// BIP39 compatibility decomposition (NFKD) for new mnemonic/passphrase inputs.
+        case bip39
+        /// Preserve the original bytes defining an existing wallet's identity.
+        case legacy
+    }
+
     public enum Error: Swift.Error {
         case invalidStrength
         case generationFailed

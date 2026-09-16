@@ -1905,6 +1905,103 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedURL.path))
     }
 
+    /// The official TREZOR vector also applies to NFKD-equivalent compatibility characters.
+    /// https://github.com/trezor/python-mnemonic/blob/master/vectors.json (first English vector)
+    func testBIP39NormalizesMnemonicAndPassphraseAgainstOfficialVector() throws {
+        let expected = Data(hex: "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04")
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "TREZOR"), expected)
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "ＴＲＥＺＯＲ"), expected)
+        let compatibilityMnemonic = mnemonic.replacingOccurrences(of: " ", with: "\u{3000}")
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: compatibilityMnemonic, passphrase: "TREZOR"), expected)
+        XCTAssertNotEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "ＴＲＥＺＯＲ", normalization: .legacy), expected)
+    }
+
+    func testCanonicalUnicodePassphrasesAgreeOnlyInBIP39Mode() throws {
+        let composed = "\u{00e9}"
+        let decomposed = "e\u{0301}"
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: composed),
+                       try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: decomposed))
+        XCTAssertNotEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: composed, normalization: .legacy),
+                          try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: decomposed, normalization: .legacy))
+    }
+
+    func testPassphraseByteLimitUsesSelectedNormalization() throws {
+        let expands = String(repeating: "\u{00e9}", count: 100) // 200 bytes raw, 300 in NFKD.
+        XCTAssertThrowsError(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: expands)) { error in
+            guard case Mnemonic.Error.passphraseTooLong = error else {
+                return XCTFail("Expected passphraseTooLong, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: expands, normalization: .legacy).count, 64)
+        let contracts = String(repeating: "\u{ff21}", count: 100) // 300 bytes raw, 100 in NFKD.
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: contracts),
+                       try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: String(repeating: "A", count: 100)))
+    }
+
+    func testNewUnicodeKeystorePersistsCanonicalBytesAndReloads() throws {
+        let composed = "\u{00e9}"
+        let decomposed = "e\u{0301}"
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: composed, encryptPassword: password)
+        let key = try XCTUnwrap(store.key(for: account.address))
+        let payload = try key.decrypt(password: password)
+        let stored = try KeystoreKey.splitMnemonicPayload(payload)
+        // Swift String equality ignores canonical representation; compare bytes instead.
+        XCTAssertEqual(Array(stored.passphrase.utf8), Array(decomposed.utf8))
+        let expected = try Wallet(mnemonic: mnemonic, passphrase: decomposed, normalization: .legacy).getKey(at: 0).privateKey
+        XCTAssertEqual(try key.privateKey(password: password), expected)
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: password), expected)
+        XCTAssertEqual(try store.generateWalletAddress(mnemonic: mnemonic, password: composed), account.address)
+        XCTAssertThrowsError(try store.checkingAccountAlreadyExists(mnemonic: mnemonic, passphrase: decomposed, encryptPassword: password)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else {
+                return XCTFail("Expected accountAlreadyExists, got \(error)")
+            }
+        }
+    }
+
+    /// Construct an old-format payload independently of the new mnemonic constructor.
+    /// The passphrase would exceed the new byte limit if old files were normalized on read.
+    func testLegacyUnicodeKeystoreRetainsIdentityAcrossAllStoredKeyOperations() throws {
+        let passphrase = String(repeating: "\u{00e9}", count: 100)
+        let originalPrivateKey = try Wallet(mnemonic: mnemonic, passphrase: passphrase, normalization: .legacy).getKey(at: 0).privateKey
+        var oldKey = try KeystoreKey(password: password, key: originalPrivateKey)
+        oldKey.type = .hierarchicalDeterministicWallet
+        var oldPayload = Data(mnemonic.utf8)
+        oldPayload.append(0)
+        oldPayload.append(contentsOf: passphrase.utf8)
+        oldKey.crypto = try KeystoreKeyHeader(password: password, data: oldPayload)
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try JSONEncoder().encode(oldKey).write(to: keyDirectory.appendingPathComponent("legacy.json"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), originalPrivateKey)
+        let hash = Data(repeating: 7, count: 32)
+        let expectedSignature = EthereumCrypto.sign(hash: hash, privateKey: originalPrivateKey)
+        XCTAssertEqual(try XCTUnwrap(store.key(for: account.address)).sign(hash: hash, password: password), expectedSignature)
+        let exported = try store.export(account: account, password: password, newPassword: "export-password")
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.address, account.address)
+        XCTAssertEqual(try exportedKey.decrypt(password: "export-password"), oldPayload)
+
+        let importedStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported"))
+        let imported = try importedStore.import(json: exported, password: "export-password", newPassword: password)
+        XCTAssertEqual(imported.address, account.address)
+        XCTAssertEqual(try importedStore.exportPrivateKey(account: imported, password: password), originalPrivateKey)
+        try store.update(account: account, password: password, newPassword: "updated-password")
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: "updated-password"), originalPrivateKey)
+        let updatedKey = try XCTUnwrap(reloaded.key(for: account.address))
+        XCTAssertEqual(try updatedKey.decrypt(password: "updated-password"), oldPayload)
+        XCTAssertEqual(try updatedKey.sign(hash: hash, password: "updated-password"), expectedSignature)
+
+        let recoveryStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("recovered"))
+        let recovered = try recoveryStore.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password, normalization: .legacy)
+        XCTAssertEqual(recovered.address, account.address)
+        XCTAssertEqual(try recoveryStore.generateWalletAddress(mnemonic: mnemonic, password: passphrase, normalization: .legacy), account.address)
+    }
+
     func testDifferentPassphrasesDeriveDifferentKeys() throws {
         let a = try Wallet(mnemonic: mnemonic, passphrase: "one").getKey(at: 0).privateKey
         let b = try Wallet(mnemonic: mnemonic, passphrase: "two").getKey(at: 0).privateKey

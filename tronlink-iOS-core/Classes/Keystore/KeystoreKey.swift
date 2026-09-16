@@ -68,16 +68,21 @@ public struct KeystoreKey {
     }
 
     /// Initializes a `Key` by encrypting a mnemonic phrase with a password.
-    public init(password: String, mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath) throws {
+    /// New inputs use BIP39 NFKD. Use `.legacy` to preserve an existing wallet's input bytes.
+    public init(password: String, mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, normalization: Mnemonic.Normalization = .bip39) throws {
         id = UUID().uuidString.lowercased()
 
-        var data = try KeystoreKey.makeMnemonicPayload(mnemonic: mnemonic, passphrase: passphrase)
+        let seedMnemonic = Mnemonic.normalize(mnemonic, using: normalization)
+        let seedPassphrase = Mnemonic.normalize(passphrase, using: normalization)
+        // Persist the exact derivation inputs. Both old and new files can then be read without
+        // normalizing again, including readers using the existing mnemonic/passphrase format.
+        var data = try KeystoreKey.makeMnemonicPayload(mnemonic: seedMnemonic, passphrase: seedPassphrase)
         defer {
             data.resetBytes(in: 0 ..< data.count)
         }
         crypto = try KeystoreKeyHeader(password: password, data: data)
 
-        let key = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath).getKey(at: 0)
+        let key = try Wallet(mnemonic: seedMnemonic, passphrase: seedPassphrase, path: derivationPath, normalization: .legacy).getKey(at: 0)
         let pubKey = key.publicKey
         address = try KeystoreKey.decodeAddress(from: pubKey)
         type = .hierarchicalDeterministicWallet
@@ -209,7 +214,9 @@ public struct KeystoreKey {
                 decrypted.resetBytes(in: 0 ..< decrypted.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(decrypted)
-            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath).getKey(at: 0).privateKey
+            // Stored bytes already define the account; normalizing an older Unicode passphrase
+            // here would silently change the private key used for signing.
+            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: .legacy).getKey(at: 0).privateKey
         }
     }
 
