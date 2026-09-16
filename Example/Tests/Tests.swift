@@ -333,6 +333,89 @@ class Tests: XCTestCase {
         XCTAssertEqual(config.uploadCallCount, 0)
     }
 
+    func testMetricsUploadAllowsOnlyOnlineAndPreReleaseEnvironments() {
+        let manager = TRXStatisticalUploadManager.shared
+        let originalConfig = manager.dataConfig
+        defer { manager.dataConfig = originalConfig }
+        let environments = [(false, false, false), (true, false, true), (false, true, true), (true, true, true)]
+
+        for (online, preRelease, allowed) in environments {
+            let config = MetricsDataSourceStub()
+            config.isOnlineEnvironment = online
+            config.isPreReleaseEnvironment = preRelease
+            manager.dataConfig = config
+            XCTAssertFalse(manager.isCollectionDisabled(config), "Local collection policy must remain unchanged")
+            XCTAssertEqual(manager.isCurrentUploadConfig(config, chain: config.environmentKey,
+                                                         walletAddress: config.walletAddress), allowed)
+            var failed = false
+            TRXStatisticalUploadViewModel().uploadStatisticalDatabase(
+                assets: [], transactions: [], dataConfig: config,
+                chain: config.environmentKey, walletAddress: config.walletAddress,
+                success: { _, _ in }, failure: { failed = true })
+
+            XCTAssertEqual(config.uploadCallCount, allowed ? 1 : 0)
+            XCTAssertEqual(failed, !allowed)
+        }
+    }
+
+    func testMetricsUploadRechecksEnvironmentBeforeNetwork() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        let originalConfig = manager.dataConfig
+        manager.dataConfig = config
+        defer { manager.dataConfig = originalConfig }
+        let chain = config.environmentKey
+        let address = config.walletAddress
+        XCTAssertTrue(manager.isCurrentUploadConfig(config, chain: chain, walletAddress: address))
+
+        // Keep the same object, chain and wallet: identity checks alone cannot catch this change.
+        config.isOnlineEnvironment = false
+        config.isPreReleaseEnvironment = false
+        var failed = false
+        TRXStatisticalUploadViewModel().uploadStatisticalDatabase(
+            assets: [], transactions: [], dataConfig: config, chain: chain, walletAddress: address,
+            success: { _, _ in XCTFail("A changed environment must be checked before upload") },
+            failure: { failed = true })
+
+        XCTAssertTrue(failed)
+        XCTAssertEqual(config.uploadCallCount, 0)
+    }
+
+    func testMetricsAllowedEnvironmentsStillRespectPrivacyAndIdentityGates() {
+        let manager = TRXStatisticalUploadManager.shared
+        let originalConfig = manager.dataConfig
+        defer { manager.dataConfig = originalConfig }
+        let disableCases: [(MetricsDataSourceStub) -> Void] = [
+            { $0.isShastaEnvironment = true },
+            { $0.isWatchWallet = true },
+            { $0.isBasicFunctionOpen = true },
+            { $0.isTokenCloudSyncClose = true },
+            { $0.environmentKey = "" },
+            { $0.walletAddress = "" },
+            { $0.environmentKey = "another-chain" },
+            { $0.walletAddress = "another-wallet" }
+        ]
+        for online in [true, false] {
+            for disable in disableCases {
+                let config = MetricsDataSourceStub()
+                config.isOnlineEnvironment = online
+                config.isPreReleaseEnvironment = !online
+                manager.dataConfig = config
+                let chain = config.environmentKey
+                let address = config.walletAddress
+                disable(config)
+                var failed = false
+                TRXStatisticalUploadViewModel().uploadStatisticalDatabase(
+                    assets: [], transactions: [], dataConfig: config, chain: chain, walletAddress: address,
+                    success: { _, _ in XCTFail("An allowed environment must not bypass other gates") },
+                    failure: { failed = true })
+
+                XCTAssertTrue(failed)
+                XCTAssertEqual(config.uploadCallCount, 0)
+            }
+        }
+    }
+
     func testMetricsReportNumberBounds() {
         let viewModel = TRXStatisticalUploadViewModel()
         let asset = TRXAssetSyncModel()

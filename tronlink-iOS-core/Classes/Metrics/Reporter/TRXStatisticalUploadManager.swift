@@ -45,9 +45,11 @@ public class TRXStatisticalUploadManager: NSObject {
             config.isTokenCloudSyncClose || config.environmentKey.isEmpty || config.walletAddress.isEmpty
     }
 
-    func isCurrentCollectionConfig(_ config: TRXMetricsDataSource, chain: String, walletAddress: String) -> Bool {
+    func isCurrentUploadConfig(_ config: TRXMetricsDataSource, chain: String, walletAddress: String) -> Bool {
         guard let currentConfig = dataConfig, currentConfig === config else { return false }
-        return !isCollectionDisabled(config) && config.environmentKey == chain && config.walletAddress == walletAddress
+        // Apply the same reporting policy in Debug and Release, including the final network check.
+        return !isCollectionDisabled(config) && (config.isOnlineEnvironment || config.isPreReleaseEnvironment) &&
+            config.environmentKey == chain && config.walletAddress == walletAddress
     }
     
     
@@ -199,19 +201,13 @@ public class TRXStatisticalUploadManager: NSObject {
             let chain = config.environmentKey
             let walletAddress = config.walletAddress
             TRXMetricsDBManager.shared.migrateFromLegacyIfNeeded(dataSource: config)
-#if DEBUG
             self.uploadStatisticalDataToServer(config: config, chain: chain, walletAddress: walletAddress)
-#else
-            if config.isOnlineEnvironment || config.isPreReleaseEnvironment {
-                self.uploadStatisticalDataToServer(config: config, chain: chain, walletAddress: walletAddress)
-            }
-#endif
         }
     }
     
     /// Must be called from metricsQueue.
     func uploadStatisticalDataToServer(config: TRXMetricsDataSource, chain: String, walletAddress: String) {
-        guard isCurrentCollectionConfig(config, chain: chain, walletAddress: walletAddress) else { return }
+        guard isCurrentUploadConfig(config, chain: chain, walletAddress: walletAddress) else { return }
         let uId = TRXAddressMapManager.shared.id(for: walletAddress)
         let assets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain: chain, uId: uId)
         let transactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain: chain, uId: uId)

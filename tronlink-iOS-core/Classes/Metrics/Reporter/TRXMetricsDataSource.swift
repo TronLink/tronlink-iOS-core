@@ -25,7 +25,8 @@ public protocol TRXMetricsDataSource: AnyObject {
     /// USDT contract address
     var usdtContractAddress: String { get }
     
-    /// Indicates if the current environment is online
+    /// Indicates if the current environment is online. Uploads require this or
+    /// isPreReleaseEnvironment in both Debug and Release builds, in addition to the other gates.
     var isOnlineEnvironment: Bool { get }
     
     /// Indicates if the current environment is pre-release

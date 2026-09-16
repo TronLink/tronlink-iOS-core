@@ -135,6 +135,8 @@ The actual network upload is performed by the host app through the `TRXMetricsDa
 
 In addition, **watch-only wallets** are excluded at the source (`isWatchWallet`). They never enter the data-preparation stage, regardless of the toggle.
 
+Uploads also require the host to report an online or pre-release environment (`isOnlineEnvironment` or `isPreReleaseEnvironment`). This rule applies in both Debug and Release builds and is checked again before calling the host upload delegate. It limits reporting; it does not change the existing rules for local statistics storage or legacy-data migration.
+
 ### 4.5 Encrypted in Transit
 
 Before parameters leave the device, the values are AES-encrypted with a per-request derived key:
