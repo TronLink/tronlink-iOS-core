@@ -668,29 +668,31 @@ int hdnode_sign(HDNode *node, const uint8_t *msg, uint32_t msg_len, HasherType h
 {
 	if (node->curve->params) {
 		return ecdsa_sign(node->curve->params, hasher_sign, node->private_key, msg, msg_len, sig, pby, is_canonical);
-	} else if (node->curve == &curve25519_info) {
-		return 1;  // signatures are not supported
-	} else {
+	} else if (node->curve == &ed25519_info) {
 		hdnode_fill_public_key(node);
-		if (node->curve == &ed25519_info) {
-			ed25519_sign(msg, msg_len, node->private_key, node->public_key + 1, sig);
-		} else if (node->curve == &ed25519_sha3_info) {
-			ed25519_sign_sha3(msg, msg_len, node->private_key, node->public_key + 1, sig);
-#if USE_KECCAK
-		} else if (node->curve == &ed25519_keccak_info) {
-			ed25519_sign_keccak(msg, msg_len, node->private_key, node->public_key + 1, sig);
-#endif
-		}
+		ed25519_sign(msg, msg_len, node->private_key, node->public_key + 1, sig);
 		return 0;
+	} else if (node->curve == &ed25519_sha3_info) {
+		hdnode_fill_public_key(node);
+		ed25519_sign_sha3(msg, msg_len, node->private_key, node->public_key + 1, sig);
+		return 0;
+#if USE_KECCAK
+	} else if (node->curve == &ed25519_keccak_info) {
+		hdnode_fill_public_key(node);
+		ed25519_sign_keccak(msg, msg_len, node->private_key, node->public_key + 1, sig);
+		return 0;
+#endif
 	}
+	// No signing implementation was selected (including Cardano and Curve25519).
+	memzero(sig, 64);
+	if (pby) *pby = 0;
+	return 1;
 }
 
 int hdnode_sign_digest(HDNode *node, const uint8_t *digest, uint8_t *sig, uint8_t *pby, int (*is_canonical)(uint8_t by, uint8_t sig[64]))
 {
 	if (node->curve->params) {
 		return ecdsa_sign_digest(node->curve->params, node->private_key, digest, sig, pby, is_canonical);
-	} else if (node->curve == &curve25519_info) {
-		return 1;  // signatures are not supported
 	} else {
 		return hdnode_sign(node, digest, 32, 0, sig, pby, is_canonical);
 	}
@@ -801,9 +803,11 @@ const curve_info *get_curve_by_name(const char *curve_name) {
 	if (strcmp(curve_name, ED25519_NAME) == 0) {
 		return &ed25519_info;
 	}
+#if USE_CARDANO
 	if (strcmp(curve_name, ED25519_CARDANO_NAME) == 0) {
 		return &ed25519_cardano_info;
 	}
+#endif
 	if (strcmp(curve_name, ED25519_SHA3_NAME) == 0) {
 		return &ed25519_sha3_info;
 	}

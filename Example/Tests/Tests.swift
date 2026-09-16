@@ -4078,3 +4078,136 @@ final class PublicChildAddressDerivationRegressionTests: XCTestCase {
         XCTAssertEqual(noOutput, 0)
     }
 }
+
+
+final class HDNodeSigningSupportRegressionTests: XCTestCase {
+    private let seed = (0 ..< 16).map { UInt8($0) }
+    private let input = [UInt8](repeating: 0x11, count: 32)
+
+    private func makeNode(curve: String) throws -> HDNode {
+        var node = HDNode()
+        let result = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), curve, &node)
+        }
+        return try XCTUnwrap(result == 1 ? node : nil)
+    }
+
+    private func sign(node: inout HDNode, digest: Bool) -> (status: Int32, bytes: [UInt8], recoveryID: UInt8) {
+        // Only the first 64 bytes are writable; the last byte is a canary.
+        var bytes = [UInt8](repeating: 0xa5, count: 65)
+        var recoveryID: UInt8 = 0xa5
+        let status = bytes.withUnsafeMutableBufferPointer { signature in
+            input.withUnsafeBufferPointer { message in
+                if digest {
+                    return hdnode_sign_digest(&node, message.baseAddress, signature.baseAddress, &recoveryID, nil)
+                }
+                return hdnode_sign(&node, message.baseAddress, UInt32(message.count), HASHER_SHA2,
+                                   signature.baseAddress, &recoveryID, nil)
+            }
+        }
+        return (status, bytes, recoveryID)
+    }
+
+    private func assertUnsupported(node: inout HDNode) {
+        let originalPublicKey = withUnsafeBytes(of: &node.public_key) { Array($0) }
+        for digest in [false, true] {
+            let result = sign(node: &node, digest: digest)
+            XCTAssertEqual(result.status, 1)
+            XCTAssertEqual(Array(result.bytes.prefix(64)), [UInt8](repeating: 0, count: 64))
+            XCTAssertEqual(result.bytes.last, 0xa5)
+            XCTAssertEqual(result.recoveryID, 0)
+            XCTAssertEqual(withUnsafeBytes(of: &node.public_key) { Array($0) }, originalPublicKey)
+        }
+    }
+
+    func testPodBuildRejectsDisabledCardanoCurveInAllNodeConstructors() throws {
+        let curve = "ed25519 cardano seed"
+        XCTAssertNil(get_curve_by_name(curve))
+        var node = HDNode()
+        let fromSeed = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), curve, &node)
+        }
+        XCTAssertEqual(fromSeed, 0)
+        XCTAssertNil(node.curve)
+
+        var supported = try makeNode(curve: "secp256k1")
+        hdnode_fill_public_key(&supported)
+        let chainCode = withUnsafeBytes(of: &supported.chain_code) { Array($0) }
+        let privateKey = withUnsafeBytes(of: &supported.private_key) { Array($0) }
+        let publicKey = withUnsafeBytes(of: &supported.public_key) { Array($0) }
+        let fromPrivate = chainCode.withUnsafeBufferPointer { chain in
+            privateKey.withUnsafeBufferPointer { key in
+                hdnode_from_xprv(0, 0, chain.baseAddress, key.baseAddress, curve, &node)
+            }
+        }
+        XCTAssertEqual(fromPrivate, 0)
+        XCTAssertNil(node.curve)
+        let fromPublic = chainCode.withUnsafeBufferPointer { chain in
+            publicKey.withUnsafeBufferPointer { key in
+                hdnode_from_xpub(0, 0, chain.baseAddress, key.baseAddress, curve, &node)
+            }
+        }
+        XCTAssertEqual(fromPublic, 0)
+        XCTAssertNil(node.curve)
+    }
+
+    func testUnknownSigningImplementationFailsWithoutFillingACachedPublicKey() {
+        // A manually supplied, non-ECDSA curve used to fall through as success.
+        var unsupported = curve_info()
+        withUnsafePointer(to: &unsupported) { curve in
+            var node = HDNode()
+            node.curve = curve
+            assertUnsupported(node: &node)
+            var signature = [UInt8](repeating: 0xa5, count: 64)
+            let result = signature.withUnsafeMutableBufferPointer { output in
+                input.withUnsafeBufferPointer { message in
+                    hdnode_sign(&node, message.baseAddress, UInt32(message.count), HASHER_SHA2,
+                                output.baseAddress, nil, nil)
+                }
+            }
+            XCTAssertEqual(result, 1)
+            XCTAssertEqual(signature, [UInt8](repeating: 0, count: 64))
+        }
+    }
+
+    func testCurve25519StillRejectsSigningAndClearsPreviousOutput() throws {
+        var node = try makeNode(curve: "curve25519")
+        assertUnsupported(node: &node)
+    }
+
+    func testSupportedCurvesProduceVerifiableMessageAndDigestSignatures() throws {
+        for curve in ["secp256k1", "nist256p1", "ed25519"] {
+            for digest in [false, true] {
+                var node = try makeNode(curve: curve)
+                let result = sign(node: &node, digest: digest)
+                XCTAssertEqual(result.status, 0, curve)
+                XCTAssertEqual(result.bytes.last, 0xa5)
+                hdnode_fill_public_key(&node)
+                let publicKey = withUnsafeBytes(of: &node.public_key) { Array($0) }
+                let verified = result.bytes.withUnsafeBufferPointer { signature in
+                    publicKey.withUnsafeBufferPointer { key in
+                        input.withUnsafeBufferPointer { message -> Int32 in
+                            if let parameters = node.curve?.pointee.params {
+                                if digest {
+                                    return ecdsa_verify_digest(parameters, key.baseAddress,
+                                                               signature.baseAddress, message.baseAddress)
+                                }
+                                return ecdsa_verify(parameters, HASHER_SHA2, key.baseAddress,
+                                                    signature.baseAddress, message.baseAddress, UInt32(message.count))
+                            }
+                            let edPublicKey = key.baseAddress?.advanced(by: 1)
+                            return ed25519_sign_open(message.baseAddress, message.count,
+                                                     edPublicKey, signature.baseAddress)
+                        }
+                    }
+                }
+                XCTAssertEqual(verified, 0, curve)
+                if curve == "secp256k1" && digest {
+                    let privateKey = withUnsafeBytes(of: &node.private_key) { Data($0) }
+                    let appSignature = EthereumCrypto.sign(hash: Data(input), privateKey: privateKey)
+                    XCTAssertEqual(Data(result.bytes.prefix(64)) + Data([result.recoveryID]), appSignature)
+                }
+            }
+        }
+    }
+}
