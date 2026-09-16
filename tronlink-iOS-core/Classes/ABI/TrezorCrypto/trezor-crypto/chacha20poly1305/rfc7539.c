@@ -11,6 +11,8 @@ void rfc7539_init(chacha20poly1305_ctx *ctx, uint8_t key[32], uint8_t nonce[12])
     unsigned char block0[64] = {0};
 
     ECRYPT_keysetup(&ctx->chacha20, key, 256, 16);
+    // Block 0 derives the Poly1305 key; message encryption starts at block 1.
+    ctx->chacha20.input[12] = 0;
     ctx->chacha20.input[13] = U8TO32_LITTLE(nonce + 0);
     ctx->chacha20.input[14] = U8TO32_LITTLE(nonce + 4);
     ctx->chacha20.input[15] = U8TO32_LITTLE(nonce + 8);

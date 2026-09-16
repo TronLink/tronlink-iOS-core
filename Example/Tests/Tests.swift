@@ -4584,3 +4584,130 @@ final class CashAddressDecodingBoundsRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class RFC7539InitializationRegressionTests: XCTestCase {
+    // RFC 7539 section 2.8.2: https://www.rfc-editor.org/rfc/rfc7539.html#section-2.8.2
+    private let key = (0x80 ..< 0xa0).map { UInt8($0) }
+    private let nonce = Array(Data(hex: "070000004041424344454647"))
+    private let aad = Array(Data(hex: "50515253c0c1c2c3c4c5c6c7"))
+    private let plaintext = Array(Data(hex:
+        "4c616469657320616e642047656e746c" + "656d656e206f662074686520636c6173" +
+        "73206f66202739393a20496620492063" + "6f756c64206f6666657220796f75206f" +
+        "6e6c79206f6e652074697020666f7220" + "746865206675747572652c2073756e73" +
+        "637265656e20776f756c642062652069" + "742e"))
+    private let ciphertext = Array(Data(hex:
+        "d31a8d34648e60db7b86afbc53ef7ec2" + "a4aded51296e08fea9e2b5a736ee62d6" +
+        "3dbea45e8ca9671282fafb69da92728b" + "1a71de0a9e060b2905d6a5b67ecd3b36" +
+        "92ddbd7f2d778b8c9803aee328091b58" + "fab324e4fad675945585808b4831d7bc" +
+        "3ff4def08e4b7a9de576d26586cec64b" + "6116"))
+    private let expectedTag = Array(Data(hex: "1ae10b594f09e26a7e902ecbd0600691"))
+
+    private func context(filledWith value: UInt8) -> chacha20poly1305_ctx {
+        var context = chacha20poly1305_ctx()
+        withUnsafeMutableBytes(of: &context) { bytes in
+            for index in bytes.indices { bytes[index] = value }
+        }
+        return context
+    }
+
+    private func initialize(_ context: inout chacha20poly1305_ctx, nonce: [UInt8]) {
+        var key = self.key
+        var nonce = nonce
+        key.withUnsafeMutableBufferPointer { keyBuffer in
+            nonce.withUnsafeMutableBufferPointer { nonceBuffer in
+                rfc7539_init(&context, keyBuffer.baseAddress, nonceBuffer.baseAddress)
+            }
+        }
+        // Initialization consumes block 0, leaving block 1 for the message.
+        XCTAssertEqual(context.chacha20.input.12, 1)
+    }
+
+    private func crypt(_ context: inout chacha20poly1305_ctx, input: [UInt8],
+                       decrypt: Bool = false, splitBlocks: Bool = false) -> (bytes: [UInt8], tag: [UInt8]) {
+        var aad = self.aad
+        aad.withUnsafeMutableBufferPointer { rfc7539_auth(&context, $0.baseAddress, $0.count) }
+        var input = input
+        var output = [UInt8](repeating: 0xa5, count: input.count + 2)
+        let chunks = splitBlocks && input.count > 64 ? [64, input.count - 64] : [input.count]
+        input.withUnsafeMutableBufferPointer { source in
+            output.withUnsafeMutableBufferPointer { destination in
+                var offset = 0
+                for count in chunks {
+                    let read = source.baseAddress?.advanced(by: offset)
+                    let write = destination.baseAddress?.advanced(by: offset + 1)
+                    if decrypt {
+                        chacha20poly1305_decrypt(&context, read, write, count)
+                    } else {
+                        chacha20poly1305_encrypt(&context, read, write, count)
+                    }
+                    offset += count
+                }
+            }
+        }
+        var tag = [UInt8](repeating: 0, count: 16)
+        tag.withUnsafeMutableBufferPointer {
+            rfc7539_finish(&context, Int64(aad.count), Int64(input.count), $0.baseAddress)
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (Array(output.dropFirst().prefix(input.count)), tag)
+    }
+
+    func testRFCVectorIsIndependentOfPreviousContextMemory() {
+        for value: UInt8 in [0, 0xa5, 0xff] {
+            for splitBlocks in [false, true] {
+                var state = context(filledWith: value)
+                initialize(&state, nonce: nonce)
+                let result = crypt(&state, input: plaintext, splitBlocks: splitBlocks)
+                XCTAssertEqual(result.bytes, ciphertext)
+                XCTAssertEqual(result.tag, expectedTag)
+            }
+        }
+    }
+
+    func testReinitializationAfterEncryptionStartsANewMessage() {
+        var state = chacha20poly1305_ctx()
+        var previousNonce = nonce
+        previousNonce[0] = 8
+        initialize(&state, nonce: previousNonce)
+        _ = crypt(&state, input: plaintext)
+
+        initialize(&state, nonce: nonce)
+        let result = crypt(&state, input: plaintext)
+        XCTAssertEqual(result.bytes, ciphertext)
+        XCTAssertEqual(result.tag, expectedTag)
+    }
+
+    func testReinitializationDiscardsAnUnfinishedMessage() {
+        var state = chacha20poly1305_ctx()
+        var previousNonce = nonce
+        previousNonce[0] = 8
+        initialize(&state, nonce: previousNonce)
+        var oldAAD = [UInt8](repeating: 0x11, count: 3)
+        oldAAD.withUnsafeMutableBufferPointer { rfc7539_auth(&state, $0.baseAddress, $0.count) }
+        // Leave both an advanced ChaCha counter and a partial Poly1305 block.
+        var oldPlaintext = [UInt8](repeating: 0x22, count: 17)
+        var oldCiphertext = [UInt8](repeating: 0, count: 17)
+        oldPlaintext.withUnsafeMutableBufferPointer { input in
+            oldCiphertext.withUnsafeMutableBufferPointer { output in
+                chacha20poly1305_encrypt(&state, input.baseAddress, output.baseAddress, input.count)
+            }
+        }
+
+        initialize(&state, nonce: nonce)
+        let result = crypt(&state, input: plaintext)
+        XCTAssertEqual(result.bytes, ciphertext)
+        XCTAssertEqual(result.tag, expectedTag)
+    }
+
+    func testDecryptionAndTagMatchTheRFCVectorWithAReusedContext() {
+        var state = context(filledWith: 0xa5)
+        for splitBlocks in [false, true] {
+            initialize(&state, nonce: nonce)
+            let result = crypt(&state, input: ciphertext, decrypt: true, splitBlocks: splitBlocks)
+            XCTAssertEqual(result.bytes, plaintext)
+            XCTAssertEqual(result.tag, expectedTag)
+        }
+    }
+}
