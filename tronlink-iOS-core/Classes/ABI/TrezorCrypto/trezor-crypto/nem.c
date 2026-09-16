@@ -62,13 +62,17 @@ static inline void nem_write(nem_transaction_ctx *ctx, const uint8_t *data, uint
 	ctx->offset += length;
 }
 
-static inline bool nem_can_write(nem_transaction_ctx *ctx, size_t needed) {
-	return (ctx->offset + needed) <= ctx->size;
+static inline bool nem_reserve(size_t *remaining, size_t needed) {
+	if (needed > *remaining) {
+		return false;
+	}
+	*remaining -= needed;
+	return true;
 }
 
 static inline bool nem_write_mosaic_str(nem_transaction_ctx *ctx, const char *name, const char *value) {
-	uint32_t name_length = strlen(name);
-	uint32_t value_length = strlen(value);
+	size_t name_length = strlen(name);
+	size_t value_length = strlen(value);
 
 #define NEM_SERIALIZE \
 	serialize_u32(sizeof(uint32_t) + name_length + sizeof(uint32_t) + value_length) \

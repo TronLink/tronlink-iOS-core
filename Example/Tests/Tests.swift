@@ -1153,6 +1153,132 @@ final class NaturalUnitsConversionTests: XCTestCase {
     }
 }
 
+final class NEMSerializationBoundsTests: XCTestCase {
+    private let commonHeader = Array(Data(hex:
+        "01010000010000680403020120000000" +
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+        "080706050403020144332211"))
+
+    private func serialize(capacity: Int, offset: Int = 0,
+                           _ write: (inout nem_transaction_ctx, UnsafePointer<UInt8>?) -> Bool)
+        -> (success: Bool, offset: Int, bytes: [UInt8]) {
+        // Keep physical guard storage so a logical capacity overrun is observable.
+        let padding = 8
+        var storage = [UInt8](repeating: 0xa5, count: max(capacity, 128) + 2 * padding)
+        let signer = (0..<32).map { UInt8($0) }
+        var context = nem_transaction_ctx()
+        let success = storage.withUnsafeMutableBufferPointer { output in
+            signer.withUnsafeBufferPointer { key in
+                nem_transaction_start(&context, key.baseAddress,
+                                      output.baseAddress?.advanced(by: padding), capacity)
+                context.offset = offset
+                return write(&context, key.baseAddress)
+            }
+        }
+        XCTAssertTrue(storage.prefix(padding).allSatisfy { $0 == 0xa5 })
+        XCTAssertTrue(storage.dropFirst(padding + capacity).allSatisfy { $0 == 0xa5 },
+                      "Wrote beyond declared capacity \(capacity)")
+        return (success, context.offset, Array(storage.dropFirst(padding).prefix(capacity)))
+    }
+
+    private func writeCommon(_ context: inout nem_transaction_ctx,
+                             _ signer: UnsafePointer<UInt8>?) -> Bool {
+        return nem_transaction_write_common(&context, 0x0101, 0x68000001, 0x01020304,
+                                            signer, 0x0102030405060708, 0x11223344)
+    }
+
+    func testCommonHeaderRejectsEveryShortCapacityIncluding56Through59() {
+        for capacity in 0..<60 {
+            let result = serialize(capacity: capacity, writeCommon)
+            XCTAssertFalse(result.success, "Capacity \(capacity)")
+            XCTAssertEqual(result.offset, 0)
+            XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+        }
+    }
+
+    func testCommonHeaderKeepsGoldenEncodingAtExactCapacity() {
+        let result = serialize(capacity: 60, writeCommon)
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(result.offset, 60)
+        XCTAssertEqual(result.bytes, commonHeader)
+    }
+
+    func testAppendingChecksRemainingCapacityAndPreservesEarlierBytes() {
+        for capacity in [66, 67] {
+            let result = serialize(capacity: capacity, offset: 7, writeCommon)
+            XCTAssertEqual(result.success, capacity == 67)
+            XCTAssertEqual(result.offset, capacity == 67 ? 67 : 7)
+            XCTAssertTrue(result.bytes.prefix(7).allSatisfy { $0 == 0xa5 })
+            if capacity == 67 {
+                XCTAssertEqual(Array(result.bytes.dropFirst(7)), commonHeader)
+            } else {
+                XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+            }
+        }
+    }
+
+    func testMosaicCountsBothLengthPrefixesBeforeWriting() {
+        let golden = Array(Data(hex: "160000000a000000010000006101000000620100000000000000"))
+        for capacity in 0...26 {
+            let result = serialize(capacity: capacity) { context, _ in
+                nem_transaction_write_mosaic(&context, "a", "b", 1)
+            }
+            XCTAssertEqual(result.success, capacity == 26)
+            XCTAssertEqual(result.offset, capacity == 26 ? 26 : 0)
+            if capacity == 26 {
+                XCTAssertEqual(result.bytes, golden)
+            } else {
+                XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+            }
+        }
+    }
+
+    func testTransferNeverWritesPastCapacityAcrossSuccessiveBlocks() {
+        let recipient = String(repeating: "A", count: 40)
+        let golden = commonHeader + [0x28, 0, 0, 0] + [UInt8](repeating: 0x41, count: 40)
+            + [1, 0, 0, 0, 0, 0, 0, 0] + [0, 0, 0, 0]
+        for capacity in 0...116 {
+            let result = serialize(capacity: capacity) { context, signer in
+                nem_transaction_create_transfer(&context, 0x68, 0x01020304, signer,
+                                                0x0102030405060708, 0x11223344,
+                                                recipient, 1, nil, 0, false, 0)
+            }
+            XCTAssertEqual(result.success, capacity == 116)
+            // Earlier complete blocks may remain on failure; the failing block is untouched.
+            let written = capacity < 60 ? 0 : (capacity < 112 ? 60 : (capacity < 116 ? 112 : 116))
+            XCTAssertEqual(result.offset, written)
+            XCTAssertEqual(Array(result.bytes.prefix(written)), Array(golden.prefix(written)))
+            XCTAssertTrue(result.bytes.dropFirst(written).allSatisfy { $0 == 0xa5 })
+        }
+    }
+
+    func testInvalidOffsetCannotWrapTheCapacityCheck() {
+        // size_t is imported as Int; preserve the C SIZE_MAX - 3 bit pattern.
+        for offset in [65, Int(bitPattern: UInt.max - 3)] {
+            let result = serialize(capacity: 64, offset: offset, writeCommon)
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.offset, offset)
+            XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+        }
+    }
+
+    func testBlobLengthMustFitIts32BitPrefixBeforeReadingInput() {
+        let result = serialize(capacity: 128) { context, signer in
+            var inner = nem_transaction_ctx()
+            inner.buffer = UnsafeMutablePointer(mutating: signer)
+            inner.offset = Int(UInt32.max) + 1
+            inner.size = inner.offset
+            // Deliberately oversized metadata must be rejected without reading the blob.
+            // Advertise enough capacity to isolate the uint32 length check.
+            context.size = Int.max
+            return nem_transaction_create_multisig(&context, 0x68, 0, signer, 0, 0, &inner)
+        }
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.offset, 60)
+        XCTAssertTrue(result.bytes.dropFirst(60).allSatisfy { $0 == 0xa5 })
+    }
+}
+
 final class EmbeddedWeb3GoldenTests: XCTestCase {
     private let privateKeyData = Data(repeating: 0, count: 31) + Data([1])
     private let messageHash = Data(repeating: 0x11, count: 32)

@@ -78,6 +78,10 @@ bool nem_validate_address(const char *address, uint8_t network);
 void nem_transaction_start(nem_transaction_ctx *ctx, const ed25519_public_key public_key, uint8_t *buffer, size_t size);
 size_t nem_transaction_end(nem_transaction_ctx *ctx, const ed25519_secret_key private_key, ed25519_signature signature);
 
+/* Serialization functions return false if the output capacity is insufficient
+ * or a blob length cannot fit its uint32_t prefix. Earlier blocks may already
+ * have been written: discard the partial transaction and restart before retrying.
+ */
 bool nem_transaction_write_common(nem_transaction_ctx *context,
 	uint32_t type,
 	uint32_t version,
