@@ -4825,3 +4825,129 @@ final class Blake256EmptyUpdateRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class Bech32SeparatorRegressionTests: XCTestCase {
+    private func decode(_ address: String, expectUntouched: Bool = false)
+        -> (status: Int32, hrp: String, data: [UInt8]) {
+        let hrpCapacity = max(0, address.utf8.count - 6)
+        let dataCapacity = max(0, address.utf8.count - 8)
+        // Guard bytes follow the documented capacities and catch the original overwrite.
+        var hrp = [CChar](repeating: 0x5a, count: hrpCapacity + 1 + 8)
+        var data = [UInt8](repeating: 0xa5, count: dataCapacity + 2)
+        var length = 0
+        let status = hrp.withUnsafeMutableBufferPointer { prefix in
+            data.withUnsafeMutableBufferPointer { payload in
+                bech32_decode(prefix.baseAddress?.advanced(by: 1),
+                              payload.baseAddress?.advanced(by: 1), &length, address)
+            }
+        }
+        XCTAssertEqual(hrp.first, 0x5a, address)
+        XCTAssertEqual(Array(hrp.suffix(8)), [CChar](repeating: 0x5a, count: 8), address)
+        XCTAssertEqual(data.first, 0xa5, address)
+        XCTAssertEqual(data.last, 0xa5, address)
+        if expectUntouched {
+            XCTAssertTrue(hrp.allSatisfy { $0 == 0x5a }, address)
+            XCTAssertTrue(data.allSatisfy { $0 == 0xa5 }, address)
+        }
+        guard status == 1 else { return (status, "", []) }
+        XCTAssertLessThanOrEqual(length, dataCapacity, address)
+        let prefix = hrp.dropFirst().prefix(hrpCapacity)
+        XCTAssertTrue(prefix.contains(0), address)
+        let bytes = prefix.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        return (status, String(decoding: bytes, as: UTF8.self),
+                Array(data.dropFirst().prefix(min(length, dataCapacity))))
+    }
+
+    private func decodeSegwit(_ address: String, hrp: String)
+        -> (status: Int32, version: Int32, length: Int, program: [UInt8]) {
+        var version: Int32 = -1
+        var length = 99
+        var program = [UInt8](repeating: 0xa5, count: 42)
+        let status = program.withUnsafeMutableBufferPointer {
+            segwit_addr_decode(&version, $0.baseAddress?.advanced(by: 1), &length, hrp, address)
+        }
+        XCTAssertEqual(program.first, 0xa5, address)
+        XCTAssertEqual(program.last, 0xa5, address)
+        return (status, version, length, Array(program.dropFirst().prefix(40)))
+    }
+
+    func testMissingSeparatorsAreRejectedBeforeWritingOutputs() {
+        for length in 8 ... 90 {
+            for character in ["q", "Q", "~"] {
+                let address = String(repeating: character, count: length)
+                XCTAssertEqual(decode(address, expectUntouched: true).status, 0, address)
+            }
+        }
+        // The missing-separator vector from BIP 173.
+        XCTAssertEqual(decode("pzry9x0s0muk", expectUntouched: true).status, 0)
+    }
+
+    func testMalformedSeparatorsAndLengthsAreRejectedBeforeWritingOutputs() {
+        let inputs = ["", "a12uel5", "1qzzfhee", "bc1qqqqq", "bcqqqqq1",
+                      String(repeating: "q", count: 91)]
+        for address in inputs {
+            XCTAssertEqual(decode(address, expectUntouched: true).status, 0, address)
+        }
+    }
+
+    func testPublishedBech32VectorsPreservePrefixesPayloadsAndCaseRules() {
+        // BIP 173: https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki#test-vectors
+        let longestHRP = "an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio"
+        let vectors: [(address: String, hrp: String, data: [UInt8])] = [
+            ("a12uel5l", "a", []),
+            (longestHRP + "1tt5tgs", longestHRP, []),
+            ("abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw", "abcdef", (0 ..< 32).map { UInt8($0) }),
+            ("11" + String(repeating: "q", count: 82) + "c8247j", "1", [UInt8](repeating: 0, count: 82)),
+            ("?1ezyfcl", "?", [])
+        ]
+        for vector in vectors {
+            for address in [vector.address, vector.address.uppercased()] {
+                let result = decode(address)
+                XCTAssertEqual(result.status, 1, address)
+                XCTAssertEqual(result.hrp, vector.hrp, address)
+                XCTAssertEqual(result.data, vector.data, address)
+            }
+        }
+        XCTAssertEqual(decode("a12UEL5L").status, 0)
+        XCTAssertEqual(decode("a12uel5q").status, 0)
+    }
+
+    func testSegwitWrapperRejectsMissingSeparatorsWithoutChangingProgram() {
+        // 85...90 characters exceeded the wrapper's old 84-byte local HRP buffer.
+        for length in [0, 7, 8, 83, 84, 85, 86, 87, 88, 89, 90, 91] {
+            let result = decodeSegwit(String(repeating: "q", count: length), hrp: "bc")
+            XCTAssertEqual(result.status, 0, "Length \(length)")
+            XCTAssertEqual(result.version, -1)
+            XCTAssertEqual(result.length, 99)
+            XCTAssertEqual(result.program, [UInt8](repeating: 0xa5, count: 40))
+        }
+    }
+
+    func testPublishedSegwitV0VectorsPreserveProgramsAndNetworkChecks() {
+        let vectors: [(address: String, hrp: String, program: String)] = [
+            ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "bc",
+             "751e76e8199196d454941c45d1b3a323f1433bd6"),
+            ("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7", "tb",
+             "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262")
+        ]
+        for vector in vectors {
+            let expected = Array(Data(hex: vector.program))
+            for address in [vector.address, vector.address.uppercased()] {
+                let result = decodeSegwit(address, hrp: vector.hrp)
+                XCTAssertEqual(result.status, 1, address)
+                XCTAssertEqual(result.version, 0)
+                XCTAssertEqual(result.length, expected.count)
+                XCTAssertEqual(Array(result.program.prefix(expected.count)), expected)
+                XCTAssertEqual(Array(result.program.dropFirst(expected.count)),
+                               [UInt8](repeating: 0xa5, count: 40 - expected.count))
+            }
+            let wrongNetwork = vector.hrp == "bc" ? "tb" : "bc"
+            XCTAssertEqual(decodeSegwit(vector.address, hrp: wrongNetwork).status, 0)
+            let mixedCase = String(vector.address.prefix(1)).uppercased() + String(vector.address.dropFirst())
+            XCTAssertEqual(decodeSegwit(mixedCase, hrp: vector.hrp).status, 0)
+            let badChecksum = String(vector.address.dropLast()) + "q"
+            XCTAssertEqual(decodeSegwit(badChecksum, hrp: vector.hrp).status, 0)
+        }
+    }
+}

@@ -96,6 +96,10 @@ int bech32_decode(char* hrp, uint8_t *data, size_t *data_len, const char *input)
     while (*data_len < input_len && input[(input_len - 1) - *data_len] != '1') {
         ++(*data_len);
     }
+    /* Reject a missing separator before unsigned subtraction or output writes. */
+    if (*data_len == input_len) {
+        return 0;
+    }
     hrp_len = input_len - (1 + *data_len);
     if (hrp_len < 1 || *data_len < 6) {
         return 0;
