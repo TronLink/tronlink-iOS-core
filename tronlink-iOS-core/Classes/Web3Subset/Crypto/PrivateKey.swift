@@ -75,12 +75,12 @@ public class PrivateKey {
 }
 
 
-/// Signature of some hash. You can get it by calling PrivateKey.sign(hash:)
+/// A 65-byte R || S || recovery-ID signature, as returned by PrivateKey.sign(hash:).
 public class Signature {
     /// Signature data
     public let data: Data
     
-    /// Init with data. Don't forget to call .check(compressed:) if you want to init with custom data
+    /// Creates an unchecked signature. Call check() before using components from custom data.
     ///
     /// - Parameter data: Signature data
     public init(data: Data) {
@@ -88,26 +88,30 @@ public class Signature {
     }
     
     
-    /// Checks for signature
+    /// Checks the encoded length and recovery ID, not cryptographic validity.
     ///
-    /// - Parameter compressed: Checks for compressed signature (33 bytes long)
+    /// - Parameter compressed: Retained for source compatibility. Must be false;
+    ///   compressed signatures are not supported and true always throws.
     /// - Throws: SECP256K1Error.invalidSignatureSize or SECP256DataError.signatureCorrupted
     public func check(compressed: Bool = false) throws {
-        if compressed {
-            guard data.count == 33 else { throw SECP256K1Error.invalidSignatureSize }
-        } else {
-            guard data.count == 65 else { throw SECP256K1Error.invalidSignatureSize }
-        }
+        try data.checkSignatureSize(compressed: compressed)
         guard v < 4 else { throw SECP256DataError.signatureCorrupted }
     }
     
-    /// Signature first 32 bytes
-    public lazy var r = BigUInt(data[0..<32])
-    /// Signature next 32 bytes
-    public lazy var s = BigUInt(data[32..<64])
-    /// Last signature byte. Should be less than 4
+    /// First 32 bytes. Returns zero for an invalid length; call check() before use.
+    public lazy var r: BigUInt = {
+        guard data.count == 65 else { return BigUInt(0) }
+        return BigUInt(data.prefix(32))
+    }()
+    /// Next 32 bytes. Returns zero for an invalid length; call check() before use.
+    public lazy var s: BigUInt = {
+        guard data.count == 65 else { return BigUInt(0) }
+        return BigUInt(data.dropFirst(32).prefix(32))
+    }()
+    /// Recovery ID, with 27...30 normalized to 0...3. An invalid length returns
+    /// UInt8.max, which is not a valid recovery ID; call check() before use.
     public lazy var v: UInt8 = {
-        var v = data.last!
+        guard data.count == 65, var v = data.last else { return UInt8.max }
         if v >= 27 {
             v = v - 27
         }

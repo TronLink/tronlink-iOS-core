@@ -715,3 +715,104 @@ final class ECDSADigestVerificationTests: XCTestCase {
         }
     }
 }
+
+
+final class SignatureLayoutRegressionTests: XCTestCase {
+    private let components = Data(repeating: 0, count: 31) + Data([1])
+        + Data(repeating: 0, count: 31) + Data([2])
+
+    private func slice(_ data: Data, offset: Int) -> Data {
+        let storage = Data(repeating: 0xa5, count: offset) + data + Data([0xa5])
+        return storage[offset ..< offset + data.count]
+    }
+
+    private func assertInvalidSize(_ body: () throws -> Void,
+                                   file: StaticString = #file, line: UInt = #line) {
+        XCTAssertThrowsError(try body(), file: file, line: line) { error in
+            guard case SECP256K1Error.invalidSignatureSize = error else {
+                return XCTFail("Unexpected error: \(error)", file: file, line: line)
+            }
+        }
+    }
+
+    func testCheckedSignaturesExposeAllComponentsForSlicesAndLegacyRecoveryIDs() throws {
+        let recoveryIDs: [(UInt8, UInt8)] = [
+            (0, 0), (1, 1), (2, 2), (3, 3), (27, 0), (28, 1), (29, 2), (30, 3)
+        ]
+        for (encoded, normalized) in recoveryIDs {
+            let data = components + Data([encoded])
+            for offset in [0, 1, 17, 80] {
+                let input = slice(data, offset: offset)
+                XCTAssertEqual(input.startIndex, offset)
+                let signature = TLCore.Signature(data: input)
+                try signature.check()
+                XCTAssertEqual(signature.data, data)
+                XCTAssertEqual(signature.r, BigUInt(1))
+                XCTAssertEqual(signature.s, BigUInt(2))
+                XCTAssertEqual(signature.v, normalized)
+                XCTAssertEqual(signature.v + 27, normalized + 27)
+            }
+        }
+    }
+
+    func testUnsupportedLengthsFailAndComponentReadsDoNotTrap() {
+        for count in Array(0 ... 66) + [128] where count != 65 {
+            let data = Data(repeating: 1, count: count)
+            for input in [data, slice(data, offset: 80)] {
+                let signature = TLCore.Signature(data: input)
+                assertInvalidSize { try signature.check() }
+                assertInvalidSize { try signature.check(compressed: true) }
+                assertInvalidSize { try input.checkSignatureSize() }
+                assertInvalidSize { try input.checkSignatureSize(compressed: false) }
+                for maybeCompressed in [false, true] {
+                    assertInvalidSize { try input.checkSignatureSize(maybeCompressed: maybeCompressed) }
+                }
+                // These are invalid sentinels, not a successfully parsed signature.
+                XCTAssertEqual(signature.r, BigUInt(0))
+                XCTAssertEqual(signature.s, BigUInt(0))
+                XCTAssertEqual(signature.v, UInt8.max)
+            }
+        }
+    }
+
+    func testCompressedFlagNeverAcceptsAnUnsupportedRepresentation() throws {
+        let data = components + Data([1])
+        let signature = TLCore.Signature(data: data)
+        try signature.check(compressed: false)
+        assertInvalidSize { try signature.check(compressed: true) }
+        assertInvalidSize { try data.checkSignatureSize(compressed: true) }
+        for maybeCompressed in [false, true] {
+            XCTAssertNoThrow(try data.checkSignatureSize(maybeCompressed: maybeCompressed))
+        }
+        for encoded: UInt8 in [0, 1, 2, 3, 27, 28, 29, 30] {
+            let short = TLCore.Signature(data: Data(repeating: 1, count: 32) + Data([encoded]))
+            assertInvalidSize { try short.check(compressed: true) }
+        }
+    }
+
+    func testMalformedRecoveryIDsStillFailWithTheExistingError() {
+        for encoded: UInt8 in [4, 26, 31, 255] {
+            let signature = TLCore.Signature(data: slice(components + Data([encoded]), offset: 17))
+            XCTAssertThrowsError(try signature.check()) { error in
+                guard case SECP256DataError.signatureCorrupted = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testSoftwareSigningKeepsTheExistingSignatureAndComponents() throws {
+        let key = TLCore.PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let signature = try key.sign(hash: Data(repeating: 0x11, count: 32))
+        try signature.check()
+        let r = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc4462"
+        let s = "6aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da"
+        XCTAssertEqual(signature.data.hex, r + s + "01")
+        XCTAssertEqual(signature.r.serialize().hex, r)
+        XCTAssertEqual(signature.s.serialize().hex, s)
+        XCTAssertEqual(signature.v, 1)
+        // Preserve the app's existing EIP-712 conversion from recovery ID 1 to 28.
+        XCTAssertEqual(signature.r.serialize() + signature.s.serialize() + Data([signature.v + 27]),
+                       try XCTUnwrap(Data.fromHex(r + s + "1c")))
+    }
+}

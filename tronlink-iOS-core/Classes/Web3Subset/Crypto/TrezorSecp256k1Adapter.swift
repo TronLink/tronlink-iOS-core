@@ -2,23 +2,17 @@ import Foundation
 
 extension Data {
     func checkSignatureSize() throws {
-        try checkSignatureSize(compressed: false)
+        guard count == 65 else { throw SECP256K1Error.invalidSignatureSize }
     }
 
     func checkSignatureSize(compressed: Bool) throws {
-        if compressed {
-            guard count == 33 else { throw SECP256K1Error.invalidSignatureSize }
-        } else {
-            guard count == 65 else { throw SECP256K1Error.invalidSignatureSize }
-        }
+        guard !compressed else { throw SECP256K1Error.invalidSignatureSize }
+        try checkSignatureSize()
     }
 
     func checkSignatureSize(maybeCompressed: Bool) throws {
-        if maybeCompressed {
-            guard count == 65 || count == 33 else { throw SECP256K1Error.invalidSignatureSize }
-        } else {
-            guard count == 65 else { throw SECP256K1Error.invalidSignatureSize }
-        }
+        // Only the 65-byte R || S || recovery-ID representation is supported.
+        try checkSignatureSize()
     }
 
     func checkHashSize() throws {
