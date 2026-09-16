@@ -149,6 +149,9 @@ void bn_divmod58(bignum256 *a, uint32_t *r);
 
 void bn_divmod1000(bignum256 *a, uint32_t *r);
 
+// Returns the formatted length excluding the NUL. outlen includes space for the
+// NUL. Insufficient capacity returns 0 and sets out[0] to NUL when out is non-NULL
+// and outlen > 0. A NULL output or zero capacity returns 0 without writing.
 size_t bn_format(const bignum256 *amnt, const char *prefix, const char *suffix, unsigned int decimals, int exponent, bool trailing, char *out, size_t outlen);
 
 static inline size_t bn_format_uint64(uint64_t amount, const char *prefix, const char *suffix, unsigned int decimals, int exponent, bool trailing, char *out, size_t outlen)

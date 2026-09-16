@@ -4211,3 +4211,115 @@ final class HDNodeSigningSupportRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class BigNumberFormattingRegressionTests: XCTestCase {
+    private func withCString<Result>(_ string: String?, _ body: (UnsafePointer<CChar>?) -> Result) -> Result {
+        guard let string = string else { return body(nil) }
+        return string.withCString { body($0) }
+    }
+
+    private func assertCapacityBounds(expected: String,
+                                      format: (UnsafeMutablePointer<CChar>?, Int) -> Int) {
+        let expectedBytes = expected.utf8.map { CChar(bitPattern: $0) }
+        // Exercise every short capacity, the exact fit, and spare capacity.
+        for capacity in 0 ... expectedBytes.count + 4 {
+            // Both surrounding bytes are outside the advertised output buffer.
+            var buffer = [CChar](repeating: 0x58, count: capacity + 2)
+            let length = buffer.withUnsafeMutableBufferPointer {
+                format($0.baseAddress?.advanced(by: 1), capacity)
+            }
+            XCTAssertEqual(buffer.first, CChar(0x58), "Leading canary, capacity \(capacity)")
+            XCTAssertEqual(buffer.last, CChar(0x58), "Trailing canary, capacity \(capacity)")
+            if capacity <= expectedBytes.count {
+                XCTAssertEqual(length, 0, "Capacity \(capacity)")
+                if capacity > 0 {
+                    XCTAssertEqual(buffer[1], 0, "Failed formatting must return an empty string")
+                }
+            } else {
+                XCTAssertEqual(length, expectedBytes.count)
+                XCTAssertEqual(Array(buffer.dropFirst().prefix(expectedBytes.count + 1)), expectedBytes + [0])
+            }
+        }
+    }
+
+    private func assertFormatting(_ value: UInt64, prefix: String? = nil, suffix: String? = nil,
+                                  decimals: UInt32 = 0, exponent: Int32 = 0, trailing: Bool = false,
+                                  expected: String) {
+        for useWrapper in [false, true] {
+            var amount = bignum256()
+            bn_read_uint64(value, &amount)
+            withCString(prefix) { prefixPointer in
+                withCString(suffix) { suffixPointer in
+                    assertCapacityBounds(expected: expected) { output, capacity in
+                        if useWrapper {
+                            return bn_format_uint64(value, prefixPointer, suffixPointer, decimals,
+                                                    exponent, trailing, output, capacity)
+                        }
+                        return bn_format(&amount, prefixPointer, suffixPointer, decimals,
+                                         exponent, trailing, output, capacity)
+                    }
+                }
+            }
+        }
+    }
+
+    func testNullOutputIsRejectedByBothEntryPoints() {
+        var amount = bignum256()
+        bn_read_uint64(1, &amount)
+        for capacity in [0, 1, 32] {
+            XCTAssertEqual(bn_format(&amount, "prefix", "suffix", 0, 0, false, nil, capacity), 0)
+            XCTAssertEqual(bn_format_uint64(1, "prefix", "suffix", 0, 0, false, nil, capacity), 0)
+        }
+    }
+
+    func testZeroAndShortCapacitiesRespectPrefixAndSuffixBoundaries() {
+        let cases: [(String?, String?, String)] = [
+            (nil, nil, "1"),
+            ("", "", "1"),
+            ("prefix", nil, "prefix1"),
+            (nil, "suffix", "1suffix"),
+            ("prefix", "suffix", "prefix1suffix"),
+            ("金额 ", " TRX", "金额 1 TRX")
+        ]
+        for (prefix, suffix, expected) in cases {
+            assertFormatting(1, prefix: prefix, suffix: suffix, expected: expected)
+        }
+    }
+
+    func testDigitDecimalAndExponentBoundariesPreserveNormalOutput() {
+        let cases: [(UInt64, UInt32, Int32, Bool, String)] = [
+            (0, 0, 0, false, "0"),
+            (123456789, 0, 0, false, "123456789"),
+            (12345678, 6, 0, false, "12.345678"),
+            (12340000, 6, 0, false, "12.34"),
+            (12340000, 6, 0, true, "12.340000"),
+            (1, 6, 0, false, "0.000001"),
+            (0, 6, 0, true, "0.000000"),
+            (123, 0, 2, false, "12300"),
+            (12345, 0, -2, false, "123")
+        ]
+        for (value, decimals, exponent, trailing, expected) in cases {
+            assertFormatting(value, decimals: decimals, exponent: exponent,
+                             trailing: trailing, expected: expected)
+        }
+        assertFormatting(1, prefix: "[", suffix: "]", decimals: 8, trailing: true, expected: "[0.00000001]")
+    }
+
+    func testFullWidth256BitValueRespectsCapacityAndPreservesEveryDigit() {
+        var amount = bignum256()
+        let bytes = [UInt8](repeating: 0xff, count: 32)
+        bytes.withUnsafeBufferPointer { bn_read_be($0.baseAddress, &amount) }
+        let expected = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        assertCapacityBounds(expected: expected) { output, capacity in
+            bn_format(&amount, nil, nil, 0, 0, false, output, capacity)
+        }
+    }
+
+    func testExistingInternalCallersRetainTheirFormattingAndCapacity() {
+        // address.c uses 16 bytes for a uint32 chain ID followed by "0x".
+        assertFormatting(UInt64(UInt32.max), suffix: "0x", expected: "42949672950x")
+        // nem.c uses 21 bytes for the decimal representation of a uint64.
+        assertFormatting(UInt64.max, expected: "18446744073709551615")
+    }
+}

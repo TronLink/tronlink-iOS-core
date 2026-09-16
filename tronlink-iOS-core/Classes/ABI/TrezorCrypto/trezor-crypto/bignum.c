@@ -989,8 +989,20 @@ void bn_divmod1000(bignum256 *a, uint32_t *r)
 
 size_t bn_format(const bignum256 *amnt, const char *prefix, const char *suffix, unsigned int decimals, int exponent, bool trailing, char *out, size_t outlen)
 {
+	if (out == NULL || outlen == 0) {
+		return 0;
+	}
+
 	size_t prefixlen = prefix ? strlen(prefix) : 0;
 	size_t suffixlen = suffix ? strlen(suffix) : 0;
+
+	/* Reserve at least one digit and the NUL before writing or forming pointers.
+	 * Subtract only after checking prefixlen to avoid size_t overflow/underflow.
+	 */
+	if (prefixlen >= outlen || suffixlen >= outlen - prefixlen - 1) {
+		out[0] = '\0';
+		return 0;
+	}
 
 	/* add prefix to beginning of out buffer */
 	if (prefixlen) {
@@ -1009,7 +1021,10 @@ size_t bn_format(const bignum256 *amnt, const char *prefix, const char *suffix, 
 
 #define BN_FORMAT_PUSH_CHECKED(c) \
 	do { \
-		if (str == start) return 0; \
+		if (str == start) { \
+			out[0] = '\0'; \
+			return 0; \
+		} \
 		*--str = (c); \
 	} while (0)
 
