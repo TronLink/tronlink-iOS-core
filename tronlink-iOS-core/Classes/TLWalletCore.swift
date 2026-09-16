@@ -212,7 +212,7 @@ extension TLWalletCore {
      * @param unSignedString The string to be signed
      * @param password Password to unlock the KeyStore
      * @param address Account address associated with the string to be signed
-     * @param messageType Message type, defaults to string
+     * @param messageType Message type, defaults to UTF-8 string (including any 0x prefix)
      * @return Result containing the signed string or a signing error
      */
     public static func signStringV2(keyStore: KeyStore, unSignedString: String, password: String, address: String,_ messageType:TLMessageSignV2Type = .string) -> Result<String, KeystoreError> {
@@ -237,8 +237,11 @@ extension TLWalletCore {
         }
 
         do {
-            var sha3Data = try TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
-            if signType == .signMessageV2 {
+            let sha3Data: Data
+            switch signType {
+            case .signMessage:
+                sha3Data = try TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
+            case .signMessageV2:
                 sha3Data = try TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
             }
             guard sha3Data.count == 32 else {

@@ -5132,3 +5132,120 @@ final class CosiEmptyInputRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class MessageSigningVersionRegressionTests: XCTestCase {
+    private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+    private let password = "message-signing-regression"
+
+    private func withAccount(_ body: (KeyStore, String) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try KeyStore(keyDirectory: directory)
+        let key = try KeystoreKey(password: password, key: privateKey)
+        let account = Account(address: key.address, type: key.type, url: directory.appendingPathComponent("key.json"))
+        try store.addKey(key: key)
+        try store.addAccount(account: account)
+        try body(store, String(base58CheckEncoding: account.address.data))
+    }
+
+    private func expectedDigest(_ payload: Data, version: TLMessageSignType) -> Data {
+        let length = version == .signMessage ? "32" : String(payload.count)
+        let prefix = Data("\u{19}TRON Signed Message:\n\(length)".utf8)
+        return EthereumCrypto.hash(prefix + payload)
+    }
+
+    private func assertSignature(_ result: Result<String, KeystoreError>, digest: Data,
+                                 file: StaticString = #file, line: UInt = #line) {
+        guard case .success(let encoded) = result else {
+            return XCTFail("Expected message signing to succeed", file: file, line: line)
+        }
+        let signature = Data(hex: encoded)
+        XCTAssertEqual(signature.count, 65, file: file, line: line)
+        XCTAssertEqual(encoded, "0x" + EthereumCrypto.sign(hash: digest, privateKey: privateKey).toHexString(),
+                       file: file, line: line)
+        XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: digest,
+                                            publicKey: EthereumCrypto.getPublicKey(from: privateKey)),
+                      file: file, line: line)
+    }
+
+    func testV2SignsHexPrefixedTextWithoutLegacyParsing() throws {
+        try withAccount { store, address in
+            for message in ["0xhello", "0x123", "0x", "0x你好🔐"] {
+                let digest = expectedDigest(Data(message.utf8), version: .signMessageV2)
+                assertSignature(TLWalletCore.signStringV2(keyStore: store, unSignedString: message,
+                                                         password: password, address: address), digest: digest)
+                assertSignature(TLWalletCore.signTypeString(keyStore: store, unSignedString: message,
+                                                           password: password, address: address,
+                                                           signType: .signMessageV2, .string), digest: digest)
+            }
+        }
+    }
+
+    func testExistingSuccessfulInputsKeepTheirPayloadAndSignature() throws {
+        let cases: [(message: String, version: TLMessageSignType, type: TLMessageSignV2Type, bytes: Data)] = [
+            ("hello world", .signMessage, .string, Data("hello world".utf8)),
+            ("3132", .signMessage, .string, Data([0x31, 0x32])),
+            ("0x3132", .signMessage, .string, Data([0x31, 0x32])),
+            ("hello world", .signMessageV2, .string, Data("hello world".utf8)),
+            ("0x1234", .signMessageV2, .string, Data("0x1234".utf8)),
+            ("3132", .signMessageV2, .string, Data("3132".utf8)),
+            ("你好🔐", .signMessageV2, .string, Data("你好🔐".utf8)),
+            ("0x3132", .signMessageV2, .hashString, Data([0x31, 0x32])),
+            ("3132", .signMessageV2, .hashString, Data([0x31, 0x32])),
+            ("49,50", .signMessageV2, .array, Data([0x31, 0x32]))
+        ]
+        try withAccount { store, address in
+            for input in cases {
+                let result: Result<String, KeystoreError>
+                switch input.version {
+                case .signMessage:
+                    result = TLWalletCore.signString(keyStore: store, unSignedString: input.message,
+                                                    password: password, address: address)
+                case .signMessageV2:
+                    result = TLWalletCore.signStringV2(keyStore: store, unSignedString: input.message,
+                                                      password: password, address: address, input.type)
+                }
+                assertSignature(result, digest: expectedDigest(input.bytes, version: input.version))
+            }
+        }
+    }
+
+    func testInvalidLegacyHexAndV2ByteInputsRemainRejected() throws {
+        let cases: [(message: String, version: TLMessageSignType, type: TLMessageSignV2Type)] = [
+            ("", .signMessage, .string), ("0x", .signMessage, .string),
+            ("0xhello", .signMessage, .string), ("0x123", .signMessage, .string),
+            ("", .signMessageV2, .string), ("", .signMessageV2, .hashString),
+            ("0x", .signMessageV2, .hashString), ("0xhello", .signMessageV2, .hashString),
+            ("0x123", .signMessageV2, .hashString), ("123", .signMessageV2, .hashString),
+            ("", .signMessageV2, .array), ("1,,2", .signMessageV2, .array),
+            ("256", .signMessageV2, .array), ("-1", .signMessageV2, .array)
+        ]
+        try withAccount { store, address in
+            for input in cases {
+                let result = TLWalletCore.signTypeString(keyStore: store, unSignedString: input.message,
+                                                        password: password, address: address,
+                                                        signType: input.version, input.type)
+                guard case .failure(.invalidSignInput) = result else {
+                    XCTFail("Malformed input must remain invalid: \(input.message)")
+                    continue
+                }
+            }
+        }
+    }
+
+    func testV2TextStillRequiresAMatchingAccountAndCorrectPassword() throws {
+        try withAccount { store, address in
+            let missingAccount = TLWalletCore.signStringV2(keyStore: store, unSignedString: "0xhello",
+                                                          password: password, address: "missing-account")
+            guard case .failure(.accountNotFound) = missingAccount else {
+                return XCTFail("Missing account must be rejected")
+            }
+            let wrongPassword = TLWalletCore.signStringV2(keyStore: store, unSignedString: "0xhello",
+                                                         password: "wrong-password", address: address)
+            guard case .failure(.failedToSignMessage) = wrongPassword else {
+                return XCTFail("Wrong password must not produce a signature")
+            }
+        }
+    }
+}
