@@ -1093,6 +1093,66 @@ final class SingleTLCorePublicAPITests: XCTestCase {
     }
 }
 
+final class NaturalUnitsConversionTests: XCTestCase {
+    func testInsufficientPrecisionThrowsInsteadOfReturningZero() throws {
+        for input in ["1.0000001", "0.0000001"] {
+            let amount = try NaturalUnits(input)
+            XCTAssertThrowsError(try amount.number(with: 6)) { error in
+                guard case NaturalUnits.Error.cannotConvert(let value) = error else {
+                    return XCTFail("Expected cannotConvert, got \(error)")
+                }
+                XCTAssertEqual(value, input)
+            }
+        }
+    }
+
+    func testNegativeIntegerAmountsAreRejectedAtInitialization() {
+        for input in [-1, Int.min] {
+            XCTAssertThrowsError(try NaturalUnits(input)) { error in
+                guard case NaturalUnits.Error.cannotConvert(let value) = error else {
+                    return XCTFail("Expected cannotConvert, got \(error)")
+                }
+                XCTAssertEqual(value, input.description)
+            }
+        }
+    }
+
+    func testNegativePrecisionIsRejectedEvenForZero() throws {
+        for input in [0, 1] {
+            let amount = try NaturalUnits(input)
+            for decimals in [-1, Int.min] {
+                XCTAssertThrowsError(try amount.number(with: decimals))
+            }
+        }
+    }
+
+    func testActualZeroRemainsAValidAmount() throws {
+        XCTAssertEqual(try NaturalUnits(0).number(with: 0), BigUInt(0))
+        XCTAssertEqual(try NaturalUnits("0").number(with: 6), BigUInt(0))
+        XCTAssertEqual(try NaturalUnits("0.000000").number(with: 6), BigUInt(0))
+    }
+
+    func testValidAmountsKeepExactScalingAndAcceptedFormats() throws {
+        let cases: [(String, Int, String)] = [
+            ("1.000001", 6, "1000001"),
+            ("0.000000000000000001", 18, "1"),
+            ("9007199254740993.000001", 6, "9007199254740993000001"),
+            ("2", 0, "2"),
+            (" 1,25 ", 6, "1250000")
+        ]
+        for (input, decimals, expected) in cases {
+            XCTAssertEqual(try NaturalUnits(input).number(with: decimals).description, expected)
+        }
+        XCTAssertEqual(try NaturalUnits(2).number(with: 6), BigUInt(2000000))
+    }
+
+    /// The app uses this optional parser directly, without the NaturalUnits wrapper.
+    func testSharedBigUIntParserRetainsItsFailureContract() throws {
+        XCTAssertNil(BigUInt("1.0000001", decimals: 6))
+        XCTAssertEqual(try XCTUnwrap(BigUInt("1.000001", decimals: 6)), BigUInt(1000001))
+    }
+}
+
 final class EmbeddedWeb3GoldenTests: XCTestCase {
     private let privateKeyData = Data(repeating: 0, count: 31) + Data([1])
     private let messageHash = Data(repeating: 0x11, count: 32)

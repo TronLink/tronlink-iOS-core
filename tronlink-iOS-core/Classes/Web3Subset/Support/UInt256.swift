@@ -135,10 +135,10 @@ extension BigInt {
     }
 }
 
-/// Represents human readable string as wei
-/// Used in requests, where it automatically converts to wei units
+/// A human-readable unsigned amount that can be converted to an asset's base units.
+/// Conversion must succeed at the asset's actual precision before constructing a request.
 public struct NaturalUnits {
-    /// Error for init with string
+    /// Error for invalid amounts or conversions at an unsupported precision.
     public enum Error: Swift.Error {
         /// Cannot convert \(string) to number
         case cannotConvert(String)
@@ -159,13 +159,19 @@ public struct NaturalUnits {
         guard BigUInt(string, decimals: 18) != nil else { throw Error.cannotConvert(string) }
         self.string = string
     }
-    /// Init with int value
-    public init(_ int: Int) {
+    /// Init with a nonnegative integer amount.
+    /// - Throws: Error.cannotConvert if the amount is negative.
+    public init(_ int: Int) throws {
+        guard int >= 0 else { throw Error.cannotConvert(int.description) }
         self.string = int.description
     }
-    /// - Parameter decimals: Number of decimals
-    /// - Returns: Wei units with decimals
-    public func number(with decimals: Int) -> BigUInt {
-        return BigUInt(string, decimals: decimals) ?? 0
+    /// - Parameter decimals: Nonnegative number of decimal places for the target asset.
+    /// - Returns: The amount in base units, without rounding or substituting zero on failure.
+    /// - Throws: Error.cannotConvert if decimals is negative or parsing at that precision fails.
+    public func number(with decimals: Int) throws -> BigUInt {
+        guard decimals >= 0, let number = BigUInt(string, decimals: decimals) else {
+            throw Error.cannotConvert(string)
+        }
+        return number
     }
 }
