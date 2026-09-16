@@ -135,6 +135,9 @@ void blake256_Init( BLAKE256_CTX *S )
 
 void blake256_Update( BLAKE256_CTX *S, const uint8_t *in, size_t inlen )
 {
+  /* Empty chunks must not discard a previously buffered partial block. */
+  if( inlen == 0 ) return;
+
   size_t left = S->buflen;
   size_t fill = 64 - left;
 

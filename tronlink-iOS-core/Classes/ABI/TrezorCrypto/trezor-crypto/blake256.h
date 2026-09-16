@@ -45,6 +45,7 @@ typedef struct {
 } BLAKE256_CTX;
 
 void blake256_Init(BLAKE256_CTX *);
+// A zero-length update preserves the state; its input pointer may be NULL.
 void blake256_Update(BLAKE256_CTX *, const uint8_t *, size_t);
 void blake256_Final(BLAKE256_CTX *, uint8_t *);
 

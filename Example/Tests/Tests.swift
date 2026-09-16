@@ -4711,3 +4711,117 @@ final class RFC7539InitializationRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class Blake256EmptyUpdateRegressionTests: XCTestCase {
+    private func oneShot(_ input: [UInt8], type: HasherType? = nil) -> [UInt8] {
+        var output = [UInt8](repeating: 0, count: 32)
+        input.withUnsafeBufferPointer { source in
+            output.withUnsafeMutableBufferPointer { destination in
+                if let type = type {
+                    hasher_Raw(type, source.baseAddress, source.count, destination.baseAddress)
+                } else {
+                    blake256(source.baseAddress, source.count, destination.baseAddress)
+                }
+            }
+        }
+        return output
+    }
+
+    private func streamed(_ chunks: [[UInt8]]) -> [UInt8] {
+        var context = BLAKE256_CTX()
+        blake256_Init(&context)
+        for chunk in chunks {
+            if chunk.isEmpty {
+                // Both NULL and a valid pointer must be ignored when length is zero.
+                blake256_Update(&context, nil, 0)
+                var marker: UInt8 = 0xa5
+                blake256_Update(&context, &marker, 0)
+            } else {
+                chunk.withUnsafeBufferPointer {
+                    blake256_Update(&context, $0.baseAddress, $0.count)
+                }
+            }
+        }
+        var output = [UInt8](repeating: 0, count: 32)
+        output.withUnsafeMutableBufferPointer { blake256_Final(&context, $0.baseAddress) }
+        return output
+    }
+
+    private func streamedHasher(_ chunks: [[UInt8]], type: HasherType) -> [UInt8] {
+        var hasher = TLCore.Hasher()
+        hasher_Init(&hasher, type)
+        for chunk in chunks {
+            if chunk.isEmpty {
+                hasher_Update(&hasher, nil, 0)
+                var marker: UInt8 = 0xa5
+                hasher_Update(&hasher, &marker, 0)
+            } else {
+                chunk.withUnsafeBufferPointer {
+                    hasher_Update(&hasher, $0.baseAddress, $0.count)
+                }
+            }
+        }
+        var output = [UInt8](repeating: 0, count: 32)
+        output.withUnsafeMutableBufferPointer { hasher_Final(&hasher, $0.baseAddress) }
+        return output
+    }
+
+    func testPublishedVectorsWithEmptyChunksAtEverySplit() {
+        // BLAKE author's reference vectors: https://github.com/veorq/BLAKE/blob/master/blake256.c
+        let vectors: [(count: Int, digest: String)] = [
+            (1, "0ce8d4ef4dd7cd8d62dfded9d4edb0a774ae6a41929a74da23109e8f11139c87"),
+            (72, "d419bad32d504fb7d44d460c42c5593fe544fa4c135dec31e21bd9abdcc22d41")
+        ]
+        for vector in vectors {
+            let input = [UInt8](repeating: 0, count: vector.count)
+            let expected = Array(Data(hex: vector.digest))
+            XCTAssertEqual(oneShot(input), expected)
+            XCTAssertEqual(streamed([input]), expected)
+            for split in 0 ... input.count {
+                let chunks: [[UInt8]] = [[], Array(input.prefix(split)), [],
+                                        Array(input.dropFirst(split)), [], []]
+                XCTAssertEqual(streamed(chunks), expected, "Length \(input.count), split \(split)")
+            }
+        }
+    }
+
+    func testEmptyUpdatesPreserveEveryPartialBlockLength() {
+        // Cover all 64 buffer lengths after zero, one, and two complete blocks.
+        for count in 0 ..< 192 {
+            let input = (0 ..< count).map { UInt8($0) }
+            XCTAssertEqual(streamed([[], input, [], []]), oneShot(input), "Length \(count)")
+        }
+    }
+
+    func testHashingContinuesAfterEmptyUpdatesAcrossBlockBoundaries() {
+        let input = (0 ..< 193).map { UInt8($0) }
+        let expected = oneShot(input)
+        for split in 0 ... input.count {
+            let prefix = Array(input.prefix(split))
+            let suffix = Array(input.dropFirst(split))
+            XCTAssertEqual(streamed([prefix, [], [], suffix, []]), expected, "Split \(split)")
+            let nonemptyChunks = [prefix, suffix].filter { !$0.isEmpty }
+            XCTAssertEqual(streamed(nonemptyChunks), expected, "Split \(split) without empty chunks")
+        }
+    }
+
+    func testAllBlakeHasherVariantsIgnoreEmptyChunks() {
+        let variants: [(type: HasherType, digestLength: Int)] = [
+            (HASHER_BLAKE, 32), (HASHER_BLAKED, 32), (HASHER_BLAKE_RIPEMD, 20)
+        ]
+        for variant in variants {
+            for count in [0, 1, 55, 56, 63, 64, 65, 127, 128, 129] {
+                let input = (0 ..< count).map { UInt8($0) }
+                let expected = Array(oneShot(input, type: variant.type).prefix(variant.digestLength))
+                for split in [0, count / 2, count] {
+                    let chunks: [[UInt8]] = [[], Array(input.prefix(split)), [],
+                                            Array(input.dropFirst(split)), [], []]
+                    let actual = streamedHasher(chunks, type: variant.type)
+                    XCTAssertEqual(Array(actual.prefix(variant.digestLength)), expected,
+                                   "Length \(count), split \(split), hasher \(variant.type)")
+                }
+            }
+        }
+    }
+}
