@@ -58,7 +58,7 @@ bool b58tobin(void *bin, size_t *binszp, const char *b58)
 	size_t i, j;
 	uint8_t bytesleft = binsz % 4;
 	uint32_t zeromask = bytesleft ? (0xffffffff << (bytesleft * 8)) : 0;
-	unsigned zerocount = 0;
+	size_t zerocount = 0;
 	size_t b58sz;
 
 	b58sz = strlen(b58);
@@ -121,15 +121,14 @@ bool b58tobin(void *bin, size_t *binszp, const char *b58)
 	for (i = 0; i < binsz; ++i)
 	{
 		if (binu[i]) {
-			if (zerocount > i) {
-				/* result too large */
-				return false;
-			}
 			break;
 		}
-		--*binszp;
 	}
-	*binszp += zerocount;
+	// Leading zeros must fit even when the entire decoded number is zero.
+	if (zerocount > i) {
+		return false;
+	}
+	*binszp = binsz - i + zerocount;
 
 	return true;
 }
@@ -213,15 +212,15 @@ int base58_encode_check(const uint8_t *data, int datalen, HasherType hasher_type
 
 int base58_decode_check(const char *str, HasherType hasher_type, uint8_t *data, int datalen)
 {
-	if (datalen > 128) {
+	if (datalen < 0 || datalen > 128) {
 		return 0;
 	}
 	uint8_t d[datalen + 4];
 	size_t res = datalen + 4;
-	if (b58tobin(d, &res, str) != true) {
+	if (b58tobin(d, &res, str) != true || res < 4 || res > sizeof(d)) {
 		return 0;
 	}
-	uint8_t *nd = d + datalen + 4 - res;
+	uint8_t *nd = d + sizeof(d) - res;
 	if (b58check(nd, res, hasher_type, str) < 0) {
 		return 0;
 	}
@@ -267,15 +266,15 @@ int base58gph_encode_check(const uint8_t *data, int datalen, char *str, int strs
 
 int base58gph_decode_check(const char *str, uint8_t *data, int datalen)
 {
-	if (datalen > 128) {
+	if (datalen < 0 || datalen > 128) {
 		return 0;
 	}
 	uint8_t d[datalen + 4];
 	size_t res = datalen + 4;
-	if (b58tobin(d, &res, str) != true) {
+	if (b58tobin(d, &res, str) != true || res < 4 || res > sizeof(d)) {
 		return 0;
 	}
-	uint8_t *nd = d + datalen + 4 - res;
+	uint8_t *nd = d + sizeof(d) - res;
 	if (b58gphcheck(nd, res, str) < 0) {
 		return 0;
 	}

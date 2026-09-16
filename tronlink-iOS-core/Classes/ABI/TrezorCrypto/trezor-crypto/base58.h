@@ -33,9 +33,14 @@ extern const char b58digits_ordered[];
 extern const int8_t b58digits_map[];
 
 int base58_encode_check(const uint8_t *data, int len, HasherType hasher_type, char *str, int strsize);
+// Returns the decoded payload length, or 0 on failure. datalen is the output
+// capacity (0..128); decoding failure leaves data unchanged.
 int base58_decode_check(const char *str, HasherType hasher_type, uint8_t *data, int datalen);
 
 // Private
+// On success, bytes are right-aligned in bin and *binszp is their length, no
+// greater than the input capacity. On failure, *binszp is unchanged and the
+// contents of bin are unspecified.
 bool b58tobin(void *bin, size_t *binszp, const char *b58);
 int b58check(const void *bin, size_t binsz, HasherType hasher_type, const char *base58str);
 bool b58enc(char *b58, size_t *b58sz, const void *data, size_t binsz);

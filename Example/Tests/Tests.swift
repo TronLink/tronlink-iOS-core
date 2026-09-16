@@ -4323,3 +4323,141 @@ final class BigNumberFormattingRegressionTests: XCTestCase {
         assertFormatting(UInt64.max, expected: "18446744073709551615")
     }
 }
+
+
+final class Base58DecodingBoundsRegressionTests: XCTestCase {
+    private func decodeRaw(_ string: String, capacity: Int) -> (success: Bool, length: Int, bytes: [UInt8]) {
+        var length = capacity
+        var buffer = [UInt8](repeating: 0xa5, count: capacity + 2)
+        let success = buffer.withUnsafeMutableBufferPointer {
+            b58tobin($0.baseAddress?.advanced(by: 1), &length, string)
+        }
+        XCTAssertEqual(buffer.first, 0xa5)
+        XCTAssertEqual(buffer.last, 0xa5)
+        return (success, length, Array(buffer.dropFirst().prefix(capacity)))
+    }
+
+    private func decodeChecked(_ string: String, capacity: Int32) -> (length: Int32, bytes: [UInt8]) {
+        let storageSize = max(0, Int(capacity))
+        var buffer = [UInt8](repeating: 0xa5, count: storageSize + 2)
+        let length = buffer.withUnsafeMutableBufferPointer {
+            base58_decode_check(string, HASHER_SHA2D, $0.baseAddress?.advanced(by: 1), capacity)
+        }
+        XCTAssertEqual(buffer.first, 0xa5)
+        XCTAssertEqual(buffer.last, 0xa5)
+        return (length, Array(buffer.dropFirst().prefix(storageSize)))
+    }
+
+    func testAllLeadingZerosRespectTheRawOutputCapacity() {
+        for capacity in [0, 1, 2, 3, 4, 5, 25, 82, 132] {
+            for count in [0, max(0, capacity - 1), capacity, capacity + 1, capacity + 64] {
+                let result = decodeRaw(String(repeating: "1", count: count), capacity: capacity)
+                let fits = capacity > 0 && count <= capacity
+                XCTAssertEqual(result.success, fits, "Capacity \(capacity), zero count \(count)")
+                if fits {
+                    XCTAssertEqual(result.length, count)
+                    XCTAssertLessThanOrEqual(result.length, capacity)
+                    XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: capacity))
+                } else {
+                    XCTAssertEqual(result.length, capacity, "Failure must preserve the capacity")
+                }
+            }
+        }
+    }
+
+    func testMixedLeadingZerosAndNumbersPreserveRightAlignedBytes() {
+        let vectors: [(String, [UInt8])] = [
+            ("", []), ("1", [0]), ("2", [1]), ("12", [0, 1]),
+            ("1112", [0, 0, 0, 1]), ("z", [57]), ("21", [58]), ("zz", [13, 35])
+        ]
+        for (string, expected) in vectors {
+            for capacity in 0 ... expected.count + 4 {
+                let result = decodeRaw(string, capacity: capacity)
+                let fits = capacity > 0 && capacity >= expected.count
+                XCTAssertEqual(result.success, fits)
+                if fits {
+                    XCTAssertEqual(result.length, expected.count)
+                    XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: capacity - expected.count) + expected)
+                } else {
+                    XCTAssertEqual(result.length, capacity)
+                }
+            }
+        }
+        for input in ["0", "O", "I", "l", "é", "12 3", String(repeating: "z", count: 200)] {
+            let result = decodeRaw(input, capacity: 25)
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.length, 25)
+        }
+    }
+
+    func testCheckedDecodingRejectsOverlongZerosWithoutChangingOutput() {
+        for capacity: Int32 in [0, 1, 21, 78, 128] {
+            for extra in [0, 1, 64, 1024] {
+                // The internal buffer includes four checksum bytes.
+                let string = String(repeating: "1", count: Int(capacity) + 4 + extra)
+                let result = decodeChecked(string, capacity: capacity)
+                XCTAssertEqual(result.length, 0)
+                XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: Int(capacity)))
+            }
+        }
+        for string in ["", "1", "111"] {
+            let result = decodeChecked(string, capacity: 21)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: 21))
+        }
+    }
+
+    func testInvalidCheckedCapacitiesFailBeforeUsingTheBuffer() {
+        for capacity: Int32 in [-4, -1, 129] {
+            let result = decodeChecked("T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", capacity: capacity)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: max(0, Int(capacity))))
+        }
+    }
+
+    func testCheckedDecodingMatchesTheAppsSwiftAddressFormat() {
+        let tronPayload = Data([0x41]) + Data(repeating: 0, count: 20)
+        let tronAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+        XCTAssertEqual(String(base58CheckEncoding: tronPayload), tronAddress)
+        XCTAssertEqual(tronAddress.base58CheckData, tronPayload)
+        XCTAssertTrue(tronAddress.isTRXAddress())
+
+        let payloads = [Data([0]), tronPayload, Data(repeating: 0, count: 21),
+                        Data([0, 0, 0, 1]), Data((0 ..< 78).map { UInt8($0) }),
+                        Data((0 ..< 128).map { UInt8($0) })]
+        for payload in payloads {
+            let string = String(base58CheckEncoding: payload)
+            XCTAssertEqual(Data(base58CheckDecoding: string), payload)
+            for capacity in [payload.count - 1, payload.count, min(128, payload.count + 7)] {
+                let result = decodeChecked(string, capacity: Int32(capacity))
+                if capacity < payload.count {
+                    XCTAssertEqual(result.length, 0)
+                    XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: capacity))
+                } else {
+                    XCTAssertEqual(result.length, Int32(payload.count))
+                    XCTAssertEqual(Data(result.bytes.prefix(payload.count)), payload)
+                    XCTAssertEqual(Array(result.bytes.dropFirst(payload.count)),
+                                   [UInt8](repeating: 0xa5, count: capacity - payload.count))
+                }
+            }
+        }
+        let invalid = String(repeating: "1", count: 26)
+        XCTAssertNil(invalid.base58CheckData)
+        XCTAssertFalse(invalid.isTRXAddress())
+    }
+
+    func testHigherLevelCDecodersRejectOverlongZeroInput() {
+        let invalid = String(repeating: "1", count: 256)
+        var address = [UInt8](repeating: 0xa5, count: 21)
+        let decoded = address.withUnsafeMutableBufferPointer {
+            ecdsa_address_decode(invalid, 0x41, HASHER_SHA2D, $0.baseAddress)
+        }
+        XCTAssertEqual(decoded, 0)
+        XCTAssertEqual(address, [UInt8](repeating: 0xa5, count: 21))
+
+        var node = HDNode()
+        var fingerprint: UInt32 = 0xa5a5a5a5
+        XCTAssertEqual(hdnode_deserialize(invalid, 0x0488b21e, 0x0488ade4, "secp256k1", &node, &fingerprint), -1)
+        XCTAssertEqual(fingerprint, 0xa5a5a5a5)
+    }
+}
