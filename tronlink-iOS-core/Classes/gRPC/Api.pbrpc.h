@@ -424,6 +424,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)unDelegateResourceWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
+- (GRPCProtoCall *)RPCToUnDelegateResourceWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
+
+// Preserve the selector exposed by earlier releases as a not-yet-started alias.
 - (GRPCProtoCall *)RPCToUnDelegateResourceWithRequestWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
 #pragma mark CanDelegatedMaxSize(CanDelegatedMaxSizeRequestMessage) returns (CanDelegatedMaxSizeResponseMessage)
@@ -790,8 +793,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (GRPCProtoCall *)RPCToDeployContractWithRequest:(CreateSmartContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
-#pragma mark ClearABIContract(ClearABIContract) returns (TransactionExtention)
+#pragma mark ClearContractABI(ClearABIContract) returns (TransactionExtention)
 
+// Keep the published selectors; the server RPC is named ClearContractABI.
 - (void)clearABIContractWithRequest:(ClearABIContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
 - (GRPCProtoCall *)RPCToClearABIContractWithRequest:(ClearABIContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
