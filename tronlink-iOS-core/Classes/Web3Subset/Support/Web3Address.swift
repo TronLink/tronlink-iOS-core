@@ -188,11 +188,6 @@ extension Web3Address: ExpressibleByStringLiteral {
 }
 
 public extension String {
-    /// - Returns: true if string is contract address
-    var isContractAddress: Bool {
-        return hex.count > 0
-    }
-
     /// Checks for exactly 20 bytes of ASCII hex, with an optional `0x` or `0X` prefix.
     /// Validates format only, without enforcing an EIP-55 checksum.
     /// Use `isTRXAddress()` for TRON Base58Check addresses.

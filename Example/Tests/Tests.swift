@@ -4390,7 +4390,9 @@ final class DataSliceInputRegressionTests: XCTestCase {
 final class PrivateKeyIdentityRegressionTests: XCTestCase {
     private let firstKey = Data(repeating: 0, count: 31) + Data([1])
     private let secondKey = Data(repeating: 0, count: 31) + Data([2])
-    private let hash = Data(repeating: 0x11, count: 32)
+    // Not named `hash`: XCTestCase inherits NSObject.hash (Int), and a stored
+    // property of that name would be an invalid override.
+    private let messageHash = Data(repeating: 0x11, count: 32)
     private let firstAddress = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
     private let firstSignature = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
 
@@ -4402,7 +4404,7 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
         XCTAssertEqual(input, secondKey)
         XCTAssertEqual(key.privateKey, firstKey)
         XCTAssertEqual(key.address.address, firstAddress)
-        XCTAssertEqual(try key.sign(hash: hash).data.hex, firstSignature)
+        XCTAssertEqual(try key.sign(hash: messageHash).data.hex, firstSignature)
     }
 
     func testSwitchingAccountsUsesIndependentObjectsWithConsistentIdentities() throws {
@@ -4418,17 +4420,17 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
         let expectedAddress = try Web3Utils.publicToAddress(expectedPublicKey)
         XCTAssertNotEqual(previousAddress, expectedAddress)
 
-        let selectedSignature = try selected.sign(hash: hash).data
+        let selectedSignature = try selected.sign(hash: messageHash).data
         XCTAssertEqual(selected.publicKey, expectedPublicKey)
         XCTAssertEqual(selected.address, expectedAddress)
-        XCTAssertEqual(try Web3Utils.hashECRecover(hash: hash, signature: selectedSignature), selected.address)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: messageHash, signature: selectedSignature), selected.address)
 
         XCTAssertEqual(previous.publicKey, previousPublicKey)
         XCTAssertEqual(previous.address, previousAddress)
         XCTAssertEqual(previous.address.address, firstAddress)
-        let previousSignature = try previous.sign(hash: hash).data
+        let previousSignature = try previous.sign(hash: messageHash).data
         XCTAssertEqual(previousSignature.hex, firstSignature)
-        XCTAssertEqual(try Web3Utils.hashECRecover(hash: hash, signature: previousSignature), previous.address)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: messageHash, signature: previousSignature), previous.address)
     }
 
     func testMutatingReturnedValuesCannotOverwriteCachedIdentity() throws {
@@ -4447,7 +4449,7 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
         XCTAssertEqual(key.publicKey, expectedPublicKey)
         XCTAssertEqual(key.address.address, firstAddress)
         XCTAssertEqual(key.privateKey, firstKey)
-        XCTAssertEqual(try key.sign(hash: hash).data.hex, firstSignature)
+        XCTAssertEqual(try key.sign(hash: messageHash).data.hex, firstSignature)
     }
 }
 
@@ -5639,13 +5641,16 @@ final class CosiEmptyInputRegressionTests: XCTestCase {
         var output = [UInt8](repeating: 0xa5, count: 66)
         let status: Int32? = withBlocks(shares) { input in
             output.withUnsafeMutableBufferPointer { destination -> Int32? in
+                // Read the base address before building the closure: `destination` is an
+                // inout parameter and cannot be captured by an escaping closure.
+                let target = destination.baseAddress?.advanced(by: 1)
                 let combine: (UnsafePointer<UInt8>?) -> Int32? = { nonce in
                     if legacy {
-                        ed25519_cosi_combine_signatures(destination.baseAddress?.advanced(by: 1),
+                        ed25519_cosi_combine_signatures(target,
                                                        nonce, input, count ?? shares.count)
                         return nil
                     }
-                    return ed25519_cosi_combine_signatures_checked(destination.baseAddress?.advanced(by: 1),
+                    return ed25519_cosi_combine_signatures_checked(target,
                                                                    nonce, input, count ?? shares.count)
                 }
                 if let commitment = commitment {
