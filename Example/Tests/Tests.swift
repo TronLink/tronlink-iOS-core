@@ -1437,16 +1437,6 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(TLCore.EventLog.self, from: invalid))
     }
 
-    func testPrivateKeyRejectsOutOfRangeRandomScalar() {
-        var valid = Data(repeating: 0, count: 32)
-        valid[31] = 1
-        var candidates = [Data(repeating: 0xff, count: 32), valid]
-
-        let generated = TLCore.PrivateKey.generatePrivateKey { candidates.removeFirst() }
-
-        XCTAssertEqual(generated, valid)
-        XCTAssertTrue(candidates.isEmpty)
-    }
 }
 
 final class EmbeddedABIGoldenTests: XCTestCase {

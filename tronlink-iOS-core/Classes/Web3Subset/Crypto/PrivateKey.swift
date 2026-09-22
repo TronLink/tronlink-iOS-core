@@ -35,20 +35,6 @@ public class PrivateKey {
     /// Cached address derived from this instance's public key.
     public private(set) lazy var address: Web3Address = try! Web3Utils.publicToAddress(publicKey)
     
-    /// Generates random private key. All generated keys are verified
-    public init() {
-        self.privateKey = PrivateKey.generatePrivateKey()
-    }
-
-    static func generatePrivateKey(using randomBytes: () -> Data = { Data.random(length: 32) }) -> Data {
-        while true {
-            let privateKey = randomBytes()
-            if (try? SECP256K1.verifyPrivateKey(privateKey: privateKey)) != nil {
-                return privateKey
-            }
-        }
-    }
-    
     /// Init with private key data. run .verify() to verify it
     public init(_ privateKey: Data) {
         self.privateKey = privateKey
@@ -101,12 +87,12 @@ public class Signature {
     /// First 32 bytes. Returns zero for an invalid length; call check() before use.
     public lazy var r: BigUInt = {
         guard data.count == 65 else { return BigUInt(0) }
-        return BigUInt(data.prefix(32))
+        return BigUInt(Data(data.prefix(32)))
     }()
     /// Next 32 bytes. Returns zero for an invalid length; call check() before use.
     public lazy var s: BigUInt = {
         guard data.count == 65 else { return BigUInt(0) }
-        return BigUInt(data.dropFirst(32).prefix(32))
+        return BigUInt(Data(data.dropFirst(32).prefix(32)))
     }()
     /// Recovery ID, with 27...30 normalized to 0...3. An invalid length returns
     /// UInt8.max, which is not a valid recovery ID; call check() before use.
