@@ -29,7 +29,7 @@ public final class Scrypt {
             throw error
         }
 
-        let result = try scrypt(password: passwordData.bytes, salt: params.salt.bytes)
+        let result = try scrypt(password: passwordData.bytesT, salt: params.salt.bytesT)
         return Data(bytes: result)
     }
 

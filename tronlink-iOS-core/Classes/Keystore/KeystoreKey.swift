@@ -157,11 +157,11 @@ public struct KeystoreKey {
         case "aes-128-ctr":
             // Keep MAC/password validation first and reject counter exhaustion before AES.
             try crypto.cipherParams.validateCTRCapacity(forByteCount: crypto.cipherText.count)
-            let aesCipher = try AES(key: decryptionKey.bytes, blockMode: CTR(iv: crypto.cipherParams.iv.bytes), padding: .noPadding)
-            decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytes)
+            let aesCipher = try AES(key: decryptionKey.bytesT, blockMode: CTR(iv: crypto.cipherParams.iv.bytesT), padding: .noPadding)
+            decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytesT)
         case "aes-128-cbc":
-            let aesCipher = try AES(key: decryptionKey.bytes, blockMode: CBC(iv: crypto.cipherParams.iv.bytes), padding: .noPadding)
-            decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytes)
+            let aesCipher = try AES(key: decryptionKey.bytesT, blockMode: CBC(iv: crypto.cipherParams.iv.bytesT), padding: .noPadding)
+            decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytesT)
         default:
             throw DecryptError.unsupportedCipher
         }

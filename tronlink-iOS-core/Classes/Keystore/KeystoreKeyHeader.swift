@@ -40,9 +40,9 @@ public struct KeystoreKeyHeader {
         let derivedKey = try scrypt.calculate(password: password)
 
         let encryptionKey = derivedKey[0...15]
-        let aecCipher = try AES(key: encryptionKey.bytes, blockMode: CTR(iv: cipherParams.iv.bytes), padding: .noPadding)
+        let aecCipher = try AES(key: encryptionKey.bytesT, blockMode: CTR(iv: cipherParams.iv.bytesT), padding: .noPadding)
 
-        let encryptedKey = try aecCipher.encrypt(data.bytes)
+        let encryptedKey = try aecCipher.encrypt(data.bytesT)
         let prefix = derivedKey[(derivedKey.count - 16) ..< derivedKey.count]
         let mac = KeystoreKey.computeMAC(prefix: prefix, key: Data(bytes: encryptedKey))
 
