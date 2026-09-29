@@ -57,7 +57,9 @@ public class TRXMetricsDBManager: NSObject {
             if let fileQueue = FMDatabaseQueue(path: dbURL.path) {
                 queue = fileQueue
             } else {
+                #if DEBUG
                 NSLog("[MetricsDB] file queue failed at %@, fallback to in-memory", dbURL.path)
+                #endif
                 queue = FMDatabaseQueue(path: ":memory:")
             }
             dbURLForBackupExclusion = dbURL
@@ -80,7 +82,9 @@ public class TRXMetricsDBManager: NSObject {
         createAssetSyncTable()
         createTransactionSyncTable()
         if !isDBHealthy {
+            #if DEBUG
             NSLog("[MetricsDB] init: one or more tables failed to create, DB marked unhealthy")
+            #endif
         }
     }
 
@@ -90,7 +94,9 @@ public class TRXMetricsDBManager: NSObject {
     private func runUpdate(_ db: FMDatabase, _ sql: String, _ args: [Any] = []) -> Bool {
         let ok = db.executeUpdate(sql, withArgumentsIn: args)
         if !ok {
+            #if DEBUG
             NSLog("[MetricsDB] update failed: %@\nSQL: %@", db.lastErrorMessage(), sql)
+            #endif
         }
         return ok
     }
@@ -167,7 +173,9 @@ public class TRXMetricsDBManager: NSObject {
                     ok = self.runUpdate(db, createSql)
                 }
             } else {
+                #if DEBUG
                 NSLog("[MetricsDB] table check failed: %@", db.lastErrorMessage())
+                #endif
                 ok = false
             }
         }
@@ -455,7 +463,9 @@ public class TRXMetricsDBManager: NSObject {
                     ok = self.runUpdate(db, createSql)
                 }
             } else {
+                #if DEBUG
                 NSLog("[MetricsDB] table check failed: %@", db.lastErrorMessage())
+                #endif
                 ok = false
             }
         }

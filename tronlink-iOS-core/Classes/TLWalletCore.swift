@@ -56,7 +56,9 @@ public class TLWalletCore: NSObject {
         } catch let err as KeystoreError {
             return .failure(err)
         } catch {
+            #if DEBUG
             NSLog("[Sign] unknown error: %@", String(describing: error))
+            #endif
             return .failure(.failedToSignTransaction)
         }
     }
@@ -132,7 +134,9 @@ public class TLWalletCore: NSObject {
         } catch let err as KeystoreError {
             return .failure(err)
         } catch {
+            #if DEBUG
             NSLog("[Sign] unknown error: %@", String(describing: error))
+            #endif
             return .failure(.failedToSignTransaction)
         }
     }

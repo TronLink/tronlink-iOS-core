@@ -9,7 +9,9 @@ final class TRXMetricsEncryptTool: NSObject {
             let encrypted = try aesCBCEncrypt(plaintext: plaintext, keyBase64: keyBase64)
             return encrypted
         } catch {
+            #if DEBUG
             NSLog("[Metrics] AES encrypt failed: %@", String(describing: error))
+            #endif
             return ""
         }
     }
@@ -21,7 +23,9 @@ final class TRXMetricsEncryptTool: NSObject {
             let decryptedText = try aesCBCDecrypt(ciphertextBase64: encryptedText, keyBase64: keyBase64)
             return decryptedText
         } catch {
+            #if DEBUG
             NSLog("[Metrics] AES decrypt failed: %@", String(describing: error))
+            #endif
             return ""
         }
     }

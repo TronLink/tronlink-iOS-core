@@ -233,10 +233,14 @@ public class TRXStatisticalUploadManager: NSObject {
                         self.deletedBeforeTodayTransactionsData(forChain: chain, uId: uId)
                     }
                 } else {
+                    #if DEBUG
                     NSLog("[Metrics] server returned isUploadSuccess=false, will retry next cycle")
+                    #endif
                 }
             } failure: {
+                #if DEBUG
                 NSLog("upload failure")
+                #endif
             }
         }
     }
@@ -255,11 +259,15 @@ public class TRXStatisticalUploadManager: NSObject {
               let ts = headers["ts"],
               !ts.isEmpty,
               ts.rangeOfCharacter(from: decimalCharacters.inverted) == nil else {
+            #if DEBUG
             NSLog("[Metrics] skip request due to invalid encryption inputs")
+            #endif
             return [:]
         }
         if (signature.count != 28 && signature.count != 40) || ts.count != 13 {
+            #if DEBUG
             NSLog("[Metrics] unexpected encryption input lengths: signature=\(signature.count), ts=\(ts.count)")
+            #endif
         }
         var newParams: [String: String] = [:]
         for (key, value) in parameters {
@@ -275,7 +283,9 @@ public class TRXStatisticalUploadManager: NSObject {
             }()
             let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: signature, ts: ts, plaintext: plain)
             if encryptedP.isEmpty {
+                #if DEBUG
                 NSLog("[Metrics] skip request due to AES encrypt failure: %@", key)
+                #endif
                 return [:]
             }
             newParams[key] = encryptedP
