@@ -29,28 +29,45 @@ public final class Scrypt {
             throw error
         }
 
-        let result = try scrypt(password: passwordData.bytesT, salt: params.salt.bytesT)
+        var result = try scrypt(password: passwordData.bytesT, salt: params.salt.bytesT)
+        defer {
+            result.withUnsafeMutableBytes {
+                memzero($0.baseAddress, $0.count)
+            }
+        }
         return Data(bytes: result)
     }
 
     /// Computes scrypt.
     private func scrypt(password: [UInt8], salt: [UInt8]) throws -> [UInt8] {
         // Allocate memory.
-        let B = UnsafeMutableRawPointer.allocate(byteCount: 128 * params.r * params.p, alignment: 64)
-        let XY = UnsafeMutableRawPointer.allocate(byteCount: 256 * params.r + 64, alignment: 64)
-        let V = UnsafeMutableRawPointer.allocate(byteCount: 128 * params.r * params.n, alignment: 64)
+        let bByteCount = 128 * params.r * params.p
+        let xyByteCount = 256 * params.r + 64
+        let vByteCount = 128 * params.r * params.n
+        let B = UnsafeMutableRawPointer.allocate(byteCount: bByteCount, alignment: 64)
+        let XY = UnsafeMutableRawPointer.allocate(byteCount: xyByteCount, alignment: 64)
+        let V = UnsafeMutableRawPointer.allocate(byteCount: vByteCount, alignment: 64)
 
-        // Deallocate memory when done
+        // Clear password-derived state before releasing its storage.
         defer {
+            memzero(B, bByteCount)
             B.deallocate()
+            memzero(XY, xyByteCount)
             XY.deallocate()
+            memzero(V, vByteCount)
             V.deallocate()
+            salsaBlock.withUnsafeMutableBytes {
+                memzero($0.baseAddress, $0.count)
+            }
         }
 
         /* 1: (B_0 ... B_{p-1}) <-- PBKDF2(P, S, 1, p * MFLen) */
-        let barray = try PKCS5.PBKDF2(password: password, salt: [UInt8](salt), iterations: 1, keyLength: params.p * 128 * params.r, variant: .sha256).calculate()
+        var barray = try PKCS5.PBKDF2(password: password, salt: [UInt8](salt), iterations: 1, keyLength: params.p * 128 * params.r, variant: .sha256).calculate()
         barray.withUnsafeBytes { p in
             B.copyMemory(from: p.baseAddress!, byteCount: barray.count)
+        }
+        barray.withUnsafeMutableBytes {
+            memzero($0.baseAddress, $0.count)
         }
 
         /* 2: for i = 0 to p - 1 do */
@@ -62,7 +79,12 @@ public final class Scrypt {
         /* 5: DK <-- PBKDF2(P, B, 1, dkLen) */
         let pointer = B.assumingMemoryBound(to: UInt8.self)
         let bufferPointer = UnsafeBufferPointer(start: pointer, count: params.p * 128 * params.r)
-        let block = [UInt8](bufferPointer)
+        var block = [UInt8](bufferPointer)
+        defer {
+            block.withUnsafeMutableBytes {
+                memzero($0.baseAddress, $0.count)
+            }
+        }
         return try PKCS5.PBKDF2(password: password, salt: block, iterations: 1, keyLength: params.desiredKeyLength, variant: .sha256).calculate()
     }
 

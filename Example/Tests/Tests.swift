@@ -2553,6 +2553,20 @@ final class EmbeddedKeystoreTests: XCTestCase {
         }
     }
 
+    /// RFC 7914, Section 12: https://www.rfc-editor.org/rfc/rfc7914#section-12
+    func testScryptCleanupPreservesKnownOutputAndInstanceReuse() throws {
+        let params = try ScryptParams(salt: Data("NaCl".utf8), n: 1024, r: 8, p: 16, desiredKeyLength: 64)
+        let scrypt = Scrypt(params: params)
+        let expected = "fdbabe1c9d3472007856e7190d01e9fe" +
+            "7c6ad7cbc8237830e77376634b373162" +
+            "2eaf30d92e22a3886ff109279d9830da" +
+            "c727afb94a83ee6d8360cbdfa2cc0640"
+        let derivedKey = try scrypt.calculate(password: "password")
+        XCTAssertEqual(derivedKey.hexString, expected)
+        XCTAssertEqual(try scrypt.calculate(password: "password").hexString, expected)
+        XCTAssertEqual(derivedKey.hexString, expected)
+    }
+
     /// Backward compatibility, end to end. The light preset is what every install predating
     /// TL-KDF-001 has sitting on disk, so the new bounds must let those files through.
     /// Loading never decrypts — `KeystoreKey(contentsOf:)` only decodes — so the bounds are
