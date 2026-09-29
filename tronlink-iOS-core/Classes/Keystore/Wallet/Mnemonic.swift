@@ -23,6 +23,9 @@ public final class Mnemonic {
         }
         var buffer = [CChar](repeating: 0, count: bufferLength)
         let mnemonic = buffer.withUnsafeMutableBufferPointer { buf -> String? in
+            defer {
+                memzero(buf.baseAddress, buf.count)
+            }
             guard let result = mnemonic_generate(Int32(strength), buf.baseAddress, Int32(bufferLength)) else {
                 return nil
             }
@@ -45,7 +48,10 @@ public final class Mnemonic {
         }
         var buffer = [CChar](repeating: 0, count: bufferLength)
         let mnemonic = buffer.withUnsafeMutableBufferPointer { buf -> String? in
-            data.withUnsafeBytes { (dataPtr: UnsafeRawBufferPointer) -> String? in
+            defer {
+                memzero(buf.baseAddress, buf.count)
+            }
+            return data.withUnsafeBytes { (dataPtr: UnsafeRawBufferPointer) -> String? in
                 guard let baseAddress = dataPtr.baseAddress else {
                     return nil
                 }

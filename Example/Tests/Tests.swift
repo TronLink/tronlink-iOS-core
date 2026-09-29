@@ -2067,6 +2067,10 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
     }
 
+    func testGeneratedMnemonicCopiesEntropyOutputBeforeBufferCleanup() throws {
+        XCTAssertEqual(try Mnemonic.generate(from: Data(repeating: 0, count: 16)), mnemonic)
+    }
+
     func testGeneratedHDWalletReturnsMnemonicWithoutRetainingIt() throws {
         let generated = try KeystoreKey.generateHDWallet(password: password)
         XCTAssertTrue(Mnemonic.isValid(generated.mnemonic))
