@@ -36,7 +36,7 @@ public class Wallet {
         return path
     }
 
-    private func getNode(for derivationPath: DerivationPath) throws -> HDNode {
+    private func getKey(for derivationPath: DerivationPath) throws -> HDKey {
         seedLock.lock()
         defer { seedLock.unlock() }
 
@@ -44,6 +44,11 @@ public class Wallet {
             throw Error.cleared
         }
         var node = HDNode()
+        defer {
+            withUnsafeMutableBytes(of: &node) {
+                memzero($0.baseAddress, $0.count)
+            }
+        }
         // On failure the node is left zeroed with a NULL curve, which the derivation and
         // public-key calls below would dereference.
         let result = seed!.withUnsafeBytes { (seedPtr: UnsafeRawBufferPointer) -> Int32 in
@@ -60,15 +65,14 @@ public class Wallet {
                 throw Error.keyDerivationFailed
             }
         }
-        return node
+        return HDKey(node: &node)
     }
 
     /// Generates the key at the specified derivation path index.
     ///
     /// - Throws: `Wallet.Error`
     public func getKey(at index: Int) throws -> HDKey {
-        let node = try getNode(for: try getDerivationPath(for: index))
-        return HDKey(node: node)
+        return try getKey(for: try getDerivationPath(for: index))
     }
 
     /// Clears the retained seed. The wallet cannot derive more keys afterwards.

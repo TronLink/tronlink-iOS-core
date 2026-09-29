@@ -161,7 +161,7 @@ extension TLWalletCore {
         do {
             var privateKey = try keyStore.exportPrivateKey(account: account, password: password)
             defer {
-                privateKey = Data()
+                privateKey.resetBytes(in: 0..<privateKey.count)
             }
             guard !privateKey.isEmpty else {
                 return .failure(.failedToExportPrivateKey)

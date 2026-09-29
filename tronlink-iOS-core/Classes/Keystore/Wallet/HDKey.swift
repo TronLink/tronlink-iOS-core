@@ -4,8 +4,14 @@
 public class HDKey {
     var node: HDNode
 
-    init(node: HDNode) {
+    init(node: inout HDNode) {
         self.node = node
+    }
+
+    deinit {
+        withUnsafeMutableBytes(of: &node) {
+            memzero($0.baseAddress, $0.count)
+        }
     }
 
     /// The key's address.
@@ -19,17 +25,17 @@ public class HDKey {
 
     /// Private key data.
     public var privateKey: Data {
-        return Data(bytes: withUnsafeBytes(of: &node.private_key) { ptr in
-            return ptr.map({ $0 })
-        })
+        return withUnsafeBytes(of: &node.private_key) { Data($0) }
     }
 
     /// Public key data.
     public var publicKey: Data {
         var key = Data(repeating: 0, count: 65)
-        privateKey.withUnsafeBytes { ptr in
-            key.withUnsafeMutableBytes { keyPtr in
-                ecdsa_get_public_key65(node.curve.pointee.params, ptr, keyPtr)
+        let params = node.curve.pointee.params
+        withUnsafeBytes(of: &node.private_key) { ptr in
+            key.withUnsafeMutableBytes { (keyPtr: UnsafeMutableRawBufferPointer) in
+                ecdsa_get_public_key65(params, ptr.bindMemory(to: UInt8.self).baseAddress,
+                                       keyPtr.bindMemory(to: UInt8.self).baseAddress)
             }
         }
         return key

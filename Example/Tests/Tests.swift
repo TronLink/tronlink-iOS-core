@@ -1955,6 +1955,46 @@ final class EmbeddedKeystoreTests: XCTestCase {
         super.tearDown()
     }
 
+    func testPrivateKeyExportSurvivesHDNodeCleanup() throws {
+        let expected = "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28"
+        let wallet = try Wallet(mnemonic: mnemonic)
+        var key: HDKey? = try wallet.getKey(at: 0)
+        weak var releasedKey = key
+        let privateKey = try XCTUnwrap(key?.privateKey)
+        let publicKey = try XCTUnwrap(key?.publicKey)
+        let address = try XCTUnwrap(key?.address)
+        key = nil
+
+        XCTAssertNil(releasedKey)
+        XCTAssertEqual(privateKey.hexString, expected)
+        XCTAssertEqual(Data(try KeystoreKey.decodeAddress(from: publicKey).data.dropFirst()), address.data)
+        XCTAssertEqual(try wallet.getKey(at: 0).privateKey, privateKey)
+
+        let hdStore = try KeyStore(keyDirectory: keyDirectory)
+        _ = try hdStore.import(mnemonic: mnemonic, encryptPassword: password)
+        let rawStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("raw"))
+        let rawKey = try KeystoreKey(password: password, key: privateKey)
+        _ = try rawStore.import(json: JSONEncoder().encode(rawKey), password: password, newPassword: password)
+
+        for store in [hdStore, rawStore] {
+            let account = try XCTUnwrap(store.accounts.first)
+            let walletAddress = account.address.data.addressString
+            guard case .success(let exported) = TLWalletCore.walletExportPrivateKey(
+                keyStore: store, password: password, address: walletAddress) else {
+                return XCTFail("Expected a successful private key export")
+            }
+            XCTAssertEqual(exported, expected)
+            guard case .failure(.failedToExportPrivateKey) = TLWalletCore.walletExportPrivateKey(
+                keyStore: store, password: "wrong-password", address: walletAddress) else {
+                return XCTFail("Expected a failed export for the wrong password")
+            }
+            guard case .failure(.accountNotFound) = TLWalletCore.walletExportPrivateKey(
+                keyStore: store, password: password, address: "") else {
+                return XCTFail("Expected an account-not-found failure")
+            }
+        }
+    }
+
     /// The passphrase is a BIP39 derivation input, so losing it across a restart silently
     /// re-derives a different private key for the same address.
     func testPassphraseSurvivesReload() throws {
