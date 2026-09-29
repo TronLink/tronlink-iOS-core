@@ -2720,6 +2720,39 @@ final class KeystoreCTRCounterRegressionTests: XCTestCase {
     private let password = "ctr-regression-password"
     private let privateKey = Data(repeating: 0, count: 31) + Data([1])
 
+    func testMACVerificationHandlesTamperingLengthsAndSlices() throws {
+        for cipher in ["aes-128-ctr", "aes-128-cbc"] {
+            let original = try makeKey(plaintext: privateKey, iv: iv(counter: 0), cipher: cipher)
+            XCTAssertEqual(try original.decrypt(password: password), privateKey)
+
+            let padded = Data(repeating: 0xa5, count: 80) + original.crypto.mac + Data([0x5a])
+            var sliced = original
+            sliced.crypto.mac = padded[80..<112]
+            XCTAssertEqual(sliced.crypto.mac.startIndex, 80)
+            XCTAssertEqual(try sliced.decrypt(password: password), privateKey)
+
+            var invalidMACs = [Data(), Data([0]), Data(original.crypto.mac.dropLast()),
+                               original.crypto.mac + Data([0]), original.crypto.mac + original.crypto.mac]
+            for index in original.crypto.mac.indices {
+                var changed = original.crypto.mac
+                changed[index] ^= 1
+                let buffer = Data(repeating: 0xa5, count: 80) + changed + Data([0x5a])
+                invalidMACs.append(buffer[80..<112])
+            }
+            for mac in invalidMACs {
+                var key = original
+                key.crypto.mac = mac
+                // MAC rejection must still precede cipher/IV validation.
+                key.crypto.cipherParams.iv = Data()
+                XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+                    guard case .invalidPassword? = error as? DecryptError else {
+                        return XCTFail("Expected invalidPassword, got \(error)")
+                    }
+                }
+            }
+        }
+    }
+
     func testCTRDecryptAcceptsTheLastAvailableBlock() throws {
         let cases: [(Int, UInt64)] = [
             (1, .max), (16, .max),

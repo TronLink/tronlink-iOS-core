@@ -1,5 +1,6 @@
 
 import CryptoSwift
+import Darwin
 import Foundation
 
 /// Key definition.
@@ -147,7 +148,12 @@ public struct KeystoreKey {
         }
 
         let mac = KeystoreKey.computeMAC(prefix: derivedKey[derivedKey.count - 16 ..< derivedKey.count], key: crypto.cipherText)
-        if mac != crypto.mac {
+        let macMatches = mac.count == crypto.mac.count && mac.withUnsafeBytes { (computed: UnsafeRawBufferPointer) in
+            return crypto.mac.withUnsafeBytes { (expected: UnsafeRawBufferPointer) in
+                return timingsafe_bcmp(computed.baseAddress!, expected.baseAddress!, computed.count) == 0
+            }
+        }
+        if !macMatches {
             throw DecryptError.invalidPassword
         }
 
