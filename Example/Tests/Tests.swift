@@ -1995,6 +1995,137 @@ final class EmbeddedKeystoreTests: XCTestCase {
         }
     }
 
+    func testKeyFilesStayProtectedAcrossReloadAndAtomicUpdates() throws {
+        let fileManager = FileManager.default
+        let documents = try fileManager.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let directory = documents.appendingPathComponent(UUID().uuidString)
+        defer { try? fileManager.removeItem(at: directory) }
+        keyDirectory = directory.appendingPathComponent("keys")
+
+        func assertProtected(_ url: URL) throws {
+            #if !targetEnvironment(simulator)
+            let attributes = try fileManager.attributesOfItem(atPath: url.path)
+            XCTAssertEqual(attributes[.protectionKey] as? String, FileProtectionType.complete.rawValue)
+            #endif
+            let freshURL = URL(fileURLWithPath: url.path)
+            XCTAssertEqual(try freshURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        }
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        XCTAssertEqual(try keyDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        try assertProtected(account.url)
+
+        // Simulate a legacy file; migration must only change metadata, never key bytes.
+        try fileManager.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: account.url.path)
+        var legacyURL = account.url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = false
+        try legacyURL.setResourceValues(values)
+        let originalJSON = try Data(contentsOf: account.url)
+        // A readable file whose metadata cannot change must still block duplicate imports.
+        try fileManager.setAttributes([.immutable: true], ofItemAtPath: account.url.path)
+        do {
+            defer { try? fileManager.setAttributes([.immutable: false], ofItemAtPath: account.url.path) }
+            var immutableURL = URL(fileURLWithPath: account.url.path)
+            values.isExcludedFromBackup = true
+            XCTAssertThrowsError(try immutableURL.setResourceValues(values))
+            let metadataUnavailable = try KeyStore(keyDirectory: keyDirectory)
+            XCTAssertEqual(metadataUnavailable.account(for: account.address)?.url, account.url)
+            XCTAssertEqual(try metadataUnavailable.exportMnemonic(account: account, password: password), mnemonic)
+            XCTAssertThrowsError(try metadataUnavailable.import(mnemonic: mnemonic, encryptPassword: "duplicate-password")) { error in
+                guard case KeyStore.Error.accountAlreadyExists = error else {
+                    return XCTFail("Expected accountAlreadyExists, got \(error)")
+                }
+            }
+            XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: keyDirectory.path).count, 1)
+            // Retrying known metadata failures must not undo an explicit account deletion.
+            var copiedAccount = account
+            copiedAccount.url = keyDirectory.appendingPathComponent("metadata-copy.json")
+            try metadataUnavailable.addAccount(account: copiedAccount)
+            try metadataUnavailable.delete(account: copiedAccount, password: password)
+            XCTAssertTrue(metadataUnavailable.accounts.isEmpty)
+            XCTAssertNil(metadataUnavailable.key(for: account.address))
+            XCTAssertEqual(try Data(contentsOf: account.url), originalJSON)
+        }
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try Data(contentsOf: account.url), originalJSON)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: password), mnemonic)
+        try assertProtected(account.url)
+
+        // A transient read failure must not permanently remove the account from the cache.
+        try fileManager.setAttributes([.posixPermissions: 0], ofItemAtPath: account.url.path)
+        let unavailable = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertTrue(unavailable.accounts.isEmpty)
+        XCTAssertThrowsError(try unavailable.import(mnemonic: mnemonic, encryptPassword: "duplicate-password")) { error in
+            XCTAssertEqual((error as? CocoaError)?.code, .fileReadUnknown)
+        }
+        let stagedPassword = "staged-keystore-password"
+        try unavailable.addKey(key: KeystoreKey(password: stagedPassword, mnemonic: mnemonic))
+        var unavailableAccount = account
+        unavailableAccount.url = keyDirectory.appendingPathComponent("pending-account.json")
+        XCTAssertThrowsError(try unavailable.addAccount(account: unavailableAccount))
+        XCTAssertFalse(fileManager.fileExists(atPath: unavailableAccount.url.path))
+        // Even a cached account cannot be deleted while another file's identity is unknown.
+        let readableCopyURL = keyDirectory.appendingPathComponent("readable-copy.json")
+        try originalJSON.write(to: readableCopyURL, options: [.completeFileProtection])
+        do {
+            defer { try? fileManager.removeItem(at: readableCopyURL) }
+            let partiallyAvailable = try KeyStore(keyDirectory: keyDirectory)
+            let loadedAccount = try XCTUnwrap(partiallyAvailable.account(for: account.address))
+            XCTAssertThrowsError(try partiallyAvailable.delete(account: loadedAccount, password: password)) { error in
+                XCTAssertEqual((error as? CocoaError)?.code, .fileReadUnknown)
+            }
+            XCTAssertTrue(fileManager.fileExists(atPath: readableCopyURL.path))
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: account.url.path)
+        XCTAssertEqual(unavailable.accounts.count, 1)
+        XCTAssertEqual(unavailable.account(for: account.address)?.url, account.url)
+        XCTAssertEqual(try unavailable.exportMnemonic(account: account, password: stagedPassword), mnemonic)
+        try fileManager.createDirectory(at: keyDirectory.appendingPathComponent("ignored-directory"), withIntermediateDirectories: true, attributes: nil)
+
+        let externalDirectory = directory.appendingPathComponent("external")
+        try fileManager.createDirectory(at: externalDirectory, withIntermediateDirectories: true, attributes: nil)
+        var externalAccount = account
+        externalAccount.url = externalDirectory
+        // Replacing a directory fails before committing either the file or cached password.
+        XCTAssertThrowsError(try reloaded.update(account: externalAccount, password: password, newPassword: "failed-password"))
+        XCTAssertEqual(try Data(contentsOf: account.url), originalJSON)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: password), mnemonic)
+        XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: directory.path).contains { $0.hasPrefix(".keystore-") })
+
+        let newPassword = "updated-keystore-password"
+        try reloaded.update(account: account, password: password, newPassword: newPassword)
+        try assertProtected(account.url)
+        let updated = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(updated.accounts.first?.address, account.address)
+        XCTAssertEqual(try updated.exportMnemonic(account: account, password: newPassword), mnemonic)
+        XCTAssertThrowsError(try updated.exportMnemonic(account: account, password: password))
+
+        // Public Account.url may point outside keyDirectory; only the key file is excluded.
+        externalAccount.url = externalDirectory.appendingPathComponent("key.json")
+        try updated.addAccount(account: externalAccount)
+        try assertProtected(externalAccount.url)
+        let externalJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: externalAccount.url)) as? NSDictionary)
+        let savedJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: account.url)) as? NSDictionary)
+        XCTAssertEqual(externalJSON, savedJSON)
+        XCTAssertNotEqual(try externalDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+
+        // A save-time directory attribute failure must be retried on later reads.
+        var directoryURL = URL(fileURLWithPath: keyDirectory.path)
+        values.isExcludedFromBackup = false
+        try directoryURL.setResourceValues(values)
+        try fileManager.setAttributes([.immutable: true], ofItemAtPath: keyDirectory.path)
+        do {
+            defer { try? fileManager.setAttributes([.immutable: false], ofItemAtPath: keyDirectory.path) }
+            XCTAssertThrowsError(try updated.update(account: externalAccount, password: newPassword, newPassword: "failed-directory-password"))
+        }
+        XCTAssertEqual(updated.accounts.count, 1)
+        let recoveredDirectoryURL = URL(fileURLWithPath: keyDirectory.path)
+        XCTAssertEqual(try recoveredDirectoryURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        XCTAssertEqual(try updated.exportMnemonic(account: externalAccount, password: newPassword), mnemonic)
+    }
+
     /// The passphrase is a BIP39 derivation input, so losing it across a restart silently
     /// re-derives a different private key for the same address.
     func testPassphraseSurvivesReload() throws {

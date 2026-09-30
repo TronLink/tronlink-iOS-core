@@ -1,5 +1,6 @@
 
 import Foundation
+import Darwin
 
 /// Manages directories of key and wallet files and presents them as accounts.
 public final class KeyStore {
@@ -11,6 +12,14 @@ public final class KeyStore {
 
     /// Dictionary of keys by address.
     private var keysByAddress = [Address: KeystoreKey]()
+
+    /// Retry unavailable protected files without treating them as invalid JSON.
+    private var pendingAccountURLs = [URL]()
+    private var loadedAccountURLs = Set<URL>()
+    private var hasUnreadableAccounts: Bool {
+        return pendingAccountURLs.contains { !loadedAccountURLs.contains($0) }
+    }
+    private var backupExclusionPending = true
 
     /// Mutations always acquire this lock before `stateLock`; reads only acquire `stateLock`.
     private let mutationLock = NSLock()
@@ -24,17 +33,48 @@ public final class KeyStore {
 
     private func load() throws {
         let fileManager = FileManager.default
-        try? fileManager.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try fileManager.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        retryDirectoryBackupExclusion()
 
         let accountURLs = try fileManager.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: [], options: [.skipsHiddenFiles])
-        for url in accountURLs {
+        loadAccounts(at: accountURLs)
+    }
+
+    private func loadAccounts(at urls: [URL]) {
+        pendingAccountURLs.removeAll(keepingCapacity: true)
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                continue
+            }
+            let json: Data
             do {
-                let key = try KeystoreKey(contentsOf: url)
+                json = try Data(contentsOf: url)
+            } catch {
+                if (error as? CocoaError)?.code != .fileReadNoSuchFile {
+                    pendingAccountURLs.append(url)
+                }
+                continue
+            }
+            guard let key = try? JSONDecoder().decode(KeystoreKey.self, from: json) else {
+                continue
+            }
+            do {
+                try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
+                try excludeFromBackup(at: url)
+            } catch {
+                pendingAccountURLs.append(url)
+            }
+            // Metadata retries must not re-register a file after its account was deleted.
+            guard loadedAccountURLs.insert(url).inserted else { continue }
+            // A metadata failure must not hide a valid account or permit a duplicate import.
+            // A retry must not replace a key installed by addKey before addAccount saves it.
+            if keysByAddress[key.address] == nil {
                 cache(key)
+            }
+            if accountsByAddress[key.address] == nil {
                 let account = Account(address: key.address, type: key.type, url: url)
                 accountsByAddress[key.address] = account
-            } catch {
-                // Ignore invalid keys
             }
         }
     }
@@ -150,6 +190,9 @@ public final class KeyStore {
         let account = Account(address: newKey.address, type: key.type, url: url)
 
         try withStateLock {
+            guard accountsByAddress[newKey.address] == nil else {
+                throw Error.accountAlreadyExists
+            }
             try save(key: newKey, to: url)
             cache(newKey)
             accountsByAddress[newKey.address] = account
@@ -188,6 +231,9 @@ public final class KeyStore {
         let account = Account(address: address, type: .hierarchicalDeterministicWallet, url: url)
 
         try withStateLock {
+            guard accountsByAddress[newKey.address] == nil else {
+                throw Error.accountAlreadyExists
+            }
             try save(key: newKey, to: url)
             cache(newKey)
             accountsByAddress[newKey.address] = account
@@ -339,6 +385,9 @@ public final class KeyStore {
         decryptedKey.resetBytes(in: 0..<decryptedKey.count)
 
         try withStateLock {
+            guard !hasUnreadableAccounts else {
+                throw CocoaError(.fileReadUnknown)
+            }
             try FileManager.default.removeItem(at: storedAccount.url)
             keysByAddress[account.address] = nil
             accountsByAddress[account.address] = nil
@@ -384,6 +433,13 @@ public final class KeyStore {
     private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
         stateLock.lock()
         defer { stateLock.unlock() }
+        if backupExclusionPending {
+            retryDirectoryBackupExclusion()
+        }
+        // ponytail: retry pending files on access; use a protected-data notification if retry I/O becomes costly.
+        if !pendingAccountURLs.isEmpty {
+            loadAccounts(at: pendingAccountURLs)
+        }
         return try body()
     }
 
@@ -413,8 +469,49 @@ public final class KeyStore {
     }
 
     private func save(key: KeystoreKey, to url: URL) throws {
+        // Unknown files may contain the same address; finish loading before changing disk state.
+        guard !hasUnreadableAccounts else {
+            throw CocoaError(.fileReadUnknown)
+        }
         let json = try JSONEncoder().encode(key)
-        try json.write(to: url, options: [.atomicWrite])
+        backupExclusionPending = true
+        try excludeFromBackup(at: keyDirectory)
+        backupExclusionPending = false
+        let temporaryURL = url.deletingLastPathComponent().appendingPathComponent(".keystore-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+        // Exclude the empty file before any key material reaches an external directory.
+        try Data().write(to: temporaryURL, options: [.withoutOverwriting, .completeFileProtection])
+        try excludeFromBackup(at: temporaryURL)
+        let handle = try FileHandle(forWritingTo: temporaryURL)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: json)
+        try handle.synchronize()
+        try handle.close()
+        // Commit only after metadata succeeds; rename preserves it and atomically replaces the key.
+        guard rename(temporaryURL.path, url.path) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+        }
+    }
+
+    private func retryDirectoryBackupExclusion() {
+        do {
+            try excludeFromBackup(at: keyDirectory)
+            backupExclusionPending = false
+        } catch {
+            // Keep initialization recoverable; save still requires successful exclusion.
+            backupExclusionPending = true
+        }
+    }
+
+    private func excludeFromBackup(at url: URL) throws {
+        var resourceURL = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try resourceURL.setResourceValues(values)
+        resourceURL.removeCachedResourceValue(forKey: .isExcludedFromBackupKey)
+        guard try resourceURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 }
 
