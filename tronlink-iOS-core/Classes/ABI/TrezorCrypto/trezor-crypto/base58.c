@@ -197,7 +197,8 @@ bool b58enc(char *b58, size_t *b58sz, const void *data, size_t binsz)
 
 int base58_encode_check(const uint8_t *data, int datalen, HasherType hasher_type, char *str, int strsize)
 {
-	if (datalen > 128) {
+	// Validate signed lengths before stack allocation and conversion to size_t.
+	if (datalen < 0 || datalen > 128 || strsize <= 0) {
 		return 0;
 	}
 	uint8_t buf[datalen + 32];
@@ -251,7 +252,8 @@ int b58gphcheck(const void *bin, size_t binsz, const char *base58str)
 
 int base58gph_encode_check(const uint8_t *data, int datalen, char *str, int strsize)
 {
-	if (datalen > 128) {
+	// Keep the optional Graphene encoder's length checks consistent.
+	if (datalen < 0 || datalen > 128 || strsize <= 0) {
 		return 0;
 	}
 	uint8_t buf[datalen + 32];

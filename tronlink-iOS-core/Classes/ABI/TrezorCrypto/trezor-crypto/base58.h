@@ -32,6 +32,9 @@
 extern const char b58digits_ordered[];
 extern const int8_t b58digits_map[];
 
+// Returns the encoded length including the terminating NUL, or 0 on failure.
+// len must be 0..128; strsize is the capacity including the terminating NUL.
+// Out-of-range len or nonpositive strsize fails without accessing either buffer.
 int base58_encode_check(const uint8_t *data, int len, HasherType hasher_type, char *str, int strsize);
 // Returns the decoded payload length, or 0 on failure. datalen is the output
 // capacity (0..128); decoding failure leaves data unchanged.
@@ -46,6 +49,7 @@ int b58check(const void *bin, size_t binsz, HasherType hasher_type, const char *
 bool b58enc(char *b58, size_t *b58sz, const void *data, size_t binsz);
 
 #if USE_GRAPHENE
+// Same input/output length contract as base58_encode_check.
 int base58gph_encode_check(const uint8_t *data, int datalen, char *str, int strsize);
 int base58gph_decode_check(const char *str, uint8_t *data, int datalen);
 int b58gphcheck(const void *bin, size_t binsz, const char *base58str);

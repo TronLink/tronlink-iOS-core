@@ -5213,6 +5213,70 @@ final class BigNumberFormattingRegressionTests: XCTestCase {
 }
 
 
+final class Base58EncodingBoundsRegressionTests: XCTestCase {
+    private func encode(_ payload: [UInt8], length: Int32, capacity: Int32)
+        -> (length: Int32, bytes: [CChar]) {
+        // Keep a valid input pointer for empty payloads; length remains zero.
+        let input = payload.isEmpty ? [UInt8(0)] : payload
+        var output = [CChar](repeating: 0x5a, count: 258)
+        let result = input.withUnsafeBufferPointer { data in
+            output.withUnsafeMutableBufferPointer { buffer in
+                base58_encode_check(data.baseAddress, length, HASHER_SHA2D,
+                                    buffer.baseAddress?.advanced(by: 1), capacity)
+            }
+        }
+        XCTAssertEqual(output.first, 0x5a)
+        XCTAssertEqual(output.last, 0x5a)
+        return (result, Array(output.dropFirst().prefix(256)))
+    }
+
+    func testInvalidInputLengthsFailWithoutWritingOutput() {
+        let invalidLengths: [Int32] = [Int32.min, -33, -32, -1, 129, Int32.max]
+        for length in invalidLengths {
+            let result = encode([0], length: length, capacity: 256)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [CChar](repeating: 0x5a, count: 256))
+        }
+    }
+
+    func testNonPositiveOutputCapacitiesFailWithoutWritingOutput() {
+        let payload = [UInt8(0x41)] + [UInt8](repeating: 0, count: 20)
+        let invalidCapacities: [Int32] = [Int32.min, -1, 0]
+        for capacity in invalidCapacities {
+            let result = encode(payload, length: Int32(payload.count), capacity: capacity)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [CChar](repeating: 0x5a, count: 256))
+        }
+    }
+
+    func testValidPayloadsMatchTheAppsSwiftEncoderAndPreserveCapacityBoundaries() {
+        let tronPayload = [UInt8(0x41)] + [UInt8](repeating: 0, count: 20)
+        let payloads: [[UInt8]] = [[], [0], [0, 0, 0, 1], tronPayload,
+                                  [UInt8](repeating: 0, count: 21),
+                                  (0 ..< 78).map { UInt8($0) },
+                                  (0 ..< 128).map { UInt8($0) }]
+        XCTAssertEqual(String(base58CheckEncoding: Data(tronPayload)),
+                       "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
+        for payload in payloads {
+            // Independent Swift implementation used by the app, including the empty payload.
+            let expected = String(base58CheckEncoding: Data(payload))
+            let bytes = expected.utf8.map { CChar(bitPattern: $0) } + [CChar(0)]
+            let required = Int32(bytes.count)
+            for capacity in [required, Int32(256)] {
+                let result = encode(payload, length: Int32(payload.count), capacity: capacity)
+                XCTAssertEqual(result.length, required)
+                XCTAssertEqual(Array(result.bytes.prefix(bytes.count)), bytes)
+                XCTAssertEqual(Array(result.bytes.dropFirst(bytes.count)),
+                               [CChar](repeating: 0x5a, count: 256 - bytes.count))
+            }
+            let tooSmall = encode(payload, length: Int32(payload.count), capacity: required - 1)
+            XCTAssertEqual(tooSmall.length, 0)
+            XCTAssertEqual(tooSmall.bytes, [CChar](repeating: 0x5a, count: 256))
+        }
+    }
+}
+
+
 final class Base58DecodingBoundsRegressionTests: XCTestCase {
     private func decodeRaw(_ string: String, capacity: Int) -> (success: Bool, length: Int, bytes: [UInt8]) {
         var length = capacity
