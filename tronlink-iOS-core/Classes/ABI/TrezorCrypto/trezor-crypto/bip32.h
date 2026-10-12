@@ -102,6 +102,11 @@ int hdnode_nem_decrypt(const HDNode *node, const ed25519_public_key public_key, 
 int hdnode_sign(HDNode *node, const uint8_t *msg, uint32_t msg_len, HasherType hasher_sign, uint8_t *sig, uint8_t *pby, int (*is_canonical)(uint8_t by, uint8_t sig[64]));
 int hdnode_sign_digest(HDNode *node, const uint8_t *digest, uint8_t *sig, uint8_t *pby, int (*is_canonical)(uint8_t by, uint8_t sig[64]));
 
+// Computes raw ECDH material; returns 0 on success and 1 on failure.
+// Curve25519 takes a 0x40-prefixed 32-byte peer key and returns 0x04 + 32 bytes.
+// An all-zero Curve25519 secret is rejected: the 33-byte output is cleared and
+// result_size is set to 0. ECDSA curves retain their 65-byte uncompressed output.
+// Only use the output on success; protocol-specific KDF/authentication is still required.
 int hdnode_get_shared_key(const HDNode *node, const uint8_t *peer_public_key, uint8_t *session_key, int *result_size);
 
 int hdnode_serialize_public(const HDNode *node, uint32_t fingerprint, uint32_t version, char *str, int strsize);

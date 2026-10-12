@@ -6306,3 +6306,84 @@ final class MessageSigningVersionRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class HDNodeSharedKeyRegressionTests: XCTestCase {
+    // Public test vectors from RFC 7748, section 6.1; not wallet key material.
+    private let alicePrivate = Array(Data(hex:
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"))
+    private let bobPrivate = Array(Data(hex:
+        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"))
+
+    private func makeNode(_ privateKey: [UInt8], curve: String = "curve25519") throws -> HDNode {
+        let chainCode = [UInt8](repeating: 0, count: 32)
+        var node = HDNode()
+        let status = chainCode.withUnsafeBufferPointer { chain in
+            privateKey.withUnsafeBufferPointer { key in
+                hdnode_from_xprv(0, 0, chain.baseAddress, key.baseAddress, curve, &node)
+            }
+        }
+        return try XCTUnwrap(status == 1 ? node : nil)
+    }
+
+    private func sharedKey(node: inout HDNode, peer: [UInt8], capacity: Int)
+        -> (status: Int32, size: Int32, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: capacity + 2)
+        var size: Int32 = 123
+        let status = peer.withUnsafeBufferPointer { publicKey in
+            output.withUnsafeMutableBufferPointer { buffer in
+                hdnode_get_shared_key(&node, publicKey.baseAddress,
+                                      buffer.baseAddress?.advanced(by: 1), &size)
+            }
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (status, size, Array(output.dropFirst().prefix(capacity)))
+    }
+
+    func testRFC7748SharedSecretPreservesEncodingForBothPeers() throws {
+        let alicePublic = Array(Data(hex:
+            "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"))
+        let bobPublic = Array(Data(hex:
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"))
+        let expected = [UInt8(0x04)] + Array(Data(hex:
+            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"))
+        for (privateKey, peer) in [(alicePrivate, bobPublic), (bobPrivate, alicePublic)] {
+            var node = try makeNode(privateKey)
+            let result = sharedKey(node: &node, peer: [0x40] + peer, capacity: 33)
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(result.size, 33)
+            XCTAssertEqual(result.bytes, expected)
+        }
+    }
+
+    func testSmallOrderCurve25519PeersFailAndClearOutput() throws {
+        // u = 0 and u = 1 both yield an all-zero secret. The latter ensures the
+        // check covers the result rather than merely rejecting an all-zero input.
+        let peers = [[UInt8](repeating: 0, count: 32),
+                     [UInt8(1)] + [UInt8](repeating: 0, count: 31)]
+        for privateKey in [alicePrivate, bobPrivate] {
+            var node = try makeNode(privateKey)
+            for peer in peers {
+                let result = sharedKey(node: &node, peer: [0x40] + peer, capacity: 33)
+                XCTAssertEqual(result.status, 1)
+                XCTAssertEqual(result.size, 0)
+                XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: 33))
+            }
+        }
+    }
+
+    func testSecp256k1SharedSecretPreservesUncompressedPointEncoding() throws {
+        // Scalar 1 multiplied by the public generator is the generator itself.
+        let privateKey = [UInt8](repeating: 0, count: 31) + [UInt8(1)]
+        let x = Array(Data(hex:
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
+        let y = Array(Data(hex:
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"))
+        var node = try makeNode(privateKey, curve: "secp256k1")
+        let result = sharedKey(node: &node, peer: [0x02] + x, capacity: 65)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.size, 65)
+        XCTAssertEqual(result.bytes, [0x04] + x + y)
+    }
+}

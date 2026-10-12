@@ -713,6 +713,17 @@ int hdnode_get_shared_key(const HDNode *node, const uint8_t *peer_public_key, ui
 			return 1;  // Curve25519 public key should start with 0x40 byte.
 		}
 		curve25519_scalarmult(session_key + 1, node->private_key, peer_public_key + 1);
+		// Small-order peer points can yield an all-zero secret (RFC 7748, section 6.1).
+		// Check all 32 secret bytes, excluding the 0x04 encoding prefix.
+		uint8_t nonzero = 0;
+		for (size_t i = 1; i < 33; i++) {
+			nonzero |= session_key[i];
+		}
+		if (nonzero == 0) {
+			memzero(session_key, 33);
+			*result_size = 0;
+			return 1;
+		}
 		*result_size = 33;
 		return 0;
 	} else {
