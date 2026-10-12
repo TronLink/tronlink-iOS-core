@@ -1490,7 +1490,7 @@
 - (GRPCProtoCall *)RPCToScanAndMarkNoteByIvkWithRequest:(IvkDecryptAndMarkParameters *)request handler:(void(^)(DecryptNotesMarked *_Nullable response, NSError *_Nullable error))handler {
     return [self RPCToMethod:@"ScanAndMarkNoteByIvk"
               requestsWriter:[GRXWriter writerWithValue:request]
-               responseClass:[DecryptNotes class]
+               responseClass:[DecryptNotesMarked class]
           responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
 }
 
