@@ -1300,6 +1300,21 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
         XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(messageHash, signature: signature.data.hex), key.address)
     }
 
+    func testStatelessSigningPreservesGoldenOutputAndRejectsInvalidInputs() throws {
+        let signature = try TLCore.PrivateKey.sign(hash: messageHash, privateKey: privateKeyData)
+        XCTAssertEqual(signature.data.hex,
+                       "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01")
+        XCTAssertEqual(privateKeyData, Data(repeating: 0, count: 31) + Data([1]))
+        XCTAssertTrue(EthereumCrypto.verify(signature: signature.data, message: messageHash,
+                                           publicKey: EthereumCrypto.getPublicKey(from: privateKeyData)))
+        XCTAssertThrowsError(try TLCore.PrivateKey.sign(hash: Data(repeating: 0x11, count: 31),
+                                                       privateKey: privateKeyData))
+        XCTAssertThrowsError(try TLCore.PrivateKey.sign(hash: messageHash,
+                                                       privateKey: Data(repeating: 0, count: 32)))
+        XCTAssertThrowsError(try TLCore.PrivateKey.sign(hash: messageHash,
+                                                       privateKey: Data(repeating: 0xff, count: 32)))
+    }
+
     func testPersonalMessageHashMatchesRawByteEnvelopes() throws {
         let cases: [(Data, Data)] = [
             (Data(), Data("\u{19}Ethereum Signed Message:\n0".utf8)),
@@ -2854,6 +2869,22 @@ extension EmbeddedKeystoreTests {
 final class KeystoreCTRCounterRegressionTests: XCTestCase {
     private let password = "ctr-regression-password"
     private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+
+    func testDecryptionCleanupPreservesReturnedDataAcrossRepeatedCalls() throws {
+        for cipher in ["aes-128-ctr", "aes-128-cbc"] {
+            for plaintext in [privateKey, Data(repeating: 0x5a, count: 96)] {
+                let key = try makeKey(plaintext: plaintext, iv: iv(counter: 0), cipher: cipher)
+                let retainedResult = try key.decrypt(password: password)
+                var nextResult = try key.decrypt(password: password)
+                nextResult.resetBytes(in: 0 ..< nextResult.count)
+                XCTAssertEqual(retainedResult, plaintext)
+                XCTAssertEqual(nextResult, Data(repeating: 0, count: plaintext.count))
+                XCTAssertThrowsError(try key.decrypt(password: "wrong-password"))
+                XCTAssertEqual(try key.decrypt(password: password), plaintext)
+                XCTAssertEqual(retainedResult, plaintext)
+            }
+        }
+    }
 
     func testMACVerificationHandlesTamperingLengthsAndSlices() throws {
         for cipher in ["aes-128-ctr", "aes-128-cbc"] {

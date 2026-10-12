@@ -47,6 +47,13 @@ public class PrivateKey {
     /// - Returns: Signature that you can use in your transactions
     /// - Throws: If hash size invalid hash size or private key. Call privateKey.verify()
     public func sign(hash: Data) throws -> Signature {
+        return try PrivateKey.sign(hash: hash, privateKey: privateKey)
+    }
+
+    /// Signs without retaining the private key in a `PrivateKey` instance.
+    /// The caller owns the supplied data and must clear it after use.
+    /// Uses the same key validation and public-key recovery checks as instance signing.
+    public static func sign(hash: Data, privateKey: Data) throws -> Signature {
         let signature = try SECP256K1.signForRecovery(hash: hash, privateKey: privateKey).serializedSignature
         return Signature(data: signature)
     }

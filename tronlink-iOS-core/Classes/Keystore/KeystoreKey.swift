@@ -138,7 +138,7 @@ public struct KeystoreKey {
     /// CTR input must fit the IV's remaining 64-bit counter range; otherwise this
     /// throws `CTR.Error.invalidInitializationVector` after verifying the password.
     public func decrypt(password: String) throws -> Data {
-        let derivedKey: Data
+        var derivedKey: Data
         switch crypto.kdf {
         case "scrypt":
             let scrypt = Scrypt(params: crypto.kdfParams)
@@ -146,8 +146,24 @@ public struct KeystoreKey {
         default:
             throw DecryptError.unsupportedKDF
         }
+        defer {
+            derivedKey.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
 
-        let mac = KeystoreKey.computeMAC(prefix: derivedKey[derivedKey.count - 16 ..< derivedKey.count], key: crypto.cipherText)
+        // Detach and clear this slice before the earlier derivedKey cleanup runs.
+        var macPrefix = derivedKey[derivedKey.count - 16 ..< derivedKey.count]
+        defer {
+            macPrefix.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
+        let mac = KeystoreKey.computeMAC(prefix: macPrefix, key: crypto.cipherText)
         let macMatches = mac.count == crypto.mac.count && mac.withUnsafeBytes { (computed: UnsafeRawBufferPointer) in
             return crypto.mac.withUnsafeBytes { (expected: UnsafeRawBufferPointer) in
                 return timingsafe_bcmp(computed.baseAddress!, expected.baseAddress!, computed.count) == 0
@@ -157,21 +173,36 @@ public struct KeystoreKey {
             throw DecryptError.invalidPassword
         }
 
-        let decryptionKey = derivedKey[0...15]
-        let decryptedPK: [UInt8]
+        var decryptionKey = derivedKey[0...15].bytesT
+        defer {
+            decryptionKey.withUnsafeMutableBytes { bytes in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
+        var decryptedPK: [UInt8]
         switch crypto.cipher {
         case "aes-128-ctr":
             // Keep MAC/password validation first and reject counter exhaustion before AES.
             try crypto.cipherParams.validateCTRCapacity(forByteCount: crypto.cipherText.count)
-            let aesCipher = try AES(key: decryptionKey.bytesT, blockMode: CTR(iv: crypto.cipherParams.iv.bytesT), padding: .noPadding)
+            let aesCipher = try AES(key: decryptionKey, blockMode: CTR(iv: crypto.cipherParams.iv.bytesT), padding: .noPadding)
             decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytesT)
         case "aes-128-cbc":
-            let aesCipher = try AES(key: decryptionKey.bytesT, blockMode: CBC(iv: crypto.cipherParams.iv.bytesT), padding: .noPadding)
+            let aesCipher = try AES(key: decryptionKey, blockMode: CBC(iv: crypto.cipherParams.iv.bytesT), padding: .noPadding)
             decryptedPK = try aesCipher.decrypt(crypto.cipherText.bytesT)
         default:
             throw DecryptError.unsupportedCipher
         }
+        defer {
+            decryptedPK.withUnsafeMutableBytes { bytes in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
 
+        // Copy the result before clearing the temporary plaintext array.
         return Data(bytes: decryptedPK)
     }
 
@@ -179,6 +210,13 @@ public struct KeystoreKey {
         var data = Data(capacity: prefix.count + key.count)
         data.append(prefix)
         data.append(key)
+        defer {
+            data.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
         return data.sha3(.keccak256)
     }
 

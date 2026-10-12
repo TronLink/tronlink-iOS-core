@@ -37,13 +37,43 @@ public struct KeystoreKeyHeader {
         let kdfParams = ScryptParams()
 
         let scrypt = Scrypt(params: kdfParams)
-        let derivedKey = try scrypt.calculate(password: password)
+        var derivedKey = try scrypt.calculate(password: password)
+        defer {
+            derivedKey.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
 
-        let encryptionKey = derivedKey[0...15]
-        let aecCipher = try AES(key: encryptionKey.bytesT, blockMode: CTR(iv: cipherParams.iv.bytesT), padding: .noPadding)
+        var encryptionKey = derivedKey[0...15].bytesT
+        defer {
+            encryptionKey.withUnsafeMutableBytes { bytes in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
+        let aecCipher = try AES(key: encryptionKey, blockMode: CTR(iv: cipherParams.iv.bytesT), padding: .noPadding)
 
-        let encryptedKey = try aecCipher.encrypt(data.bytesT)
-        let prefix = derivedKey[(derivedKey.count - 16) ..< derivedKey.count]
+        var plaintext = data.bytesT
+        defer {
+            plaintext.withUnsafeMutableBytes { bytes in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
+        let encryptedKey = try aecCipher.encrypt(plaintext)
+        // Detach and clear this slice before the earlier derivedKey cleanup runs.
+        var prefix = derivedKey[(derivedKey.count - 16) ..< derivedKey.count]
+        defer {
+            prefix.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
         let mac = KeystoreKey.computeMAC(prefix: prefix, key: Data(bytes: encryptedKey))
 
         self.init(cipherText: Data(bytes: encryptedKey), cipherParams: cipherParams, kdfParams: kdfParams, mac: mac)
