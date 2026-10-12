@@ -109,7 +109,8 @@ int hdnode_serialize_public(const HDNode *node, uint32_t fingerprint, uint32_t v
 int hdnode_serialize_private(const HDNode *node, uint32_t fingerprint, uint32_t version, char *str, int strsize);
 
 // Public nodes require a valid compressed ECDSA point (0x02/0x03), or the
-// existing 0x01 + 32-byte encoding for 25519 curves. Returns 0 on success,
+// existing 0x01 + 32-byte encoding for 25519 curves. Private ECDSA nodes require
+// a scalar greater than zero and less than the curve order. Returns 0 on success,
 // -1 for invalid Base58Check data/length, -2 for invalid key data, -3 for an
 // unexpected version, and -4 for an unknown curve. On failure, node is cleared
 // and fingerprint is unchanged. Only use the node after a successful return.

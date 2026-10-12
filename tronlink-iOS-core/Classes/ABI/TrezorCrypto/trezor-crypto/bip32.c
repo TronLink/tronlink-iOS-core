@@ -783,9 +783,19 @@ int hdnode_deserialize(const char *str, uint32_t version_public, uint32_t versio
 		}
 		memcpy(node->public_key, node_data + 45, 33);
 	} else if (version == version_private) { // private node
+		ret = -2;
 		if (node_data[45]) { // invalid data
-			ret = -2;
 			goto cleanup;
+		}
+		if (info->params) {
+			// Apply the same ECDSA scalar bounds as hdnode_from_xprv.
+			bignum256 private_key;
+			bn_read_be(node_data + 46, &private_key);
+			int valid = !bn_is_zero(&private_key) && bn_is_less(&private_key, &info->params->order);
+			memzero(&private_key, sizeof(private_key));
+			if (!valid) {
+				goto cleanup;
+			}
 		}
 		memcpy(node->private_key, node_data + 46, 32);
 	} else {
