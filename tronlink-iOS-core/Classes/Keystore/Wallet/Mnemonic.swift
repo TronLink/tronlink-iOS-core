@@ -73,7 +73,9 @@ public final class Mnemonic {
     /// - Parameter string: mnemonic string
     /// - Returns: `true` if the string is valid; `false` otherwise.
     public static func isValid(_ string: String) -> Bool {
-        guard let asciiCString = string.cString(using: String.Encoding.ascii) else {
+        // C would validate only the prefix before an embedded NUL.
+        guard !string.utf8.contains(0),
+            let asciiCString = string.cString(using: String.Encoding.ascii) else {
             return false
         }
         return mnemonic_check(asciiCString) != 0
@@ -91,6 +93,10 @@ public final class Mnemonic {
     public static func deriveSeed(mnemonic: String, passphrase: String, normalization: Normalization = .bip39) throws -> Data {
         let mnemonic = normalize(mnemonic, using: normalization)
         let passphrase = normalize(passphrase, using: normalization)
+        // Direct Wallet/seed callers must not silently derive from a truncated mnemonic.
+        guard !mnemonic.utf8.contains(0) else {
+            throw Error.seedDerivationFailed
+        }
         guard passphrase.utf8.count <= maxPassphraseByteCount else {
             throw Error.passphraseTooLong
         }
