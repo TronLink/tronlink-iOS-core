@@ -93,7 +93,8 @@ public struct KeystoreKey {
     /// Builds the payload encrypted for an HD wallet: the mnemonic as NUL-terminated ASCII
     /// followed by the passphrase as UTF-8.
     static func makeMnemonicPayload(mnemonic: String, passphrase: String) throws -> Data {
-        // An embedded NUL would turn the mnemonic suffix into a passphrase on reload.
+        // cString(using:) stops at the first NUL and drops the suffix, so the stored
+        // payload would be only the prefix.
         guard !mnemonic.utf8.contains(0),
             let cstring = mnemonic.cString(using: .ascii) else {
             throw EncryptError.invalidMnemonic
