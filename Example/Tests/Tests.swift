@@ -5760,6 +5760,108 @@ final class Bech32SeparatorRegressionTests: XCTestCase {
         return (status, version, length, Array(program.dropFirst().prefix(40)))
     }
 
+    private func encodeSegwit(version: Int32, program: [UInt8], hrp: String)
+        -> (status: Int32, address: String) {
+        let capacity = 73 + hrp.utf8.count
+        var output = [CChar](repeating: 0x5a, count: capacity + 2)
+        let status = output.withUnsafeMutableBufferPointer { buffer in
+            program.withUnsafeBufferPointer { bytes in
+                segwit_addr_encode(buffer.baseAddress?.advanced(by: 1), hrp, version,
+                                   bytes.baseAddress, bytes.count)
+            }
+        }
+        XCTAssertEqual(output.first, 0x5a)
+        XCTAssertEqual(output.last, 0x5a)
+        guard status == 1 else { return (status, "") }
+        let contents = output.dropFirst().prefix(capacity)
+        XCTAssertTrue(contents.contains(0))
+        let bytes = contents.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        return (status, String(decoding: bytes, as: UTF8.self))
+    }
+
+    func testBIP350PublishedAddressesEncodeAndDecodeWithTheRequiredChecksum() {
+        // Public address/program vectors from BIP 350; no wallet secrets are used.
+        // https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki#test-vectors-for-v0-v16-native-segregated-witness-addresses
+        let vectors: [(address: String, hrp: String, version: Int32, program: String)] = [
+            ("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4", "bc", 0,
+             "751e76e8199196d454941c45d1b3a323f1433bd6"),
+            ("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7", "tb", 0,
+             "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"),
+            ("bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7kt5nd6y", "bc", 1,
+             "751e76e8199196d454941c45d1b3a323f1433bd6751e76e8199196d454941c45d1b3a323f1433bd6"),
+            ("BC1SW50QGDZ25J", "bc", 16, "751e"),
+            ("bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs", "bc", 2,
+             "751e76e8199196d454941c45d1b3a323"),
+            ("tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy", "tb", 0,
+             "000000c4a5cad46221b2a187905e5266362b99d5e91c6ce24d165dab93e86433"),
+            ("tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c", "tb", 1,
+             "000000c4a5cad46221b2a187905e5266362b99d5e91c6ce24d165dab93e86433"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0", "bc", 1,
+             "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        ]
+        for vector in vectors {
+            let expected = Array(Data(hex: vector.program))
+            let encoded = encodeSegwit(version: vector.version, program: expected, hrp: vector.hrp)
+            XCTAssertEqual(encoded.status, 1, vector.address)
+            XCTAssertEqual(encoded.address, vector.address.lowercased())
+            for address in [vector.address.lowercased(), vector.address.uppercased()] {
+                let decoded = decodeSegwit(address, hrp: vector.hrp)
+                XCTAssertEqual(decoded.status, 1, address)
+                XCTAssertEqual(decoded.version, vector.version, address)
+                XCTAssertEqual(decoded.length, expected.count, address)
+                XCTAssertEqual(Array(decoded.program.prefix(expected.count)), expected, address)
+                XCTAssertEqual(Array(decoded.program.dropFirst(expected.count)),
+                               [UInt8](repeating: 0xa5, count: 40 - expected.count), address)
+            }
+        }
+    }
+
+    func testBIP350PublishedInvalidAddressesAreRejected() {
+        let vectors: [(address: String, hrp: String)] = [
+            ("tc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq5zuyut", "bc"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd", "bc"),
+            ("tb1z0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqglt7rf", "tb"),
+            ("BC1S0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQ54WELL", "bc"),
+            ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kemeawh", "bc"),
+            ("tb1q0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq24jc47", "tb"),
+            ("bc1p38j9r5y49hruaue7wxjce0updqjuyyx0kh56v8s25huc6995vvpql3jow4", "bc"),
+            ("BC130XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQ7ZWS8R", "bc"),
+            ("bc1pw5dgrnzv", "bc"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v8n0nx0muaewav253zgeav", "bc"),
+            ("BC1QR508D6QEJXTDG4Y5R3ZARVARYV98GJ9P", "bc"),
+            ("tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq47Zagq", "tb"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v07qwwzcrf", "bc"),
+            ("tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vpggkg4j", "tb"),
+            ("bc1gmk9yu", "bc")
+        ]
+        for vector in vectors {
+            XCTAssertEqual(decodeSegwit(vector.address, hrp: vector.hrp).status, 0, vector.address)
+        }
+    }
+
+    func testGenericBech32APIsRetainTheirOriginalChecksumContract() {
+        var output = [CChar](repeating: 0, count: 9)
+        let status = output.withUnsafeMutableBufferPointer {
+            bech32_encode($0.baseAddress, "a", nil, 0)
+        }
+        XCTAssertEqual(status, 1)
+        XCTAssertEqual(String(cString: output), "a12uel5l")
+        XCTAssertEqual(decode("a12uel5l").status, 1)
+        XCTAssertEqual(decode("a1lqfn3a").status, 0) // Bech32m must remain rejected here.
+        // Generic Bech32 does not enforce SegWit version rules.
+        let legacyV1 = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd"
+        XCTAssertEqual(decode(legacyV1).status, 1)
+        XCTAssertEqual(decodeSegwit(legacyV1, hrp: "bc").status, 0)
+    }
+
+    func testSegwitEncodingRejectsVersionsOutsideTheDocumentedRange() {
+        let program = [UInt8](repeating: 0, count: 32)
+        let invalidVersions: [Int32] = [-256, -1, 17, 256]
+        for version in invalidVersions {
+            XCTAssertEqual(encodeSegwit(version: version, program: program, hrp: "bc").status, 0)
+        }
+    }
+
     func testMissingSeparatorsAreRejectedBeforeWritingOutputs() {
         for length in 8 ... 90 {
             for character in ["q", "Q", "~"] {

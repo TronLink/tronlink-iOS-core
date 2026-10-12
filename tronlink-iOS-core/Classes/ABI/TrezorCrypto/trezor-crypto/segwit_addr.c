@@ -36,6 +36,9 @@ uint32_t bech32_polymod_step(uint32_t pre) {
 
 static const char* charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
+static const uint32_t bech32_constant = 1;
+static const uint32_t bech32m_constant = 0x2bc830a3;
+
 static const int8_t charset_rev[128] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -47,7 +50,7 @@ static const int8_t charset_rev[128] = {
      1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1
 };
 
-int bech32_encode(char *output, const char *hrp, const uint8_t *data, size_t data_len) {
+static int bech32_encode_with_checksum(char *output, const char *hrp, const uint8_t *data, size_t data_len, uint32_t checksum_constant) {
     uint32_t chk = 1;
     size_t i = 0;
     while (hrp[i] != 0) {
@@ -75,7 +78,7 @@ int bech32_encode(char *output, const char *hrp, const uint8_t *data, size_t dat
     for (i = 0; i < 6; ++i) {
         chk = bech32_polymod_step(chk);
     }
-    chk ^= 1;
+    chk ^= checksum_constant;
     for (i = 0; i < 6; ++i) {
         *(output++) = charset[(chk >> ((5 - i) * 5)) & 0x1f];
     }
@@ -83,7 +86,12 @@ int bech32_encode(char *output, const char *hrp, const uint8_t *data, size_t dat
     return 1;
 }
 
-int bech32_decode(char* hrp, uint8_t *data, size_t *data_len, const char *input) {
+int bech32_encode(char *output, const char *hrp, const uint8_t *data, size_t data_len) {
+    return bech32_encode_with_checksum(output, hrp, data, data_len, bech32_constant);
+}
+
+/* Return the checksum residue; callers must validate the expected encoding. */
+static uint32_t bech32_decode_checksum(char* hrp, uint8_t *data, size_t *data_len, const char *input) {
     uint32_t chk = 1;
     size_t i;
     size_t input_len = strlen(input);
@@ -141,7 +149,11 @@ int bech32_decode(char* hrp, uint8_t *data, size_t *data_len, const char *input)
     if (have_lower && have_upper) {
         return 0;
     }
-    return chk == 1;
+    return chk;
+}
+
+int bech32_decode(char* hrp, uint8_t *data, size_t *data_len, const char *input) {
+    return bech32_decode_checksum(hrp, data, data_len, input) == bech32_constant;
 }
 
 static int convert_bits(uint8_t* out, size_t* outlen, int outbits, const uint8_t* in, size_t inlen, int inbits, int pad) {
@@ -169,23 +181,27 @@ static int convert_bits(uint8_t* out, size_t* outlen, int outbits, const uint8_t
 int segwit_addr_encode(char *output, const char *hrp, int witver, const uint8_t *witprog, size_t witprog_len) {
     uint8_t data[65];
     size_t datalen = 0;
-    if (witver > 16) return 0;
+    if (witver < 0 || witver > 16) return 0;
     if (witver == 0 && witprog_len != 20 && witprog_len != 32) return 0;
     if (witprog_len < 2 || witprog_len > 40) return 0;
     data[0] = witver;
     convert_bits(data + 1, &datalen, 5, witprog, witprog_len, 8, 1);
     ++datalen;
-    return bech32_encode(output, hrp, data, datalen);
+    /* BIP 350: v0 uses Bech32; v1 through v16 use Bech32m. */
+    return bech32_encode_with_checksum(output, hrp, data, datalen,
+                                      witver == 0 ? bech32_constant : bech32m_constant);
 }
 
 int segwit_addr_decode(int* witver, uint8_t* witdata, size_t* witdata_len, const char* hrp, const char* addr) {
     uint8_t data[84];
     char hrp_actual[84];
     size_t data_len;
-    if (!bech32_decode(hrp_actual, data, &data_len, addr)) return 0;
+    uint32_t checksum = bech32_decode_checksum(hrp_actual, data, &data_len, addr);
+    if (checksum != bech32_constant && checksum != bech32m_constant) return 0;
     if (data_len == 0 || data_len > 65) return 0;
     if (strncmp(hrp, hrp_actual, 84) != 0) return 0;
     if (data[0] > 16) return 0;
+    if (checksum != (data[0] == 0 ? bech32_constant : bech32m_constant)) return 0;
     *witdata_len = 0;
     if (!convert_bits(witdata, witdata_len, 8, data + 1, data_len - 1, 5, 0)) return 0;
     if (*witdata_len < 2 || *witdata_len > 40) return 0;

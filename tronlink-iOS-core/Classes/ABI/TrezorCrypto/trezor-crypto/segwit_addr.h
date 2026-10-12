@@ -26,6 +26,8 @@
 
 /** Encode a SegWit address
  *
+ *  Uses Bech32 for version 0 and Bech32m for versions 1 through 16 (BIP 350).
+ *
  *  Out: output:   Pointer to a buffer of size 73 + strlen(hrp) that will be
  *                 updated to contain the null-terminated address.
  *  In:  hrp:      Pointer to the null-terminated human readable part to use
@@ -44,6 +46,8 @@ int segwit_addr_encode(
 );
 
 /** Decode a SegWit address
+ *
+ *  Requires Bech32 for version 0 and Bech32m for versions 1 through 16.
  *
  *  Out: ver:      Pointer to an int that will be updated to contain the witness
  *                 program version (between 0 and 16 inclusive).
