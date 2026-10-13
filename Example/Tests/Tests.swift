@@ -416,6 +416,138 @@ class Tests: XCTestCase {
         }
     }
 
+    func testMetricsDecimalAdditionRejectsInvalidAndOutOfRangeValues() {
+        XCTAssertEqual("0.1".tronCore_decimalNumberByAdding(numberString: "0.2")?.stringValue, "0.3")
+        XCTAssertEqual("".tronCore_decimalNumberByAdding(numberString: "2")?.stringValue, "2")
+        XCTAssertEqual("-0.1".tronCore_decimalNumberByAdding(numberString: "-0.2")?.stringValue, "-0.3")
+        XCTAssertNotNil(String(repeating: "9", count: 78).tronCore_metricsDecimalNumber())
+        XCTAssertNil("NaN".tronCore_decimalNumberByAdding(numberString: "1"))
+        XCTAssertNil("1".tronCore_decimalNumberByAdding(numberString: String(repeating: "9", count: 1_000)))
+        XCTAssertNil(("0." + String(repeating: "0", count: 128) + "1").tronCore_metricsDecimalNumber())
+        // Both operands fit the supported range, but their sum exceeds it.
+        let large = "8" + String(repeating: "0", count: 126)
+        XCTAssertNotNil(large.tronCore_metricsDecimalNumber())
+        XCTAssertNil(large.tronCore_decimalNumberByAdding(numberString: large))
+        // Previously, two individually representable 2e165 inputs could overflow on addition.
+        let overflowOperand = "2" + String(repeating: "0", count: 165)
+        XCTAssertNil(overflowOperand.tronCore_decimalNumberByAdding(numberString: overflowOperand))
+    }
+
+    private func withTransactionMetricsContext(_ body: (TRXStatisticalUploadManager, MetricsDataSourceStub, String) -> Void) {
+        let manager = TRXStatisticalUploadManager.shared
+        let previousConfig = manager.dataConfig
+        let config = MetricsDataSourceStub()
+        config.environmentKey = "metrics-regression-\(UUID().uuidString)"
+        config.walletAddress = "T-metrics-regression-\(UUID().uuidString)"
+        manager.dataConfig = config
+        let uid = TRXAddressMapManager.shared.id(for: config.walletAddress)
+        defer {
+            manager.dataConfig = previousConfig
+            TRXAddressMapManager.shared.removeMapping(for: config.walletAddress)
+        }
+        body(manager, config, uid)
+    }
+
+    func testConcurrentTransactionMetricsPreserveEveryIncrement() {
+        withTransactionMetricsContext { manager, config, uid in
+            let db = TRXMetricsDBManager.shared
+            // First round includes competing first inserts; second round updates an existing row.
+            for round in 1...2 {
+                DispatchQueue.concurrentPerform(iterations: 32) { _ in
+                    manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "0.25",
+                                                   energy: "1", bandwidth: "2", burn: "0.1")
+                }
+                let rows = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid)
+                XCTAssertEqual(rows.count, 1)
+                XCTAssertEqual(rows.first?.count, round * 32)
+                XCTAssertEqual(rows.first?.tokenAmount, String(round * 8))
+                XCTAssertEqual(rows.first?.energy, String(round * 32))
+                XCTAssertEqual(rows.first?.bandwidth, String(round * 64))
+                XCTAssertEqual(rows.first?.burn, round == 1 ? "3.2" : "6.4")
+                XCTAssertEqual(rows.first?.A1, round * 32)
+            }
+            manager.upsertTransactionsData(actionType: 1053, tokenAddress: "other-token", tokenAmount: "5",
+                                           energy: "0", bandwidth: "0", burn: "0")
+            let rows = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid)
+            XCTAssertEqual(rows.count, 2)
+            XCTAssertEqual(rows.first(where: { $0.actionType == 1051 })?.count, 64)
+            XCTAssertEqual(rows.first(where: { $0.actionType == 1053 })?.count, 1)
+        }
+    }
+
+    func testInvalidTransactionMetricsDoNotInsertOrPartiallyUpdate() {
+        withTransactionMetricsContext { manager, config, uid in
+            let db = TRXMetricsDBManager.shared
+            let invalid = "2" + String(repeating: "0", count: 165)
+            manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: invalid,
+                                           energy: "0", bandwidth: "0", burn: "0")
+            XCTAssertTrue(db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid).isEmpty)
+            manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "1",
+                                           energy: "2", bandwidth: "3", burn: "4")
+            for index in 0..<4 {
+                var values = ["1", "2", "3", "4"]
+                values[index] = invalid
+                manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: values[0],
+                                               energy: values[1], bandwidth: values[2], burn: values[3])
+            }
+            let row = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid).first
+            XCTAssertEqual(row?.count, 1)
+            XCTAssertEqual(row?.tokenAmount, "1")
+            XCTAssertEqual(row?.energy, "2")
+            XCTAssertEqual(row?.bandwidth, "3")
+            XCTAssertEqual(row?.burn, "4")
+            XCTAssertEqual(row?.A1, 1)
+        }
+    }
+
+    func testTransactionMetricsOverflowPreservesStoredRowAndAllowsNextWrite() {
+        withTransactionMetricsContext { manager, config, uid in
+            let db = TRXMetricsDBManager.shared
+            manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "1",
+                                           energy: "2", bandwidth: "3", burn: "4")
+            guard let seed = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid).first else {
+                XCTFail("Expected a stored transaction statistics row")
+                return
+            }
+            func recordOne() {
+                manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "1",
+                                               energy: "2", bandwidth: "3", burn: "4")
+            }
+            // An acknowledged row must not become dirty, or change any field, on failure.
+            seed.updated = false
+            for field in 0..<3 {
+                seed.count = field == 0 ? Int.max : 1
+                seed.A1 = field == 1 ? Int.max : 1
+                seed.tokenAmount = field == 2 ? "2" + String(repeating: "0", count: 165) : "1"
+                XCTAssertTrue(db.upsertTransactionSync(model: seed))
+                recordOne()
+                let saved = db.getTransactionSyncModel(chain: config.environmentKey, uId: uid, actionType: 1051,
+                                                      tokenAddress: "_", date: seed.date ?? "")
+                XCTAssertEqual(saved?.count, seed.count)
+                XCTAssertEqual(saved?.A1, seed.A1)
+                XCTAssertEqual(saved?.tokenAmount, seed.tokenAmount)
+                XCTAssertEqual(saved?.energy, "2")
+                XCTAssertEqual(saved?.bandwidth, "3")
+                XCTAssertEqual(saved?.burn, "4")
+                XCTAssertEqual(saved?.updated, false)
+            }
+            seed.count = 1
+            seed.A1 = 1
+            seed.tokenAmount = "1"
+            XCTAssertTrue(db.upsertTransactionSync(model: seed))
+            recordOne()
+            let saved = db.getTransactionSyncModel(chain: config.environmentKey, uId: uid, actionType: 1051,
+                                                  tokenAddress: "_", date: seed.date ?? "")
+            XCTAssertEqual(saved?.count, 2)
+            XCTAssertEqual(saved?.tokenAmount, "2")
+            XCTAssertEqual(saved?.energy, "4")
+            XCTAssertEqual(saved?.bandwidth, "6")
+            XCTAssertEqual(saved?.burn, "8")
+            XCTAssertEqual(saved?.A1, 2)
+            XCTAssertEqual(saved?.updated, true)
+        }
+    }
+
     func testMetricsReportNumberBounds() {
         let viewModel = TRXStatisticalUploadViewModel()
         let asset = TRXAssetSyncModel()

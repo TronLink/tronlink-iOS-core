@@ -55,17 +55,35 @@ extension String {
         return 0
     }
     
-    func tronCore_decimalNumberByAdding(numberString: String) -> NSDecimalNumber {
-        var inputNumberString = numberString
-        var currentString = self 
-        if !self.tronCore_isPureNumber() || self == "" {
-            currentString = "0"
-        }
-        if !numberString.tronCore_isPureNumber() || numberString == "" {
-            inputNumberString = "0"
-        }
-        let currentDecimalNumber = NSDecimalNumber(string: currentString)
-        let inputDecimalNumber = NSDecimalNumber(string: inputNumberString)
-        return currentDecimalNumber.adding(inputDecimalNumber)
+    func tronCore_metricsDecimalNumber() -> NSDecimalNumber? {
+        // Preserve the legacy meaning of an absent resource value, but do not turn
+        // malformed/oversized values into zero. Bounds apply only to telemetry.
+        if isEmpty { return .zero }
+        guard utf8.prefix(258).count <= 257, tronCore_isPureNumber() else { return nil }
+        let unsigned = hasPrefix("-") ? String(dropFirst()) : self
+        let parts = unsigned.split(separator: ".", omittingEmptySubsequences: false)
+        // These bounds exceed uint256 amounts and an Int-sized daily event count,
+        // while staying within Decimal's exponent range (also used by asset reporting).
+        guard let integerPart = parts.first, integerPart.count <= 127,
+              parts.count == 1 || parts[1].count <= 128 else { return nil }
+        let number = NSDecimalNumber(string: self, locale: Locale(identifier: "en_US_POSIX"))
+        guard number != .notANumber else { return nil }
+        return number
+    }
+
+    func tronCore_decimalNumberByAdding(numberString: String) -> NSDecimalNumber? {
+        guard let left = tronCore_metricsDecimalNumber(),
+              let right = numberString.tronCore_metricsDecimalNumber() else { return nil }
+        var lhs = left.decimalValue
+        var rhs = right.decimalValue
+        var sum = Decimal()
+        // Report arithmetic failures instead of raising an Objective-C exception.
+        // Preserve default .plain rounding when Decimal loses precision.
+        let error = NSDecimalAdd(&sum, &lhs, &rhs, .plain)
+        guard error == .noError || error == .lossOfPrecision else { return nil }
+        let result = NSDecimalNumber(decimal: sum)
+        guard result != .notANumber,
+              result.stringValue.tronCore_metricsDecimalNumber() != nil else { return nil }
+        return result
     }
 }

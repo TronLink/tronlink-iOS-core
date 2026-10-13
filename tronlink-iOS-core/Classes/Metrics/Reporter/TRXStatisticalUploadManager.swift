@@ -31,7 +31,7 @@ public class TRXStatisticalUploadManager: NSObject {
         \TRXTransactionSyncModel.A9
     ]
     
-    /// Dedicated serial background queue for all DB and upload operations.
+    /// Serial background queue for migration, upload and acknowledgement.
     private let metricsQueue = DispatchQueue(label: "com.tronlink.metrics", qos: .utility)
     
     private override init() {}
@@ -95,45 +95,52 @@ public class TRXStatisticalUploadManager: NSObject {
     public func upsertTransactionsData(actionType:Int, tokenAddress:String, tokenAmount:String, energy:String,
                                 bandwidth:String, burn:String) {
         guard let config = dataConfig, !isCollectionDisabled(config) else { return }
-        let chain = config.environmentKey
-        let address = config.walletAddress
-        let uId = TRXAddressMapManager.shared.id(for: address)
-        let date = Date().tronCore_getCurrentYMD_UTC()
-        let m = TRXMetricsDBManager.shared.getTransactionSyncModel(chain: chain, uId: uId, actionType: actionType,
-                                                                   tokenAddress: tokenAddress, date: date)
-        if let tm = m {
-            let totalCount = (tm.count ?? 0) + 1
-            let totalTokenAmount = (tm.tokenAmount ?? "").tronCore_decimalNumberByAdding(numberString: tokenAmount).stringValue
-            let totalEnergy = (tm.energy ?? "").tronCore_decimalNumberByAdding(numberString: energy).stringValue
-            let totalBandwidth = (tm.bandwidth ?? "").tronCore_decimalNumberByAdding(numberString: bandwidth).stringValue
-            let totalburn = (tm.burn ?? "").tronCore_decimalNumberByAdding(numberString: burn).stringValue
-            let model = self.makeTransactionSyncModel(actionType: actionType,
-                                                      count: totalCount,
-                                                      tokenAddress: tokenAddress,
-                                                      tokenAmount: tokenAmount,
-                                                      totalTokenAmount: totalTokenAmount,
-                                                      energy: totalEnergy,
-                                                      bandwidth: totalBandwidth,
-                                                      burn: totalburn,
-                                                      updated: true,
-                                                      localModel: tm,
-                                                      config: config)
-            TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
-        }else{
-            let model = self.makeTransactionSyncModel(actionType: actionType,
-                                                      count: 1,
-                                                      tokenAddress: tokenAddress,
-                                                      tokenAmount: tokenAmount,
-                                                      totalTokenAmount: tokenAmount,
-                                                      energy: energy,
-                                                      bandwidth: bandwidth,
-                                                      burn: burn,
-                                                      updated: true,
-                                                      localModel: TRXTransactionSyncModel(),
-                                                      config: config)
-            TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
+        guard [tokenAmount, energy, bandwidth, burn].allSatisfy({ $0.tronCore_metricsDecimalNumber() != nil }) else {
+            #if DEBUG
+            NSLog("[Metrics] skipped transaction statistics with invalid numeric input")
+            #endif
+            return
         }
-        
+
+        // Resolve identity and the event's bucket before entering the DB queue:
+        // address mapping can itself access the database. Keep this call synchronous
+        // so an immediate upload still sees the completed write.
+        var model = makeTransactionSyncModel(actionType: actionType, count: 1,
+                                            tokenAddress: tokenAddress, tokenAmount: tokenAmount,
+                                            totalTokenAmount: tokenAmount, energy: energy,
+                                            bandwidth: bandwidth, burn: burn, updated: true,
+                                            localModel: TRXTransactionSyncModel(), config: config)
+        let saved = TRXMetricsDBManager.shared.mutateTransactionSync(
+            chain: model.chain ?? "", uId: model.uId ?? "", actionType: actionType,
+            tokenAddress: tokenAddress, date: model.date ?? ""
+        ) { current in
+            guard let current = current else { return model }
+            let count = (current.count ?? 0).addingReportingOverflow(1)
+            guard (current.count ?? 0) >= 0, !count.overflow,
+                  let totalAmount = (current.tokenAmount ?? "").tronCore_decimalNumberByAdding(numberString: tokenAmount),
+                  let totalEnergy = (current.energy ?? "").tronCore_decimalNumberByAdding(numberString: energy),
+                  let totalBandwidth = (current.bandwidth ?? "").tronCore_decimalNumberByAdding(numberString: bandwidth),
+                  let totalBurn = (current.burn ?? "").tronCore_decimalNumberByAdding(numberString: burn) else { return nil }
+
+            for keyPath in Self.bucketKeyPaths {
+                guard let increment = model[keyPath: keyPath] else { continue }
+                let previous = current[keyPath: keyPath] ?? 0
+                let bucket = previous.addingReportingOverflow(increment)
+                guard previous >= 0, !bucket.overflow else { return nil }
+                model[keyPath: keyPath] = bucket.partialValue
+            }
+            model.count = count.partialValue
+            model.tokenAmount = totalAmount.stringValue
+            model.energy = totalEnergy.stringValue
+            model.bandwidth = totalBandwidth.stringValue
+            model.burn = totalBurn.stringValue
+            return model
+        }
+        if !saved {
+            #if DEBUG
+            NSLog("[Metrics] transaction statistics were not saved; previous totals preserved")
+            #endif
+        }
     }
     
     

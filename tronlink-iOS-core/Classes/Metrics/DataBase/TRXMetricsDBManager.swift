@@ -731,25 +731,35 @@ public class TRXMetricsDBManager: NSObject {
 
     @discardableResult
     public func upsertTransactionSync(model: TRXTransactionSyncModel) -> Bool {
-        let uId = model.uId ?? ""
-        let chain = model.chain ?? ""
-        let actionTypeVal = model.actionType ?? -1
-        let tokenAddressVal = model.tokenAddress ?? ""
-        let dateVal = model.date ?? ""
+        return mutateTransactionSync(chain: model.chain ?? "", uId: model.uId ?? "",
+                                     actionType: model.actionType ?? -1,
+                                     tokenAddress: model.tokenAddress ?? "", date: model.date ?? "") { _ in model }
+    }
 
+    /// Reads, transforms and writes one group in the same database transaction.
+    /// Returning nil aborts the entire update. The transform must not re-enter the DB queue.
+    @nonobjc
+    @discardableResult
+    func mutateTransactionSync(chain: String, uId: String, actionType: Int, tokenAddress: String, date: String,
+                               transform: (TRXTransactionSyncModel?) -> TRXTransactionSyncModel?) -> Bool {
         var result = false
         self.dataBaseQueue?.inDatabase { db in
             guard db.beginTransaction() else { return }
             do {
-                let checkSql = "SELECT COUNT(1) AS cnt FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ?"
-                let rs = try db.executeQuery(checkSql, values: [chain, uId, actionTypeVal, tokenAddressVal, dateVal])
-                var exists = false
-                if rs.next() { exists = rs.int(forColumn: "cnt") > 0 }
+                let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ? LIMIT 1"
+                let rs = try db.executeQuery(sql, values: [chain, uId, actionType, tokenAddress, date])
+                let hasRow = rs.next()
+                let readFailed = db.hadError()
+                let current = hasRow ? self.makeTransactionSync(from: rs) : nil
                 rs.close()
+                guard !readFailed, let model = transform(current) else {
+                    db.rollback()
+                    return
+                }
 
                 let statementsSucceeded: Bool
-                if exists {
-                    statementsSucceeded = self.updateTransactionSync_internal(db: db, chain: chain, uId: uId, actionType: actionTypeVal, tokenAddress: tokenAddressVal, date: dateVal, idType: model.idType, count: model.count, tokenAmount: model.tokenAmount, energy: model.energy, bandwidth: model.bandwidth, burn: model.burn, updated: model.updated, A1: model.A1, A2: model.A2, A3: model.A3, A4: model.A4, A5: model.A5, A6: model.A6, A7: model.A7, A8: model.A8, A9: model.A9)
+                if current != nil {
+                    statementsSucceeded = self.updateTransactionSync_internal(db: db, chain: chain, uId: uId, actionType: actionType, tokenAddress: tokenAddress, date: date, idType: model.idType, count: model.count, tokenAmount: model.tokenAmount, energy: model.energy, bandwidth: model.bandwidth, burn: model.burn, updated: model.updated, A1: model.A1, A2: model.A2, A3: model.A3, A4: model.A4, A5: model.A5, A6: model.A6, A7: model.A7, A8: model.A8, A9: model.A9)
                 } else {
                     statementsSucceeded = self.insertTransactionSync_internal(db: db, model: model)
                 }
