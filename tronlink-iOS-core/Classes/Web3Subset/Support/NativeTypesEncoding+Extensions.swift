@@ -78,9 +78,11 @@ public extension BigInt {
         return encoded.serialize().setLengthLeft(bits / 8)
     }
 
-    /// Converts data to BigInt
+    /// Decodes big-endian two's complement bytes, including Data slices.
+    /// Empty data represents zero, matching zero's toTwosComplement() output.
     static func fromTwosComplement(data: Data) -> BigInt {
-        let isPositive = ((data[0] & 128) >> 7) == 0
+        guard let firstByte = data.first else { return BigInt(0) }
+        let isPositive = ((firstByte & 128) >> 7) == 0
         if isPositive {
             let magnitude = BigUInt(data)
             return BigInt(magnitude)

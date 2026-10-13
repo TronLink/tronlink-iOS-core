@@ -1225,6 +1225,111 @@ final class SingleTLCorePublicAPITests: XCTestCase {
     }
 }
 
+final class TwosComplementDecodingBoundaryTests: XCTestCase {
+    func testEmptyDataDecodesAsZero() {
+        XCTAssertEqual(BigInt.fromTwosComplement(data: Data()), BigInt(0))
+        XCTAssertEqual(BigInt.fromTwosComplement(data: Data([0xa5]).dropFirst()), BigInt(0))
+        XCTAssertEqual(BigInt.fromTwosComplement(data: BigInt(0).toTwosComplement()), BigInt(0))
+    }
+
+    func testNonzeroIndexSlicesUseTheirOwnSignByte() {
+        let cases: [([UInt8], Int)] = [
+            ([0x00], 0), ([0x7f], 127), ([0x80], -128), ([0xff], -1),
+            ([0x00, 0x80], 128), ([0xff, 0x00], -256), ([0x80, 0x00], -32768)
+        ]
+        for (bytes, expected) in cases {
+            let storage = Data([0xa5, 0x5a] + bytes + [0x55])
+            let slice = storage[2..<(2 + bytes.count)]
+            XCTAssertEqual(slice.startIndex, 2)
+            XCTAssertEqual(BigInt.fromTwosComplement(data: slice), BigInt(expected))
+            XCTAssertEqual(BigInt.fromTwosComplement(data: slice),
+                           BigInt.fromTwosComplement(data: Data(slice)))
+        }
+    }
+
+    func testFixedWidthSignsRemainExactThrough256Bits() {
+        for byteCount in [1, 8, 32] {
+            let limit = BigInt(1) << (byteCount * 8 - 1)
+            let cases: [(Data, BigInt)] = [
+                (Data([0x80]) + Data(repeating: 0, count: byteCount - 1), -limit),
+                (Data([0x7f]) + Data(repeating: 0xff, count: byteCount - 1), limit - 1),
+                (Data(repeating: 0xff, count: byteCount), -1),
+                (Data(repeating: 0, count: byteCount), 0)
+            ]
+            for (bytes, expected) in cases {
+                let slice = (Data([0xa5]) + bytes).dropFirst()
+                XCTAssertEqual(slice.startIndex, 1)
+                XCTAssertEqual(BigInt.fromTwosComplement(data: slice), expected)
+                XCTAssertEqual(BigInt.fromTwosComplement(data: bytes), expected)
+            }
+        }
+    }
+}
+
+final class BigIntegerAmountFormattingBoundaryTests: XCTestCase {
+    func testNegativePrecisionReturnsNoNumericValueForUnsignedAndSignedAmounts() {
+        for amount in [BigUInt(0), BigUInt(1), BigUInt(1234567)] {
+            for invalid in [-1, Int.min] {
+                XCTAssertEqual(amount.string(unitDecimals: invalid, decimals: 6), "")
+                XCTAssertEqual(amount.string(unitDecimals: 6, decimals: invalid), "")
+                XCTAssertEqual(amount.string(unitDecimals: 6, decimals: invalid,
+                                             options: [.fallbackToScientific]), "")
+                for signed in [BigInt(amount), -BigInt(amount)] {
+                    XCTAssertEqual(signed.string(unitDecimals: invalid, decimals: 6), "")
+                    XCTAssertEqual(signed.string(unitDecimals: 6, decimals: invalid), "")
+                }
+            }
+        }
+    }
+
+    func testUnitOverloadsAlsoRejectNegativeDisplayPrecision() {
+        let units: [Web3Units] = [.wei, .mWei, .eth]
+        for unit in units {
+            for invalid in [-1, Int.min] {
+                XCTAssertEqual(BigUInt(1).string(units: unit, decimals: invalid), "")
+                XCTAssertEqual(BigInt(-1).string(units: unit, decimals: invalid), "")
+            }
+        }
+    }
+
+    func testValidPrecisionPreservesExactScalingAndTruncation() throws {
+        let cases: [(String, Int, Int, String)] = [
+            ("1234567", 6, 6, "1.234567"),
+            ("1234567", 6, 2, "1.23"),
+            ("1234500", 6, 6, "1.2345"),
+            ("1234567", 6, 0, "1"),
+            ("1", 6, 6, "0.000001"),
+            ("1", 6, 2, "0"),
+            ("7", 0, 18, "7"),
+            ("0", 6, 6, "0"),
+            ("1234567", 6, Int.max, "1.234567"),
+            ("9007199254740993000001", 6, 6, "9007199254740993.000001")
+        ]
+        for (input, unitDecimals, decimals, expected) in cases {
+            let amount = try XCTUnwrap(BigUInt(input))
+            XCTAssertEqual(amount.string(unitDecimals: unitDecimals, decimals: decimals), expected)
+            XCTAssertEqual(BigInt(amount).string(unitDecimals: unitDecimals, decimals: decimals), expected)
+            if amount != 0 {
+                XCTAssertEqual((-BigInt(amount)).string(unitDecimals: unitDecimals, decimals: decimals),
+                               "-" + expected)
+            }
+        }
+    }
+
+    func testFormattingOptionsAndScientificFallbackRemainCompatible() {
+        XCTAssertEqual(BigUInt(1234500).string(unitDecimals: 6, options: []), "1.234500")
+        XCTAssertEqual(BigUInt(1234500).string(unitDecimals: 6, decimalSeparator: ","), "1,2345")
+        XCTAssertEqual(BigUInt(12).string(unitDecimals: 18, decimals: 4,
+                                        options: [.fallbackToScientific]), "1.2e-17")
+        XCTAssertEqual(BigInt(-12).string(unitDecimals: 18, decimals: 4,
+                                         options: [.fallbackToScientific]), "-1.2e-17")
+        XCTAssertEqual(BigUInt(0).string(unitDecimals: 18, decimals: 4,
+                                       options: [.fallbackToScientific]), "0")
+        XCTAssertEqual(BigUInt(1).string(units: .eth), "0.000000000000000001")
+        XCTAssertEqual(BigInt(-1).string(units: .eth), "-0.000000000000000001")
+    }
+}
+
 final class NaturalUnitsConversionTests: XCTestCase {
     func testInsufficientPrecisionThrowsInsteadOfReturningZero() throws {
         for input in ["1.0000001", "0.0000001"] {

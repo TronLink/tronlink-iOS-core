@@ -45,6 +45,7 @@ extension BigUInt {
     /// Formats a BigUInt object to String. The supplied number is first divided into integer and decimal part based on "toUnits",
     /// then limit the decimal part to "decimals" symbols and uses a "decimalSeparator" as a separator.
     /// default: decimals: 18, decimalSeparator: ".", options: .stripZeroes
+    /// - Returns: An empty string if decimals is negative.
     public func string(units: Web3Units, decimals: Int = 18, decimalSeparator: String = ".", options: StringOptions = .default) -> String {
         return string(unitDecimals: units.decimals, decimals: decimals, decimalSeparator: decimalSeparator, options: options)
     }
@@ -53,7 +54,9 @@ extension BigUInt {
     /// then limit the decimal part to "decimals" symbols and uses a "decimalSeparator" as a separator.
     /// Fallbacks to scientific format if higher precision is required.
     /// default: decimals: 18, decimalSeparator: ".", options: .stripZeroes
+    /// - Returns: An empty string if unitDecimals or decimals is negative.
     public func string(unitDecimals: Int, decimals: Int = 18, decimalSeparator: String = ".", options: StringOptions = .default) -> String {
+        guard unitDecimals >= 0, decimals >= 0 else { return "" }
         guard self != 0 else { return "0" }
         var toDecimals = decimals
         if unitDecimals < toDecimals {
@@ -117,8 +120,10 @@ extension BigInt {
     /// then limit the decimal part to "decimals" symbols and uses a "decimalSeparator" as a separator.
     /// Fallbacks to scientific format if higher precision is required.
     /// default: decimals: 18, decimalSeparator: ".", options: .stripZeroes
+    /// - Returns: An empty string if unitDecimals or decimals is negative.
     public func string(unitDecimals: Int, decimals: Int = 18, decimalSeparator: String = ".", options: StringOptions = .default) -> String {
         let formatted = magnitude.string(unitDecimals: unitDecimals, decimals: decimals, decimalSeparator: decimalSeparator, options: options)
+        guard !formatted.isEmpty else { return "" }
         switch sign {
         case .plus:
             return formatted
@@ -130,6 +135,7 @@ extension BigInt {
     /// Formats a BigInt object to String. The supplied number is first divided into integer and decimal part based on "units",
     /// then limit the decimal part to "decimals" symbols and uses a "decimalSeparator" as a separator.
     /// default: decimals: 18, decimalSeparator: ".", options: .stripZeroes
+    /// - Returns: An empty string if decimals is negative.
     public func string(units: Web3Units, decimals: Int = 18, decimalSeparator: String = ".", options: StringOptions = .default) -> String {
         return string(unitDecimals: units.decimals, decimals: decimals, decimalSeparator: decimalSeparator, options: options)
     }
