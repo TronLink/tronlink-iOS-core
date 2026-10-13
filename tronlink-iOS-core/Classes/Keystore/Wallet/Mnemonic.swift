@@ -85,9 +85,10 @@ public final class Mnemonic {
     ///
     /// - Parameters:
     ///   - mnemonic: mnemonic string
-    ///   - passphrase: mnemonic passphrase
+    ///   - passphrase: mnemonic passphrase; embedded NUL is rejected in `.bip39` mode.
     ///   - normalization: Use `.legacy` only to recover a wallet created from unnormalized
-    ///     inputs, or to derive from the exact bytes already stored in a keystore.
+    ///     inputs, or to preserve the historical derivation of an existing keystore,
+    ///     including C-string truncation of a stored passphrase at its first NUL.
     /// - Returns: wallet seed
     /// - Throws: `Mnemonic.Error`
     public static func deriveSeed(mnemonic: String, passphrase: String, normalization: Normalization = .bip39) throws -> Data {
@@ -97,9 +98,7 @@ public final class Mnemonic {
         guard !mnemonic.utf8.contains(0) else {
             throw Error.seedDerivationFailed
         }
-        guard passphrase.utf8.count <= maxPassphraseByteCount else {
-            throw Error.passphraseTooLong
-        }
+        try validatePassphrase(passphrase, using: normalization)
         var seed = Data(repeating: 0, count: 512 / 8)
         let derived = seed.withUnsafeMutableBytes { seedPtr in
             mnemonic_to_seed(mnemonic, passphrase, seedPtr.bindMemory(to: UInt8.self).baseAddress, nil)
@@ -111,6 +110,18 @@ public final class Mnemonic {
             throw Error.seedDerivationFailed
         }
         return seed
+    }
+
+    /// Validate after normalization and before either encryption or the C-string bridge.
+    /// Stored keystores use `.legacy`: rejecting or reinterpreting their NUL suffix would
+    /// prevent recovery or change the private key used for their existing address.
+    static func validatePassphrase(_ passphrase: String, using normalization: Normalization) throws {
+        guard passphrase.utf8.count <= maxPassphraseByteCount else {
+            throw Error.passphraseTooLong
+        }
+        if case .bip39 = normalization, passphrase.utf8.contains(0) {
+            throw Error.seedDerivationFailed
+        }
     }
 
     static func normalize(_ string: String, using normalization: Normalization) -> String {
@@ -127,7 +138,8 @@ extension Mnemonic {
     public enum Normalization {
         /// BIP39 compatibility decomposition (NFKD) for new mnemonic/passphrase inputs.
         case bip39
-        /// Preserve the original bytes defining an existing wallet's identity.
+        /// Preserve historical normalization and C-string truncation for existing wallets.
+        /// This recovery mode intentionally accepts a passphrase containing NUL.
         case legacy
     }
 

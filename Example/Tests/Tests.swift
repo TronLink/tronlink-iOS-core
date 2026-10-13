@@ -2291,6 +2291,116 @@ final class EmbeddedKeystoreTests: XCTestCase {
                           try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: decomposed, normalization: .legacy))
     }
 
+    func testNewBIP39EntryPointsRejectNULPassphrases() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        for passphrase in ["\u{0000}suffix", "prefix\u{0000}suffix", "prefix\u{0000}"] {
+            XCTAssertThrowsError(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase)) { error in
+                guard case Mnemonic.Error.seedDerivationFailed = error else {
+                    return XCTFail("Expected seedDerivationFailed")
+                }
+            }
+            XCTAssertThrowsError(try Wallet(mnemonic: mnemonic, passphrase: passphrase))
+            XCTAssertThrowsError(try Wallet(mnemonic: mnemonic, newPassphrase: passphrase))
+            // This constructor derives already-normalized inputs in legacy mode internally.
+            XCTAssertThrowsError(try KeystoreKey(password: password, mnemonic: mnemonic, passphrase: passphrase)) { error in
+                guard case Mnemonic.Error.seedDerivationFailed = error else {
+                    return XCTFail("Expected seedDerivationFailed before keystore encryption")
+                }
+            }
+            XCTAssertThrowsError(try store.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password))
+            XCTAssertThrowsError(try store.generateWalletAddress(mnemonic: mnemonic, password: passphrase))
+            XCTAssertThrowsError(try store.checkingAccountAlreadyExists(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password))
+            XCTAssertTrue(store.accounts.isEmpty)
+        }
+    }
+
+    func testExplicitLegacyRecoveryPreservesNULPrefixDerivation() throws {
+        let cases = [("\u{0000}suffix", ""), ("prefix\u{0000}suffix", "prefix"), ("prefix\u{0000}", "prefix")]
+        for (storedPassphrase, effectivePrefix) in cases {
+            XCTAssertEqual(
+                try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: storedPassphrase, normalization: .legacy),
+                try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: effectivePrefix, normalization: .legacy)
+            )
+        }
+    }
+
+    /// A keystore encryption password is independent of the BIP39 derivation passphrase.
+    func testNULInEncryptionPasswordDoesNotChangeMnemonicWalletIdentity() throws {
+        let encryptionPassword = "encryption\u{0000}suffix"
+        let key = try KeystoreKey(password: encryptionPassword, mnemonic: mnemonic)
+        let expected = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        XCTAssertEqual(try key.privateKey(password: encryptionPassword), expected)
+        XCTAssertEqual(try KeystoreKey.splitMnemonicPayload(key.decrypt(password: encryptionPassword)).passphrase, "")
+        XCTAssertThrowsError(try key.decrypt(password: "encryption"))
+    }
+
+    /// Model a pre-fix HD payload without using the new mnemonic constructor to create it.
+    /// Its historical key is derived independently from the prefix before the first NUL.
+    func testLegacyNULKeystoreRetainsIdentityAcrossStoredKeyOperations() throws {
+        let effectivePrefix = "p\u{00e9}"
+        let storedPassphrase = effectivePrefix + "\u{0000}ignored-suffix"
+        let path = "m/44'/195'/1'/0/2"
+        let originalPrivateKey = try Wallet(mnemonic: mnemonic, passphrase: effectivePrefix, path: path, normalization: .legacy).getKey(at: 0).privateKey
+        var oldKey = try KeystoreKey(password: password, key: originalPrivateKey)
+        oldKey.type = .hierarchicalDeterministicWallet
+        oldKey.derivationPath = path
+        var oldPayload = Data(mnemonic.utf8)
+        oldPayload.append(0)
+        oldPayload.append(contentsOf: storedPassphrase.utf8)
+        oldKey.crypto = try KeystoreKeyHeader(password: password, data: oldPayload)
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try JSONEncoder().encode(oldKey).write(to: keyDirectory.appendingPathComponent("legacy-nul.json"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertEqual(account.address, oldKey.address)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), originalPrivateKey)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+
+        let transaction = Data([1, 2, 3]) // Deterministic input to the serialized-transaction signing API.
+        let hash = transaction.sha256T()
+        let expectedSignature = EthereumCrypto.sign(hash: hash, privateKey: originalPrivateKey)
+        guard expectedSignature.count == 65 else {
+            XCTFail("Expected a complete signature for the public test fixture")
+            return
+        }
+        let signingKey = try XCTUnwrap(store.key(for: account.address))
+        XCTAssertEqual(try signingKey.sign(hash: hash, password: password), expectedSignature)
+        XCTAssertEqual(try signingKey.signHashes([hash], password: password), [expectedSignature])
+        switch TLWalletCore.signTranscation(keyStore: store, transaction: transaction, password: password, address: account.address.data.addressString) {
+        case .success(let signature):
+            var transactionSignature = expectedSignature
+            if transactionSignature[64] >= 27 { transactionSignature[64] -= 27 }
+            XCTAssertEqual(signature, transactionSignature)
+        case .failure:
+            XCTFail("Existing HD wallet must remain able to sign transactions")
+        }
+
+        let exported = try store.export(account: account, password: password, newPassword: "export-password")
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.address, account.address)
+        XCTAssertEqual(exportedKey.derivationPath, path)
+        XCTAssertEqual(try exportedKey.decrypt(password: "export-password"), oldPayload)
+        let importedStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported-nul"))
+        let imported = try importedStore.import(json: exported, password: "export-password", newPassword: password)
+        XCTAssertEqual(imported.address, account.address)
+        XCTAssertEqual(try importedStore.exportPrivateKey(account: imported, password: password), originalPrivateKey)
+
+        try store.update(account: account, password: password, newPassword: "updated-password")
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let updatedKey = try XCTUnwrap(reloaded.key(for: account.address))
+        XCTAssertEqual(updatedKey.derivationPath, path)
+        XCTAssertEqual(try updatedKey.decrypt(password: "updated-password"), oldPayload)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: "updated-password"), originalPrivateKey)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: "updated-password"), mnemonic)
+        XCTAssertEqual(try updatedKey.sign(hash: hash, password: "updated-password"), expectedSignature)
+
+        let recoveryStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("recovered-nul"))
+        let recovered = try recoveryStore.import(mnemonic: mnemonic, passphrase: storedPassphrase, derivationPath: path, encryptPassword: password, normalization: .legacy)
+        XCTAssertEqual(recovered.address, account.address)
+        XCTAssertEqual(try recoveryStore.generateWalletAddress(derivationPath: path, mnemonic: mnemonic, password: storedPassphrase, normalization: .legacy), account.address)
+    }
+
     func testPassphraseByteLimitUsesSelectedNormalization() throws {
         let expands = String(repeating: "\u{00e9}", count: 100) // 200 bytes raw, 300 in NFKD.
         XCTAssertThrowsError(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: expands)) { error in

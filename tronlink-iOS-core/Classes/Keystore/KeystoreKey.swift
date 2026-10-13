@@ -69,12 +69,16 @@ public struct KeystoreKey {
     }
 
     /// Initializes a `Key` by encrypting a mnemonic phrase with a password.
-    /// New inputs use BIP39 NFKD. Use `.legacy` to preserve an existing wallet's input bytes.
+    /// New inputs use BIP39 NFKD and reject embedded NUL in the passphrase.
+    /// Use `.legacy` to preserve an existing wallet's input bytes and historical derivation.
     public init(password: String, mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, normalization: Mnemonic.Normalization = .bip39) throws {
         id = UUID().uuidString.lowercased()
 
         let seedMnemonic = Mnemonic.normalize(mnemonic, using: normalization)
         let seedPassphrase = Mnemonic.normalize(passphrase, using: normalization)
+        // Validate in the caller's mode before the already-normalized inputs are derived
+        // with `.legacy` below; otherwise direct construction would bypass BIP39 validation.
+        try Mnemonic.validatePassphrase(seedPassphrase, using: normalization)
         // Persist the exact derivation inputs. Both old and new files can then be read without
         // normalizing again, including readers using the existing mnemonic/passphrase format.
         var data = try KeystoreKey.makeMnemonicPayload(mnemonic: seedMnemonic, passphrase: seedPassphrase)
