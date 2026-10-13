@@ -42,6 +42,8 @@ final class Secp256k1BackendTests: XCTestCase {
         let signature = try key.sign(hash: messageHash)
 
         XCTAssertEqual(signature.data.hex, signatureHex)
+        // The main app's KeyStore signing path calls this backend directly.
+        XCTAssertEqual(EthereumCrypto.sign(hash: messageHash, privateKey: privateKey).hex, signatureHex)
         XCTAssertEqual(signature.v, 1)
         XCTAssertEqual(key.publicKey.hex,
                        "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
@@ -814,5 +816,103 @@ final class SignatureLayoutRegressionTests: XCTestCase {
         // Preserve the app's existing EIP-712 conversion from recovery ID 1 to 28.
         XCTAssertEqual(signature.r.serialize() + signature.s.serialize() + Data([signature.v + 27]),
                        try XCTUnwrap(Data.fromHex(r + s + "1c")))
+    }
+}
+
+
+final class ECDSATableSelectionRegressionTests: XCTestCase {
+    // These are public, synthetic scalars. The deliberately simple reference
+    // uses no window table or scalar_multiply/point_multiply implementation.
+    // Functional agreement does not establish constant-time machine code.
+    private func referenceMultiply(curve: inout ecdsa_curve, scalar: BigUInt,
+                                   point: curve_point) -> curve_point {
+        var result = curve_point()
+        point_set_infinity(&result)
+        var addend = point
+        var remaining = scalar
+        while remaining != 0 {
+            if remaining & 1 != 0 {
+                point_add(&curve, &addend, &result)
+            }
+            point_double(&curve, &addend)
+            remaining >>= 1
+        }
+        return result
+    }
+
+    private func integer(_ number: bignum256) -> BigUInt {
+        var number = number
+        var bytes = [UInt8](repeating: 0, count: 32)
+        bytes.withUnsafeMutableBufferPointer { bn_write_be(&number, $0.baseAddress) }
+        return BigUInt(Data(bytes))
+    }
+
+    private func scalar(_ value: BigUInt) -> bignum256 {
+        let raw = value.serialize()
+        let bytes = Data(repeating: 0, count: 32 - raw.count) + raw
+        var result = bignum256()
+        Array(bytes).withUnsafeBufferPointer { bn_read_be($0.baseAddress, &result) }
+        return result
+    }
+
+    private func assertEqualPoints(_ actual: curve_point, _ expected: curve_point,
+                                   file: StaticString = #file, line: UInt = #line) {
+        var actual = actual
+        var expected = expected
+        XCTAssertNotEqual(point_is_equal(&actual, &expected), 0, file: file, line: line)
+    }
+
+    func testBothMultipliersMatchBinaryReferenceAtWindowAndLimbBoundaries() {
+        for originalCurve in [secp256k1, nist256p1] {
+            var curve = originalCurve
+            let generator = curve.G
+            let order = integer(curve.order)
+            // Exercise both parities and all low window digits, then carries
+            // across 30-bit limbs, high windows, and values just below n.
+            var values = (0...31).map { BigUInt($0) }
+            for bit in [4, 29, 30, 31, 59, 60, 127, 239, 240, 255] {
+                let boundary = BigUInt(1) << bit
+                values.append(boundary)
+                values.append(boundary - 1)
+            }
+            values += [order - 1, order - 2,
+                       BigUInt(Data(repeating: 0x55, count: 32)),
+                       BigUInt(Data(repeating: 0xaa, count: 32))]
+            for value in values {
+                var number = scalar(value)
+                let expected = referenceMultiply(curve: &curve, scalar: value, point: generator)
+                var fixedBase = curve_point()
+                scalar_multiply(&curve, &number, &fixedBase)
+                assertEqualPoints(fixedBase, expected)
+
+                // point_multiply is also compiled in the default build, so its
+                // selector is covered without changing production build flags.
+                // The suite can also run with USE_PRECOMPUTED_CP=0 for dispatch.
+                var base = generator
+                var arbitraryBase = curve_point()
+                point_multiply(&curve, &number, &base, &arbitraryBase)
+                assertEqualPoints(arbitraryBase, expected)
+            }
+        }
+    }
+
+    func testArbitraryPointMultiplicationKeepsAliasedInputOutputBehavior() {
+        for originalCurve in [secp256k1, nist256p1] {
+            var curve = originalCurve
+            var base = curve.G
+            point_double(&curve, &base)
+            let order = integer(curve.order)
+            let values: [BigUInt] = [0, 1, 2, 7, 8, 15, 16, 31, order - 1]
+            for value in values {
+                var number = scalar(value)
+                let expected = referenceMultiply(curve: &curve, scalar: value, point: base)
+                var aliased = base
+                // ECDH and signature recovery use the same point as input/output.
+                withUnsafeMutablePointer(to: &aliased) { point in
+                    point_multiply(&curve, &number, point, point)
+                }
+                assertEqualPoints(aliased, expected)
+            }
+        }
     }
 }

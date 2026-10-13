@@ -422,6 +422,27 @@ void point_jacobian_double(jacobian_curve_point *p, const ecdsa_curve *curve) {
 	bn_fast_mod(&p->y, prime);
 }
 
+// Select table[index] without using the secret index as a memory address.
+// All callers supply index in 0..7; res must not overlap table.
+static void point_select(const curve_point table[8], uint32_t index, curve_point *res)
+{
+	const volatile curve_point *entries = table;
+	memset(res, 0, sizeof(*res));
+	for (uint32_t i = 0; i < 8; i++) {
+		// i ^ index is in 0..7, so unsigned underflow sets the high bit
+		// only for the matching entry. Keep the match opaque to the
+		// optimizer so it cannot replace mask operations with a branch.
+		volatile uint32_t match = ((i ^ index) - 1u) >> 31;
+		uint32_t mask = 0u - match;
+		match = 0;
+		for (int j = 0; j < 9; j++) {
+			// Volatile loads retain every table read, even for a zero mask.
+			res->x.val[j] |= entries[i].x.val[j] & mask;
+			res->y.val[j] |= entries[i].y.val[j] & mask;
+		}
+	}
+}
+
 // res = k * p
 void point_multiply(const ecdsa_curve *curve, const bignum256 *k, const curve_point *p, curve_point *res)
 {
@@ -440,6 +461,7 @@ void point_multiply(const ecdsa_curve *curve, const bignum256 *k, const curve_po
 	uint32_t bits, sign, nsign;
 	CONFIDENTIAL jacobian_curve_point jres;
 	curve_point pmult[8];
+	curve_point selected;
 	const bignum256 *prime = &curve->prime;
 
 	// is_even = 0xffffffff if k is even, 0 otherwise.
@@ -502,7 +524,8 @@ void point_multiply(const ecdsa_curve *curve, const bignum256 *k, const curve_po
 	sign = (bits >> 4) - 1;
 	bits ^= sign;
 	bits &= 15;
-	curve_to_jacobian(&pmult[bits>>1], &jres, prime);
+	point_select(pmult, bits >> 1, &selected);
+	curve_to_jacobian(&selected, &jres, prime);
 	for (i = 62; i >= 0; i--) {
 		// sign = sign(a[i+1])  (0xffffffff for negative, 0 for positive)
 		// invariant jres = (-1)^sign sum_{j=i+1..63} (a[j] * 16^{j-i-1} * p)
@@ -535,13 +558,15 @@ void point_multiply(const ecdsa_curve *curve, const bignum256 *k, const curve_po
 		conditional_negate(sign ^ nsign, &jres.z, prime);
 
 		// add odd factor
-		point_jacobian_add(&pmult[bits >> 1], &jres, curve);
+		point_select(pmult, bits >> 1, &selected);
+		point_jacobian_add(&selected, &jres, curve);
 		sign = nsign;
 	}
 	conditional_negate(sign, &jres.z, prime);
 	jacobian_to_curve(&jres, res, prime);
 	memzero(&a, sizeof(a));
 	memzero(&jres, sizeof(jres));
+	memzero(&selected, sizeof(selected));
 }
 
 #if USE_PRECOMPUTED_CP
@@ -557,6 +582,7 @@ void scalar_multiply(const ecdsa_curve *curve, const bignum256 *k, curve_point *
 	uint32_t is_even = (k->val[0] & 1) - 1;
 	uint32_t lowbits;
 	CONFIDENTIAL jacobian_curve_point jres;
+	curve_point selected;
 	const bignum256 *prime = &curve->prime;
 
 	// is_even = 0xffffffff if k is even, 0 otherwise.
@@ -604,7 +630,8 @@ void scalar_multiply(const ecdsa_curve *curve, const bignum256 *k, curve_point *
 	lowbits = a.val[0] & ((1 << 5) - 1);
 	lowbits ^= (lowbits >> 4) - 1;
 	lowbits &= 15;
-	curve_to_jacobian(&curve->cp[0][lowbits >> 1], &jres, prime);
+	point_select(curve->cp[0], lowbits >> 1, &selected);
+	curve_to_jacobian(&selected, &jres, prime);
 	for (i = 1; i < 64; i ++) {
 		// invariant res = sign(a[i-1]) sum_{j=0..i-1} (a[j] * 16^j * G)
 
@@ -624,12 +651,14 @@ void scalar_multiply(const ecdsa_curve *curve, const bignum256 *k, curve_point *
 		conditional_negate((lowbits & 1) - 1, &jres.y, prime);
 
 		// add odd factor
-		point_jacobian_add(&curve->cp[i][lowbits >> 1], &jres, curve);
+		point_select(curve->cp[i], lowbits >> 1, &selected);
+		point_jacobian_add(&selected, &jres, curve);
 	}
 	conditional_negate(((a.val[0] >> 4) & 1) - 1, &jres.y, prime);
 	jacobian_to_curve(&jres, res, prime);
 	memzero(&a, sizeof(a));
 	memzero(&jres, sizeof(jres));
+	memzero(&selected, sizeof(selected));
 }
 
 #else
