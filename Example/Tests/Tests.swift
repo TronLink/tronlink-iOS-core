@@ -6734,3 +6734,58 @@ final class HDNodeSharedKeyRegressionTests: XCTestCase {
         XCTAssertEqual(result.bytes, [0x04] + x + y)
     }
 }
+
+
+final class RecoveryIDTransactionRegressionTests: XCTestCase {
+    func testInvalidExistingSignatureFailsWithoutChangingTheTransaction() throws {
+        // Public fixture scalar d=1; no user wallet or network is involved.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let password = "recovery-id-regression"
+        let store = try KeyStore(keyDirectory: directory)
+        let key = try KeystoreKey(password: password, key: Data(repeating: 0, count: 31) + Data([1]))
+        let account = Account(address: key.address, type: key.type, url: directory.appendingPathComponent("key.json"))
+        try store.addKey(key: key)
+        try store.addAccount(account: account)
+        let address = String(base58CheckEncoding: account.address.data)
+        let raw = Transaction_raw()
+        raw.contractArray = [Transaction_Contract()]
+        let rawBytes = try XCTUnwrap(raw.data())
+        guard case .success(let valid) = TLWalletCore.signTranscation(
+            keyStore: store, transaction: rawBytes, password: password, address: address
+        ) else {
+            return XCTFail("The raw-data signing path must remain usable")
+        }
+        let recoveryID = try XCTUnwrap(valid.last)
+        let invalidID: UInt8 = recoveryID == 0 ? 255 : 26
+        let malformed = Data(valid.prefix(64)) + Data([invalidID])
+
+        for signatures in [[malformed], [valid, malformed], [malformed, valid]] {
+            let transaction = TronTransaction()
+            transaction.rawData = raw
+            transaction.signatureArray = NSMutableArray(array: signatures)
+            guard case .failure(.failedToSignTransaction) = TLWalletCore.signTranscation(
+                keyStore: store, transaction: transaction, password: password, address: address
+            ) else {
+                return XCTFail("An invalid existing signature must not produce a successful transaction")
+            }
+            XCTAssertEqual(transaction.signatureArray as? [Data], signatures)
+            XCTAssertEqual(transaction.rawData.data(), rawBytes)
+        }
+
+        // Preserve the already-signed fast path and both supported encodings.
+        for value in [recoveryID, recoveryID + 27] {
+            let signature = Data(valid.prefix(64)) + Data([value])
+            let transaction = TronTransaction()
+            transaction.rawData = raw
+            transaction.signatureArray = [signature, signature]
+            guard case .success = TLWalletCore.signTranscation(
+                keyStore: store, transaction: transaction, password: "not-needed-for-existing-signature", address: address
+            ) else {
+                return XCTFail("An existing valid signature must remain valid")
+            }
+            XCTAssertEqual(transaction.signatureArray as? [Data], [signature])
+            XCTAssertEqual(transaction.rawData.data(), rawBytes)
+        }
+    }
+}

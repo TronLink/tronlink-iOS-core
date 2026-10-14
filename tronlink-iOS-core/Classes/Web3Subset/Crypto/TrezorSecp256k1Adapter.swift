@@ -121,8 +121,17 @@ struct SECP256K1 {
         var s = [UInt8](repeating: 0, count: 32)
     }
 
-    static func normalizedRecoveryID(_ value: UInt8) -> UInt8 {
-        return value < 2 ? value : 1 - (value % 2)
+    /// Decode the same R || S || recovery-ID forms accepted by Signature.check().
+    /// Preserve both recovery bits; an arbitrary byte must not become a valid ID.
+    static func normalizedRecoveryID(_ value: UInt8) throws -> UInt8 {
+        switch value {
+        case 0...3:
+            return value
+        case 27...30:
+            return value - 27
+        default:
+            throw SECP256DataError.signatureCorrupted
+        }
     }
 
     static func verifyPrivateKey(privateKey: Data) throws {
@@ -171,7 +180,7 @@ struct SECP256K1 {
                                  compressed: Bool = false) throws -> Data {
         try hash.checkHashSize()
         try signature.checkSignatureSize()
-        let recoveryID = normalizedRecoveryID(signature[signature.index(before: signature.endIndex)])
+        let recoveryID = try normalizedRecoveryID(signature[signature.index(before: signature.endIndex)])
         guard let publicKey = TrezorSecp256k1Backend.recover(
             hash: hash,
             signature: Data(signature.prefix(64)),
@@ -195,11 +204,7 @@ struct SECP256K1 {
         let bytes = Array(signatureData)
         let r = Array(bytes[0 ..< 32])
         let s = Array(bytes[32 ..< 64])
-        var v = bytes[64]
-        if v >= 27 {
-            v = v - 27
-        }
-        guard v <= 3 else { throw SECP256DataError.signatureCorrupted }
+        let v = try normalizedRecoveryID(bytes[64])
         return UnmarshaledSignature(v: v, r: r, s: s)
     }
 

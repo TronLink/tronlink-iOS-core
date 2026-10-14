@@ -104,7 +104,9 @@ public class TLWalletCore: NSObject {
         for (index, value) in transaction.signatureArray.enumerated() {
             guard let signature = value as? Data,
                   let signer = try? Web3Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
-                continue
+                // Do not report success or append a signature to a transaction
+                // whose existing signatures cannot be validated. Leave it unchanged.
+                return .failure(.failedToSignTransaction)
             }
             alreadySigned = alreadySigned || signer == accountSigner
             if !seenSigners.insert(signer).inserted {

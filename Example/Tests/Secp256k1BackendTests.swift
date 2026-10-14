@@ -103,14 +103,44 @@ final class Secp256k1BackendTests: XCTestCase {
         }
     }
 
-    func testRecoveryIDNormalizationRemainsByteCompatible() {
+    func testRecoveryIDNormalizationPreservesBothRecoveryBits() throws {
         let cases: [(UInt8, UInt8)] = [
-            (0, 0), (1, 1), (2, 1), (3, 0),
-            (27, 0), (28, 1), (29, 0), (30, 1)
+            (0, 0), (1, 1), (2, 2), (3, 3),
+            (27, 0), (28, 1), (29, 2), (30, 3)
         ]
 
         for item in cases {
-            XCTAssertEqual(SECP256K1.normalizedRecoveryID(item.0), item.1)
+            XCTAssertEqual(try SECP256K1.normalizedRecoveryID(item.0), item.1)
+        }
+    }
+
+    func testPublicRecoveryRejectsUnsupportedIDsWithOtherwiseValidSignatures() throws {
+        let signature = try XCTUnwrap(Data.fromHex(signatureHex))
+        let compact = Data(signature.prefix(64))
+        let message = Data("recovery-id-input".utf8)
+        let personalHash = try TLCore.Web3Utils.hashPersonalMessage(message)
+        let personalSignature = try TLCore.PrivateKey(privateKey).sign(hash: personalHash).data
+        let supported: Set<UInt8> = [0, 1, 2, 3, 27, 28, 29, 30]
+
+        for value in UInt8.min ... UInt8.max where !supported.contains(value) {
+            let malformed = compact + Data([value])
+            // R/S and the digest are unchanged. The old parity folding accepted
+            // these inputs; invalid scalar fixtures would not expose that bug.
+            XCTAssertThrowsError(try TLCore.Web3Utils.hashECRecover(hash: messageHash, signature: malformed)) {
+                guard case SECP256DataError.signatureCorrupted = $0 else {
+                    return XCTFail("Unexpected recovery error: \($0)")
+                }
+            }
+            XCTAssertThrowsError(try TLCore.Web3Utils.getAddressFromSignature(messageHash, signature: malformed.hex))
+            let malformedPersonal = Data(personalSignature.prefix(64)) + Data([value])
+            XCTAssertThrowsError(try TLCore.Web3Utils.personalECRecover(message, signature: malformedPersonal))
+        }
+        for value: UInt8 in [1, 28] {
+            let valid = compact + Data([value])
+            let buffer = Data(repeating: 0xa5, count: 17) + valid
+            let sliced = buffer[17 ..< buffer.endIndex]
+            XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: messageHash, signature: sliced),
+                           TLCore.PrivateKey(privateKey).address)
         }
     }
 
