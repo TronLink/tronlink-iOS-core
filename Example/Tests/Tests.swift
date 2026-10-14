@@ -4413,6 +4413,41 @@ final class HexDecodingRegressionTests: XCTestCase {
 }
 
 final class StringAddressValidationTests: XCTestCase {
+    func testTRONAddressValidationRejectsImpossibleByteLengths() {
+        for length in [0, 1, 33, 35, 4096, 65_536] {
+            let input = length == 0 ? "" : "T" + String(repeating: "1", count: length - 1)
+            XCTAssertFalse(input.isTRXAddress(), "Invalid length: \(length)")
+            XCTAssertFalse(input.isEIP712TronAddress(), "Invalid length: \(length)")
+        }
+        // Grapheme count must not hide an oversized UTF-8 representation.
+        XCTAssertFalse(("T" + String(repeating: "é", count: 33)).isTRXAddress())
+        XCTAssertFalse(("T" + String(repeating: "1\u{0301}", count: 33)).isTRXAddress())
+    }
+
+    func testTRONAddressValidationRetainsChecksumAndNetworkChecks() {
+        let vectors = [
+            ("T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", "41" + String(repeating: "00", count: 20)),
+            ("TNPeeaaFB7K9cmo4uQpcU32zGK8G1NYqeL", "418840e6c55b9ada326d211d818c34a994aeced808")
+        ]
+        for (address, hex) in vectors {
+            XCTAssertTrue(address.isTRXAddress())
+            XCTAssertTrue(address.isEIP712TronAddress())
+            XCTAssertEqual(address.base58CheckData?.toHexString(), hex)
+        }
+        XCTAssertFalse("T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWw1".isTRXAddress())
+        XCTAssertFalse(("T" + String(repeating: "0", count: 33)).isTRXAddress())
+        let otherNetwork = String(base58CheckEncoding: Data([0x42]) + Data(repeating: 0, count: 20))
+        XCTAssertFalse(otherNetwork.isTRXAddress())
+    }
+
+    func testAddressLengthGateDoesNotLimitGenericBase58CheckPayloads() {
+        let payload = Data(repeating: 0xab, count: 64)
+        let encoded = String(base58CheckEncoding: payload)
+        XCTAssertGreaterThan(encoded.utf8.count, 34)
+        XCTAssertEqual(Data(base58CheckDecoding: encoded), payload)
+        XCTAssertFalse(encoded.isTRXAddress())
+    }
+
     func testAcceptsCompleteEVMHexAddresses() {
         let addresses = [
             "45245bc59219eeaaf6cd3f382e078a461ff9de7b",
