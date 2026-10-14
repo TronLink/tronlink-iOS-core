@@ -1441,7 +1441,7 @@
 }
 
 - (GRPCProtoCall *)RPCToUpdateBrokerageWithRequest:(UpdateBrokerageContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler {
-    return [self RPCToMethod:@"UpdateBrokerageContract"
+    return [self RPCToMethod:@"UpdateBrokerage"
               requestsWriter:[GRXWriter writerWithValue:request]
                responseClass:[TransactionExtention class]
           responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
