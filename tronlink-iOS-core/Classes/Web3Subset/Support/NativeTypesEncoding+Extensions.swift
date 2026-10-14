@@ -47,16 +47,22 @@ public extension Data {
 }
 
 public extension BigInt {
-    /// Converts int to data
+    /// Encodes nonzero values using the fewest big-endian signed bytes.
+    /// Zero preserves the historical empty-data encoding.
+    /// Use abiEncode(bits:) when a fixed width is required.
     func toTwosComplement() -> Data {
-        if sign == BigInt.Sign.plus {
-            return magnitude.serialize()
-        } else {
-            let serializedLength = magnitude.serialize().count
-            let MAX = BigUInt(1) << (serializedLength * 8)
-            let twoComplement = MAX - magnitude
-            return twoComplement.serialize()
+        let serialized = magnitude.serialize()
+        guard let firstByte = serialized.first else { return serialized }
+        if sign == .plus {
+            return (firstByte & 0x80) == 0 ? serialized : Data([0]) + serialized
         }
+
+        // The most negative value fits at this width; larger magnitudes need
+        // one more byte so the complement retains a negative sign bit.
+        let magnitudeBits = serialized.count * 8
+        let signedLimit = BigUInt(1) << (magnitudeBits - 1)
+        let bitCount = magnitude > signedLimit ? magnitudeBits + 8 : magnitudeBits
+        return ((BigUInt(1) << bitCount) - magnitude).serialize()
     }
 
     /// Encodes a signed ABI integer using exactly bits / 8 bytes.

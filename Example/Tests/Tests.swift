@@ -1225,6 +1225,58 @@ final class SingleTLCorePublicAPITests: XCTestCase {
     }
 }
 
+final class TwosComplementEncodingBoundaryTests: XCTestCase {
+    func testExactSignedBytesAndHistoricalEmptyZero() {
+        let cases: [(Int, [UInt8])] = [
+            (0, []), (1, [0x01]), (127, [0x7f]), (128, [0x00, 0x80]),
+            (255, [0x00, 0xff]), (256, [0x01, 0x00]),
+            (32767, [0x7f, 0xff]), (32768, [0x00, 0x80, 0x00]),
+            (-1, [0xff]), (-127, [0x81]), (-128, [0x80]),
+            (-129, [0xff, 0x7f]), (-255, [0xff, 0x01]), (-256, [0xff, 0x00]),
+            (-32768, [0x80, 0x00]), (-32769, [0xff, 0x7f, 0xff]),
+            (-65535, [0xff, 0x00, 0x01]), (-65536, [0xff, 0x00, 0x00])
+        ]
+        for (integer, bytes) in cases {
+            let value = BigInt(integer)
+            let encoded = value.toTwosComplement()
+            XCTAssertEqual(encoded, Data(bytes), "value: \(integer)")
+            XCTAssertEqual(BigInt.fromTwosComplement(data: encoded), value)
+        }
+    }
+
+    func testSignBoundariesThroughAndBeyondABIWidths() {
+        for byteCount in Array(1...32) + [33, 64] {
+            let limit = BigInt(1) << (byteCount * 8 - 1)
+            let zeros = Data(repeating: 0, count: byteCount - 1)
+            let ones = Data(repeating: 0xff, count: byteCount - 1)
+            let cases: [(BigInt, Data)] = [
+                (limit - 1, Data([0x7f]) + ones),
+                (limit, Data([0x00, 0x80]) + zeros),
+                (-limit, Data([0x80]) + zeros),
+                (-limit - 1, Data([0xff, 0x7f]) + ones)
+            ]
+            for (value, expected) in cases {
+                let encoded = value.toTwosComplement()
+                XCTAssertEqual(encoded, expected, "byteCount: \(byteCount), value: \(value)")
+                XCTAssertEqual(BigInt.fromTwosComplement(data: encoded), value)
+            }
+        }
+    }
+
+    func testFixedWidthABIBytesRemainUnchanged() {
+        let cases: [(Int, Data)] = [
+            (0, Data(repeating: 0, count: 32)),
+            (128, Data(repeating: 0, count: 31) + Data([0x80])),
+            (-128, Data(repeating: 0xff, count: 31) + Data([0x80])),
+            (-129, Data(repeating: 0xff, count: 31) + Data([0x7f])),
+            (-65535, Data(repeating: 0xff, count: 30) + Data([0x00, 0x01]))
+        ]
+        for (integer, expected) in cases {
+            XCTAssertEqual(BigInt(integer).abiEncode(bits: 256), expected)
+        }
+    }
+}
+
 final class TwosComplementDecodingBoundaryTests: XCTestCase {
     func testEmptyDataDecodesAsZero() {
         XCTAssertEqual(BigInt.fromTwosComplement(data: Data()), BigInt(0))
