@@ -23,10 +23,14 @@
 #include <string.h>
 #include "base58.h"
 #include "script.h"
+#include "segwit_addr.h"
 
 int script_output_to_address(const uint8_t *script, int scriptlen, char *addr, int addrsize)
 {
-	uint8_t raw[35];
+	if (script == NULL || addr == NULL || scriptlen <= 0 || addrsize <= 0) {
+		return 0;
+	}
+	uint8_t raw[21];
 
 	// P2PKH
 	if (scriptlen == 25 && script[0] == 0x76 && script[1] == 0xA9 && script[2] == 0x14 && script[23] == 0x88 && script[24] == 0xAC) {
@@ -42,22 +46,21 @@ int script_output_to_address(const uint8_t *script, int scriptlen, char *addr, i
 		return base58_encode_check(raw, 1 + 20, HASHER_SHA2D, addr, addrsize);
 	}
 
-	// P2WPKH
-	if (scriptlen == 22 && script[0] == 0x00 && script[1] == 0x14) {
-		raw[0] = 0x06;
-		raw[1] = 0x00;
-		raw[2] = 0x00;
-		memcpy(raw + 3, script + 2, 20);
-		return base58_encode_check(raw, 3 + 20, HASHER_SHA2D, addr, addrsize);
-	}
-
-	// P2WSH
-	if (scriptlen == 34 && script[0] == 0x00 && script[1] == 0x20) {
-		raw[0] = 0x0A;
-		raw[1] = 0x00;
-		raw[2] = 0x00;
-		memcpy(raw + 3, script + 2, 32);
-		return base58_encode_check(raw, 3 + 32, HASHER_SHA2D, addr, addrsize);
+	// Native P2WPKH/P2WSH, on the same Bitcoin mainnet as the legacy branches.
+	if ((scriptlen == 22 && script[0] == 0x00 && script[1] == 0x14) ||
+	    (scriptlen == 34 && script[0] == 0x00 && script[1] == 0x20)) {
+		// segwit_addr_encode has no capacity argument. Encode into its documented
+		// maximum buffer first, then copy only if the caller has enough space.
+		char encoded[73 + 2]; // 73 + strlen("bc")
+		if (!segwit_addr_encode(encoded, "bc", 0, script + 2, scriptlen - 2)) {
+			return 0;
+		}
+		size_t length = strlen(encoded) + 1;
+		if ((size_t)addrsize < length) {
+			return 0;
+		}
+		memcpy(addr, encoded, length);
+		return (int)length; // Match base58_encode_check: include the terminating NUL.
 	}
 
 	return 0;

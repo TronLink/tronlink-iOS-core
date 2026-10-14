@@ -25,6 +25,15 @@
 
 #include <stdint.h>
 
+/* Convert a Bitcoin MAINNET output script to its address.
+ * Supports P2PKH/P2SH (Base58Check) and native v0 P2WPKH/P2WSH (Bech32, "bc").
+ * Scripts do not identify their network; this legacy API is mainnet-only.
+ * For witness addresses on other networks, use segwit_addr_encode with an
+ * explicitly selected HRP instead. This is not a TRON address conversion API.
+ * addrsize includes the terminating NUL: v0 witness addresses need 43 or 63 bytes.
+ * Returns the address size INCLUDING the NUL on success, or 0 for invalid input,
+ * unsupported scripts or insufficient capacity. On failure, addr is unchanged.
+ */
 int script_output_to_address(const uint8_t *script, int scriptlen, char *addr, int addrsize);
 
 #endif

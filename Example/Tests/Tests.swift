@@ -6218,6 +6218,91 @@ final class Blake256EmptyUpdateRegressionTests: XCTestCase {
 }
 
 
+final class ScriptOutputAddressRegressionTests: XCTestCase {
+    // Public vectors: BIP 173 (v0 witness) and Bitcoin Core (legacy scripts).
+    // https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki#examples
+    // https://github.com/bitcoin/bitcoin/blob/master/src/test/data/key_io_valid.json
+    private let vectors: [(script: String, address: String)] = [
+        ("0014751e76e8199196d454941c45d1b3a323f1433bd6",
+         "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+        ("00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262",
+         "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3"),
+        ("76a914a31c06bd463e3923bc1aadbde48b16976c08071788ac",
+         "1FsSia9rv4NeEwvJ2GvXrX7LyxYspbN2mo"),
+        ("a914373b819a068f32b7a6b38b6b38729647cfde01c287",
+         "36j4NfKv6Akva9amjWrLG6MuSQym1GuEmm")
+    ]
+
+    private func convert(_ script: [UInt8], capacity: Int32) -> (status: Int32, address: String) {
+        let writableCount = max(0, Int(capacity))
+        var output = [CChar](repeating: 0x5a, count: writableCount + 2)
+        let status = output.withUnsafeMutableBufferPointer { buffer in
+            script.withUnsafeBufferPointer { bytes in
+                script_output_to_address(bytes.baseAddress, Int32(bytes.count),
+                                         buffer.baseAddress?.advanced(by: 1), capacity)
+            }
+        }
+        XCTAssertEqual(output.first, 0x5a)
+        XCTAssertEqual(output.last, 0x5a)
+        guard status > 0 else {
+            XCTAssertTrue(output.allSatisfy { $0 == 0x5a })
+            return (status, "")
+        }
+        XCTAssertLessThanOrEqual(status, capacity)
+        let contents = output.dropFirst().prefix(writableCount)
+        XCTAssertTrue(contents.contains(0))
+        let bytes = contents.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        XCTAssertEqual(Int(status), bytes.count + 1)
+        return (status, String(decoding: bytes, as: UTF8.self))
+    }
+
+    func testMainnetWitnessAndLegacyAddressesMatchPublishedVectors() {
+        for vector in vectors {
+            let required = Int32(vector.address.utf8.count + 1)
+            for capacity in [required, required + 8] {
+                let result = convert(Array(Data(hex: vector.script)), capacity: capacity)
+                XCTAssertEqual(result.status, required)
+                XCTAssertEqual(result.address, vector.address)
+            }
+        }
+    }
+
+    func testInsufficientAndNonpositiveCapacitiesLeaveOutputUntouched() {
+        for vector in vectors {
+            let required = Int32(vector.address.utf8.count + 1)
+            for capacity in [Int32.min, -1] + Array(Int32(0)..<required) {
+                XCTAssertEqual(convert(Array(Data(hex: vector.script)), capacity: capacity).status, 0)
+            }
+        }
+    }
+
+    func testMalformedAndUnsupportedScriptsAreRejectedWithoutWriting() {
+        var scripts: [[UInt8]] = [[], [0x00], [0x6a],
+                                 [0x51, 0x20] + [UInt8](repeating: 0, count: 32),
+                                 [0x00, 0x14] + [UInt8](repeating: 0, count: 32)]
+        for length in [19, 21, 31, 33] {
+            scripts.append([0x00, UInt8(length)] + [UInt8](repeating: 0, count: length))
+        }
+        for script in scripts {
+            XCTAssertEqual(convert(script, capacity: 75).status, 0)
+        }
+    }
+
+    func testNullPointersAndNegativeScriptLengthAreRejected() {
+        let script = Array(Data(hex: vectors[0].script))
+        var output = [CChar](repeating: 0x5a, count: 75)
+        output.withUnsafeMutableBufferPointer { buffer in
+            XCTAssertEqual(script_output_to_address(nil, 22, buffer.baseAddress, 75), 0)
+            script.withUnsafeBufferPointer { bytes in
+                XCTAssertEqual(script_output_to_address(bytes.baseAddress, -1, buffer.baseAddress, 75), 0)
+                XCTAssertEqual(script_output_to_address(bytes.baseAddress, Int32(bytes.count), nil, 75), 0)
+            }
+        }
+        XCTAssertTrue(output.allSatisfy { $0 == 0x5a })
+    }
+}
+
+
 final class Bech32SeparatorRegressionTests: XCTestCase {
     private func decode(_ address: String, expectUntouched: Bool = false)
         -> (status: Int32, hrp: String, data: [UInt8]) {
