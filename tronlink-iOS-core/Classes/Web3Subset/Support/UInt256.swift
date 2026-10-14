@@ -11,8 +11,12 @@ extension BigUInt {
     }
     
     /// - Parameter string: String number. can be: "0.023", "123123123.12312312312"
-    /// - Parameter decimals: Number of decimals that string should be multiplyed by
+    /// - Parameter decimals: Nonnegative number of decimal places to scale by.
+    /// - Returns: nil for negative precision or an amount without decimal digits.
+    /// Explicit zero, surrounding whitespace, and omitted integer/fractional parts remain supported.
     public init?(_ string: String, decimals: Int) {
+        guard decimals >= 0,
+              string.utf8.contains(where: { $0 >= 48 && $0 <= 57 }) else { return nil }
         let separators = CharacterSet(charactersIn: ".,")
         let components = string.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: separators)
         guard components.count == 1 || components.count == 2 else { return nil }

@@ -1331,6 +1331,46 @@ final class BigIntegerAmountFormattingBoundaryTests: XCTestCase {
 }
 
 final class NaturalUnitsConversionTests: XCTestCase {
+    func testDirectAmountParsingRejectsNegativePrecision() {
+        for input in ["0", "1", "123", "1.25"] {
+            for decimals in [-1, Int.min] {
+                XCTAssertNil(BigUInt(input, decimals: decimals))
+            }
+        }
+    }
+
+    func testDigitlessAmountsAreNotAcceptedAsZero() {
+        for input in ["", " ", "\t\r\n", ".", ",", " \t.\n", " , "] {
+            for decimals in [0, 6, 18] {
+                XCTAssertNil(BigUInt(input, decimals: decimals))
+            }
+            XCTAssertNil(BigUInt(input, units: .eth))
+            XCTAssertThrowsError(try NaturalUnits(input)) { error in
+                guard case NaturalUnits.Error.cannotConvert(let value) = error else {
+                    return XCTFail("Expected cannotConvert, got \(error)")
+                }
+                XCTAssertEqual(value, input)
+            }
+        }
+    }
+
+    func testZeroAndOmittedDecimalPartsRemainCompatible() throws {
+        let cases: [(String, Int, String)] = [
+            ("0", 0, "0"), (" 0 ", 6, "0"), ("0.000000", 6, "0"),
+            (".0", 6, "0"), ("0.", 0, "0"), ("0,", 0, "0"),
+            (".5", 6, "500000"), (",5", 6, "500000"),
+            ("1.", 6, "1000000"), ("1,", 6, "1000000"),
+            ("0001.2300", 6, "1230000")
+        ]
+        for (input, decimals, expected) in cases {
+            XCTAssertEqual(try XCTUnwrap(BigUInt(input, decimals: decimals)).description, expected)
+            XCTAssertEqual(try NaturalUnits(input).number(with: decimals).description, expected)
+        }
+        for input in ["1.2.3", "1,2.3", "1 2", "1e3", "-1", "0.0000001"] {
+            XCTAssertNil(BigUInt(input, decimals: 6))
+        }
+    }
+
     func testInsufficientPrecisionThrowsInsteadOfReturningZero() throws {
         for input in ["1.0000001", "0.0000001"] {
             let amount = try NaturalUnits(input)
