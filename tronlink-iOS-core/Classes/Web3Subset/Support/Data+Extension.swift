@@ -19,8 +19,7 @@ public enum DataError: Error {
 public extension Data {
     /// Inits with array of type
     init<T>(fromArray values: [T]) {
-        var values = values
-        self.init(buffer: UnsafeBufferPointer(start: &values, count: values.count))
+        self = values.withUnsafeBufferPointer { Data(buffer: $0) }
     }
     /// Represents data as array of type
     func toArray<T>(type _: T.Type) -> [T] {

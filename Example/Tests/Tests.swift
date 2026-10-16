@@ -7001,3 +7001,24 @@ final class RecoveryIDTransactionRegressionTests: XCTestCase {
         }
     }
 }
+
+
+final class DataArrayCopyRegressionTests: XCTestCase {
+    func testEmptyArraysProduceEmptyData() {
+        XCTAssertEqual(Data(fromArray: [UInt8]()), Data())
+        XCTAssertEqual(Data(fromArray: [UInt64]()), Data())
+    }
+
+    func testMultiByteElementsPreserveAllBytes() {
+        let words = [UInt32(0x11223344).littleEndian, UInt32(0xaabbccdd).littleEndian]
+        XCTAssertEqual(Data(fromArray: words), Data([0x44, 0x33, 0x22, 0x11, 0xdd, 0xcc, 0xbb, 0xaa]))
+    }
+
+    func testDataOwnsItsBytesAfterSourceChangesAndIsReleased() {
+        var bytes = (0..<256).map { UInt8($0) }
+        let data = Data(fromArray: bytes)
+        bytes[0] = 0xff
+        bytes.removeAll(keepingCapacity: false)
+        XCTAssertEqual(data, Data((0..<256).map { UInt8($0) }))
+    }
+}
