@@ -71,23 +71,34 @@ public struct KeystoreKey {
     /// Initializes a `Key` by encrypting a mnemonic phrase with a password.
     /// New inputs use BIP39 NFKD and reject embedded NUL in the passphrase.
     /// Use `.legacy` to preserve an existing wallet's input bytes and historical derivation.
+    /// Both modes require a valid BIP39 mnemonic; normalization does not bypass validation.
     public init(password: String, mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, normalization: Mnemonic.Normalization = .bip39) throws {
-        id = UUID().uuidString.lowercased()
-
         let seedMnemonic = Mnemonic.normalize(mnemonic, using: normalization)
         let seedPassphrase = Mnemonic.normalize(passphrase, using: normalization)
-        // Validate in the caller's mode before the already-normalized inputs are derived
-        // with `.legacy` below; otherwise direct construction would bypass BIP39 validation.
+        guard Mnemonic.isValid(seedMnemonic) else {
+            throw EncryptError.invalidMnemonic
+        }
+        // Validate new passphrases before the byte-preserving storage path below.
         try Mnemonic.validatePassphrase(seedPassphrase, using: normalization)
+        try self.init(password: password, preservingStoredMnemonic: seedMnemonic,
+                      passphrase: seedPassphrase, derivationPath: derivationPath)
+    }
+
+    /// Internal storage path for validated new inputs or decrypted existing HD payloads.
+    /// Export/password changes must not invalidate a historical wallet's mnemonic or
+    /// reinterpret its bytes. Never use this as an unchecked public import/create entry.
+    init(password: String, preservingStoredMnemonic mnemonic: String, passphrase: String, derivationPath: String) throws {
+        id = UUID().uuidString.lowercased()
+        try Mnemonic.validatePassphrase(passphrase, using: .legacy)
         // Persist the exact derivation inputs. Both old and new files can then be read without
         // normalizing again, including readers using the existing mnemonic/passphrase format.
-        var data = try KeystoreKey.makeMnemonicPayload(mnemonic: seedMnemonic, passphrase: seedPassphrase)
+        var data = try KeystoreKey.makeMnemonicPayload(mnemonic: mnemonic, passphrase: passphrase)
         defer {
             data.resetBytes(in: 0 ..< data.count)
         }
         crypto = try KeystoreKeyHeader(password: password, data: data)
 
-        let key = try Wallet(mnemonic: seedMnemonic, passphrase: seedPassphrase, path: derivationPath, normalization: .legacy).getKey(at: 0)
+        let key = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: .legacy).getKey(at: 0)
         let pubKey = key.publicKey
         address = try KeystoreKey.decodeAddress(from: pubKey)
         type = .hierarchicalDeterministicWallet

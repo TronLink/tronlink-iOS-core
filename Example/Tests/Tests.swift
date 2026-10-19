@@ -2843,6 +2843,86 @@ final class EmbeddedKeystoreTests: XCTestCase {
         assertRejectsPrivateKey(Data(repeating: 0xff, count: 32))
     }
 
+    func testNewHDKeyRejectsInvalidMnemonicInBothNormalizationModes() {
+        let invalidInputs = [
+            "",
+            Array(repeating: "abandon", count: 11).joined(separator: " "),
+            Array(repeating: "not-a-bip39-word", count: 12).joined(separator: " "),
+            // All words are in the word list, but the checksum is invalid.
+            Array(repeating: "abandon", count: 12).joined(separator: " "),
+        ]
+        let modes: [Mnemonic.Normalization] = [.bip39, .legacy]
+        for mode in modes {
+            for input in invalidInputs {
+                XCTAssertThrowsError(try KeystoreKey(password: password, mnemonic: input, normalization: mode)) { error in
+                    guard case EncryptError.invalidMnemonic = error else {
+                        return XCTFail("Expected invalidMnemonic, got \(error)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testExistingInvalidMnemonicRemainsUsableWithoutAllowingNewImports() throws {
+        // Public, intentionally invalid fixture; model an old file without using either
+        // mnemonic initializer, so new-input validation cannot prevent fixture creation.
+        let oldMnemonic = Array(repeating: "abandon", count: 12).joined(separator: " ")
+        XCTAssertFalse(Mnemonic.isValid(oldMnemonic))
+        let storedPassphrase = "fixture-passphrase"
+        let path = "m/44'/195'/1'/0/2"
+        let originalPrivateKey = try Wallet(mnemonic: oldMnemonic, passphrase: storedPassphrase,
+                                            path: path, normalization: .legacy).getKey(at: 0).privateKey
+        var oldKey = try KeystoreKey(password: password, key: originalPrivateKey)
+        oldKey.type = .hierarchicalDeterministicWallet
+        oldKey.derivationPath = path
+        var payload = Data(oldMnemonic.utf8)
+        payload.append(0)
+        payload.append(contentsOf: storedPassphrase.utf8)
+        oldKey.crypto = try KeystoreKeyHeader(password: password, data: payload)
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try JSONEncoder().encode(oldKey).write(to: keyDirectory.appendingPathComponent("legacy-invalid-mnemonic.json"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(store.accounts.first)
+        let hash = Data(repeating: 0x42, count: 32)
+        let expectedSignature = EthereumCrypto.sign(hash: hash, privateKey: originalPrivateKey)
+        XCTAssertEqual(expectedSignature.count, 65)
+        XCTAssertEqual(account.address, oldKey.address)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), oldMnemonic)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), originalPrivateKey)
+        let signingKey = try XCTUnwrap(store.key(for: account.address))
+        XCTAssertEqual(try signingKey.sign(hash: hash, password: password), expectedSignature)
+
+        let newPassword = password + "-updated"
+        let exported = try store.export(account: account, password: password, newPassword: newPassword)
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.address, account.address)
+        XCTAssertEqual(exportedKey.derivationPath, path)
+        XCTAssertEqual(try exportedKey.decrypt(password: newPassword), payload)
+        XCTAssertEqual(try exportedKey.privateKey(password: newPassword), originalPrivateKey)
+
+        // Retain the existing strict import contract; compatibility is confined to
+        // operations on an already stored wallet, not a new unchecked import path.
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported-invalid"))
+        XCTAssertThrowsError(try target.import(json: exported, password: newPassword, newPassword: password)) { error in
+            guard case KeyStore.Error.invalidMnemonic = error else {
+                return XCTFail("Expected invalidMnemonic, got \(error)")
+            }
+        }
+        XCTAssertTrue(target.accounts.isEmpty)
+
+        try store.update(account: account, password: password, newPassword: newPassword)
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let updatedAccount = try XCTUnwrap(reloaded.account(for: account.address))
+        let updatedKey = try XCTUnwrap(reloaded.key(for: account.address))
+        XCTAssertEqual(updatedKey.derivationPath, path)
+        XCTAssertEqual(try updatedKey.decrypt(password: newPassword), payload)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: updatedAccount, password: newPassword), oldMnemonic)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: updatedAccount, password: newPassword), originalPrivateKey)
+        XCTAssertEqual(try updatedKey.sign(hash: hash, password: newPassword), expectedSignature)
+    }
+
+
     /// `import(json:)` used to send every decrypted payload through the raw-key path. For an HD
     /// keystore that made the private key the first 32 characters of the mnemonic.
     func testHDKeystoreJSONRoundTripPreservesAddress() throws {

@@ -268,7 +268,7 @@ public final class KeyStore {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
-            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath, normalization: .legacy)
+            newKey = try KeystoreKey(password: newPassword, preservingStoredMnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
         }
         return try JSONEncoder().encode(newKey)
     }
@@ -355,10 +355,9 @@ public final class KeyStore {
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
             newKey = try KeystoreKey(password: newPassword,
-                                      mnemonic: mnemonic,
+                                      preservingStoredMnemonic: mnemonic,
                                       passphrase: passphrase,
-                                      derivationPath: derivationPath ?? key.derivationPath,
-                                      normalization: .legacy)
+                                      derivationPath: derivationPath ?? key.derivationPath)
         }
         guard newKey.address == key.address else {
             throw Error.invalidKey
