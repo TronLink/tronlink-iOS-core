@@ -5052,6 +5052,62 @@ final class DataSliceInputRegressionTests: XCTestCase {
         return result
     }
 
+    func testBitRangesUseTheSliceOriginAndPreserveMSBFirstValues() {
+        let bytes = Data([0xd6, 0x39, 0xa5])
+        let cases: [(Int, Int, UInt64)] = [
+            (0, 1, 1), (1, 1, 1), (2, 1, 0),
+            (0, 8, 0xd6), (8, 8, 0x39), (16, 8, 0xa5),
+            (0, 16, 0xd639), (0, 24, 0xd639a5),
+            (4, 8, 0x63), (6, 5, 0x11), (23, 1, 1),
+            (0, 0, 0), (7, 0, 0), (24, 0, 0),
+        ]
+        for input in [bytes, slice(bytes, offset: 1), slice(bytes), slice(bytes, offset: 80)] {
+            for (start, length, expected) in cases {
+                XCTAssertEqual(input.bitsInRange(start, length), expected)
+                XCTAssertEqual(input.bitsInRangeIfValid(start, length), expected)
+            }
+        }
+        XCTAssertEqual(Data().bitsInRange(0, 0), 0)
+        XCTAssertEqual(slice(Data()).bitsInRangeIfValid(0, 0), 0)
+    }
+
+    func testUnaligned64BitRangesCanSpanNineSourceBytes() {
+        let bytes = Data([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x81])
+        let cases: [(Int, UInt64)] = [
+            (0, 0x123456789abcdef0),
+            (1, 0x2468acf13579bde1),
+            (4, 0x23456789abcdef08),
+            (8, 0x3456789abcdef081),
+        ]
+        for input in [bytes, slice(bytes, offset: 1), slice(bytes)] {
+            for (start, expected) in cases {
+                XCTAssertEqual(input.bitsInRange(start, 64), expected)
+                XCTAssertEqual(input.bitsInRangeIfValid(start, 64), expected)
+            }
+        }
+        let allOnes = slice(Data(repeating: 0xff, count: 9))
+        for start in 0...7 {
+            XCTAssertEqual(allOnes.bitsInRange(start, 64), UInt64.max)
+        }
+    }
+
+    func testCheckedBitRangesRejectInvalidBoundsWithoutOverflow() {
+        let bytes = Data([0xd6, 0x39, 0xa5])
+        let invalidRanges = [
+            (-1, 1), (0, -1), (0, 65),
+            (24, 1), (23, 2), (25, 0),
+            (Int.min, 1), (Int.max, 1), (Int.max, 64), (0, Int.max),
+        ]
+        for input in [bytes, slice(bytes)] {
+            for (start, length) in invalidRanges {
+                XCTAssertNil(input.bitsInRangeIfValid(start, length))
+            }
+        }
+        XCTAssertNil(Data().bitsInRangeIfValid(0, 1))
+        XCTAssertNil(Data().bitsInRangeIfValid(1, 0))
+    }
+
+
     func testRLPEncodesSlicesUsingTheSameBytesAndHeaders() throws {
         let cases: [(Data, Data)] = [
             (Data(), Data([0x80])),

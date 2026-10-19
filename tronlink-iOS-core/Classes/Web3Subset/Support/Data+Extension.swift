@@ -95,16 +95,41 @@ public extension Data {
     }
     
     
-    /// - Returns: Number bits
-    /// - Important: Returns max of 8 bytes for simplicity
+    /// Reads up to 64 bits, most-significant bit first, relative to this Data's startIndex.
+    /// - Precondition: The nonnegative range must lie within this Data and length must be 0...64.
+    /// Use `bitsInRangeIfValid` when the range comes from untrusted input.
     func bitsInRange(_ startingBit: Int, _ length: Int) -> UInt64 {
-        let bytes = self[(startingBit / 8) ..< (startingBit + length + 7) / 8]
-        let padding = Data(repeating: 0, count: 8 - bytes.count)
-        let padded = bytes + padding
-        var uintRepresentation = UInt64(bigEndian: padded.withUnsafeBytes { $0.pointee })
-        uintRepresentation <<= startingBit % 8
-        uintRepresentation >>= UInt64(64 - length)
-        return uintRepresentation
+        guard let value = bitsInRangeIfValid(startingBit, length) else {
+            preconditionFailure("Bit range must lie within Data and contain at most 64 bits")
+        }
+        return value
+    }
+
+    /// Returns nil for an invalid range; an empty range at any valid position returns zero.
+    /// Bit zero is the most-significant bit of the byte at startIndex, including for slices.
+    func bitsInRangeIfValid(_ startingBit: Int, _ length: Int) -> UInt64? {
+        guard startingBit >= 0, length >= 0, length <= 64 else { return nil }
+        let firstByte = startingBit / 8
+        let bitOffset = startingBit % 8
+        guard firstByte <= count else { return nil }
+        if length == 0 {
+            return firstByte < count || bitOffset == 0 ? 0 : nil
+        }
+
+        // These sums are bounded by 78. Avoid overflowing count * 8 or startingBit + length.
+        let requiredBytes = (bitOffset + length + 7) / 8
+        guard requiredBytes <= count - firstByte else { return nil }
+
+        // A 64-bit field can span nine source bytes. Byte reads also avoid UInt64 alignment
+        // assumptions and leave the original data, byte order and slice indices untouched.
+        var value: UInt64 = 0
+        for offset in 0..<length {
+            let bit = bitOffset + offset
+            let byteIndex = index(startIndex, offsetBy: firstByte + bit / 8)
+            let nextBit = (self[byteIndex] >> (7 - bit % 8)) & 1
+            value = (value << 1) | UInt64(nextBit)
+        }
+        return value
     }
 }
 
