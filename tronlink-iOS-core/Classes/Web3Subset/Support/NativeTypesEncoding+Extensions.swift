@@ -6,19 +6,21 @@ public extension Data {
     /// Sets data.count to toBytes and fills missing bytes at the start of the data
     /// - Parameter toBytes: Desired data size
     /// - Parameter isNegative: Fills with ff if negative. default: false
-    /// - Returns: Data with desired size
+    /// - Returns: Data with desired size, or nil if it is too small or exceeds Int.max.
     func setLengthLeft(_ toBytes: UInt64, isNegative: Bool = false) -> Data? {
-        let existingLength = UInt64(count)
-        if existingLength == toBytes {
-            return Data(self)
-        } else if existingLength > toBytes {
+        let existingLength = count
+        guard let targetLength = Int(exactly: toBytes), targetLength >= existingLength else {
             return nil
         }
+        if existingLength == targetLength {
+            return Data(self)
+        }
+        let paddingLength = targetLength - existingLength
         var data: Data
         if isNegative {
-            data = Data(repeating: UInt8(255), count: Int(toBytes - existingLength))
+            data = Data(repeating: UInt8(255), count: paddingLength)
         } else {
-            data = Data(repeating: UInt8(0), count: Int(toBytes - existingLength))
+            data = Data(repeating: UInt8(0), count: paddingLength)
         }
         data.append(self)
         return data
@@ -27,20 +29,22 @@ public extension Data {
     /// Sets data.count to toBytes and fills missing bytes at the end of the data
     /// - Parameter toBytes: Desired data size
     /// - Parameter isNegative: Fills with ff if negative. default: false
-    /// - Returns: Data with desired size
+    /// - Returns: Data with desired size, or nil if it is too small or exceeds Int.max.
     func setLengthRight(_ toBytes: UInt64, isNegative: Bool = false) -> Data? {
-        let existingLength = UInt64(count)
-        if existingLength == toBytes {
-            return Data(self)
-        } else if existingLength > toBytes {
+        let existingLength = count
+        guard let targetLength = Int(exactly: toBytes), targetLength >= existingLength else {
             return nil
         }
+        if existingLength == targetLength {
+            return Data(self)
+        }
+        let paddingLength = targetLength - existingLength
         var data: Data = Data()
         data.append(self)
         if isNegative {
-            data.append(Data(repeating: UInt8(255), count: Int(toBytes - existingLength)))
+            data.append(Data(repeating: UInt8(255), count: paddingLength))
         } else {
-            data.append(Data(repeating: UInt8(0), count: Int(toBytes - existingLength)))
+            data.append(Data(repeating: UInt8(0), count: paddingLength))
         }
         return data
     }

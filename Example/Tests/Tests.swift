@@ -1225,6 +1225,50 @@ final class SingleTLCorePublicAPITests: XCTestCase {
     }
 }
 
+final class DataPaddingBoundsTests: XCTestCase {
+    func testUnrepresentableTargetLengthsReturnNil() {
+        // Check the final target size even when the padding alone would fit Int.
+        let invalidLengths = [UInt64(Int.max) + 1, UInt64.max]
+        let inputs = [Data(), Data([0x01]), Data([0xaa, 0x12, 0x34, 0xbb])[1..<3]]
+        for input in inputs {
+            for length in invalidLengths {
+                for isNegative in [false, true] {
+                    XCTAssertNil(input.setLengthLeft(length, isNegative: isNegative))
+                    XCTAssertNil(input.setLengthRight(length, isNegative: isNegative))
+                }
+            }
+        }
+    }
+
+    func testExistingPaddingAndShorterLengthBehaviorIsPreserved() {
+        let inputs = [Data([0x12, 0x34]), Data([0xaa, 0x12, 0x34, 0xbb])[1..<3]]
+        for input in inputs {
+            XCTAssertEqual(input.setLengthLeft(4), Data([0x00, 0x00, 0x12, 0x34]))
+            XCTAssertEqual(input.setLengthRight(4), Data([0x12, 0x34, 0x00, 0x00]))
+            XCTAssertEqual(input.setLengthLeft(4, isNegative: true), Data([0xff, 0xff, 0x12, 0x34]))
+            XCTAssertEqual(input.setLengthRight(4, isNegative: true), Data([0x12, 0x34, 0xff, 0xff]))
+            for isNegative in [false, true] {
+                XCTAssertEqual(input.setLengthLeft(2, isNegative: isNegative), input)
+                XCTAssertEqual(input.setLengthRight(2, isNegative: isNegative), input)
+                XCTAssertNil(input.setLengthLeft(1, isNegative: isNegative))
+                XCTAssertNil(input.setLengthRight(1, isNegative: isNegative))
+                XCTAssertNil(input.setLengthLeft(0, isNegative: isNegative))
+                XCTAssertNil(input.setLengthRight(0, isNegative: isNegative))
+            }
+        }
+    }
+
+    func testEmptyDataPaddingIsPreserved() {
+        for isNegative in [false, true] {
+            XCTAssertEqual(Data().setLengthLeft(0, isNegative: isNegative), Data())
+            XCTAssertEqual(Data().setLengthRight(0, isNegative: isNegative), Data())
+            let expected = isNegative ? Data([0xff, 0xff]) : Data([0x00, 0x00])
+            XCTAssertEqual(Data().setLengthLeft(2, isNegative: isNegative), expected)
+            XCTAssertEqual(Data().setLengthRight(2, isNegative: isNegative), expected)
+        }
+    }
+}
+
 final class TwosComplementEncodingBoundaryTests: XCTestCase {
     func testExactSignedBytesAndHistoricalEmptyZero() {
         let cases: [(Int, [UInt8])] = [
