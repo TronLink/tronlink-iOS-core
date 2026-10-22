@@ -665,21 +665,32 @@ final class ECDSADigestVerificationTests: XCTestCase {
         }
     }
 
-    func testAnalyticZeroModuloDigestSignaturesVerifyOnBothCurves() throws {
+    func testZeroModuloDigestsAreRejectedOnBothCurves() throws {
         for vector in vectors {
             let r = try XCTUnwrap(Data.fromHex(vector.x))
             let order = try XCTUnwrap(Data.fromHex(vector.order))
             let uncompressed = try XCTUnwrap(Data.fromHex("04" + vector.x + vector.y))
             // Synthetic fixture d=1, k=1, Q=G: for e=0 or e=n, s=r=G.x.
-            // This signature is derived algebraically, independently of the library signer.
+            // SEC 1 would accept it, but for e=0 mod n it is forgeable from Q alone.
             let signature = r + r
             for digest in [zero, order] {
                 for publicKey in [Data([vector.prefix]) + r, uncompressed] {
                     XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
-                                          signature: signature, digest: digest), 0)
+                                          signature: signature, digest: digest), 3)
                 }
             }
         }
+    }
+
+    func testPublicKeyOnlyForgeryForZeroModuloDigestsIsRejected() throws {
+        let order = try XCTUnwrap(Data.fromHex(try XCTUnwrap(vectors.first).order))
+        let publicKey = TLCore.PrivateKey(Data(repeating: 0x11, count: 32)).publicKey
+        // t = 1: r = Q.x and s = r make (r/s)*Q = Q, so x(Q) = r without the private key.
+        let forged = Data(publicKey[1 ..< 33]) + Data(publicKey[1 ..< 33])
+        for digest in [zero, order] {
+            XCTAssertFalse(EthereumCrypto.verify(signature: forged, message: digest, publicKey: publicKey))
+        }
+        XCTAssertFalse(EthereumCrypto.verify(signature: forged, message: one, publicKey: publicKey))
     }
 
     func testInvalidScalarsAndFinalInfinityRemainRejected() throws {
@@ -701,13 +712,13 @@ final class ECDSADigestVerificationTests: XCTestCase {
             let cancellingDigest = Data(repeating: 0, count: 32 - negativeR.count) + negativeR
             XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
                                   signature: r + r, digest: cancellingDigest), 5)
-            // The valid zero-digest signature must not validate a different message.
+            // The zero-digest fixture must not validate a different message either.
             XCTAssertEqual(verify(curve: vector.curve, publicKey: publicKey,
                                   signature: r + r, digest: one), 5)
         }
     }
 
-    func testPublicVerifierAndAddressRecoveryAgreeForZeroModuloDigests() throws {
+    func testPublicVerifierRejectsZeroModuloDigestsWhileRecoveryIsUnchanged() throws {
         let vector = try XCTUnwrap(vectors.first)
         let r = try XCTUnwrap(Data.fromHex(vector.x))
         let order = try XCTUnwrap(Data.fromHex(vector.order))
@@ -716,7 +727,7 @@ final class ECDSADigestVerificationTests: XCTestCase {
         for digest in [zero, order] {
             for publicKey in [Data([2]) + r, uncompressed] {
                 for signature in [r + r, r + r + Data([0])] {
-                    XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: digest, publicKey: publicKey))
+                    XCTAssertFalse(EthereumCrypto.verify(signature: signature, message: digest, publicKey: publicKey))
                     XCTAssertFalse(EthereumCrypto.verify(signature: signature, message: one, publicKey: publicKey))
                 }
             }
@@ -730,7 +741,7 @@ final class ECDSADigestVerificationTests: XCTestCase {
         }
     }
 
-    func testGeneratedBoundaryAndOrdinarySignaturesStillVerify() throws {
+    func testGeneratedSignaturesVerifyExceptForZeroModuloDigests() throws {
         let vector = try XCTUnwrap(vectors.first)
         let order = try XCTUnwrap(Data.fromHex(vector.order))
         let key = TLCore.PrivateKey(one)
@@ -738,7 +749,8 @@ final class ECDSADigestVerificationTests: XCTestCase {
         for digest in [zero, order, one, Data(repeating: 0xff, count: 32), ordinaryHash] {
             let signature = try key.sign(hash: digest).data
             XCTAssertEqual(signature.count, 65)
-            XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: digest, publicKey: key.publicKey))
+            let isZeroModulo = digest == zero || digest == order
+            XCTAssertEqual(EthereumCrypto.verify(signature: signature, message: digest, publicKey: key.publicKey), !isZeroModulo)
             XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: digest, signature: signature), key.address)
             if digest == ordinaryHash {
                 XCTAssertEqual(signature.hex,

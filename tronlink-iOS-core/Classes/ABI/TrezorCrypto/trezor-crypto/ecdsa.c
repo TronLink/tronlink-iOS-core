@@ -1129,14 +1129,21 @@ int ecdsa_verify_digest(const ecdsa_curve *curve, const uint8_t *pub_key, const 
 		(!bn_is_less(&r, &curve->order)) ||
 		(!bn_is_less(&s, &curve->order))) return 2;
 
+	// For z = 0 mod n anyone holding only the public key Q can forge (r, s):
+	// r = (t*Q).x mod n, s = r*t^-1 mod n. Reject both all-zero and z = n digests.
+	// A 256-bit digest is below 2n for supported curves, so one bn_mod fully reduces it.
+	bignum256 reduced_z;
+	bn_copy(&z, &reduced_z);
+	bn_mod(&reduced_z, &curve->order);
+	if (bn_is_zero(&reduced_z)) return 3;
+
 	bn_inverse(&s, &curve->order); // s^-1
 	bn_multiply(&s, &z, &curve->order); // z*s^-1
 	bn_mod(&z, &curve->order);
 	bn_multiply(&r, &s, &curve->order); // r*s^-1
 	bn_mod(&s, &curve->order);
 
-	// A zero message term is valid: scalar_multiply returns infinity for 0*G.
-	// Only the final sum must be a finite point (SEC 1, section 4.1.4).
+	// The final sum must be a finite point (SEC 1, section 4.1.4).
 	scalar_multiply(curve, &z, &res);
 	point_multiply(curve, &s, &pub, &pub);
 	point_add(curve, &pub, &res);
