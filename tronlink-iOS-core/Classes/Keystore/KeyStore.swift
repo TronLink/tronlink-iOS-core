@@ -16,8 +16,12 @@ public final class KeyStore {
     /// Retry unavailable protected files without treating them as invalid JSON.
     private var pendingAccountURLs = [URL]()
     private var loadedAccountURLs = Set<URL>()
+    /// The directory could not be created or listed, so the set of key files is unknown.
+    private var directoryListingPending = false
+    /// While true, `save` and `delete` throw `CocoaError(.fileReadUnknown)`: storage is
+    /// temporarily unavailable (for example, the device is locked), not invalid input.
     private var hasUnreadableAccounts: Bool {
-        return pendingAccountURLs.contains { !loadedAccountURLs.contains($0) }
+        return directoryListingPending || pendingAccountURLs.contains { !loadedAccountURLs.contains($0) }
     }
     private var backupExclusionPending = true
 
@@ -26,17 +30,26 @@ public final class KeyStore {
     private let stateLock = NSLock()
 
     /// Creates a `KeyStore` for the given directory.
+    ///
+    /// A directory that cannot be created or listed yet is retried on later access instead
+    /// of failing initialization; until then no accounts are listed and writes are refused.
     public init(keyDirectory: URL) throws {
         self.keyDirectory = keyDirectory
-        try load()
+        load()
     }
 
-    private func load() throws {
+    private func load() {
         let fileManager = FileManager.default
-        try fileManager.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
-        retryDirectoryBackupExclusion()
-
-        let accountURLs = try fileManager.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: [], options: [.skipsHiddenFiles])
+        let accountURLs: [URL]
+        do {
+            try fileManager.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+            retryDirectoryBackupExclusion()
+            accountURLs = try fileManager.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: [], options: [.skipsHiddenFiles])
+        } catch {
+            directoryListingPending = true
+            return
+        }
+        directoryListingPending = false
         loadAccounts(at: accountURLs)
     }
 
@@ -436,7 +449,9 @@ public final class KeyStore {
             retryDirectoryBackupExclusion()
         }
         // ponytail: retry pending files on access; use a protected-data notification if retry I/O becomes costly.
-        if !pendingAccountURLs.isEmpty {
+        if directoryListingPending {
+            load()
+        } else if !pendingAccountURLs.isEmpty {
             loadAccounts(at: pendingAccountURLs)
         }
         return try body()

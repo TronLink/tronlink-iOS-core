@@ -2383,6 +2383,38 @@ final class EmbeddedKeystoreTests: XCTestCase {
         }
     }
 
+    func testUnavailableDirectoryIsRetriedInsteadOfFailingInitialization() throws {
+        let fileManager = FileManager.default
+        func assertStorageUnavailable(_ store: KeyStore) {
+            XCTAssertTrue(store.accounts.isEmpty)
+            XCTAssertThrowsError(try store.import(mnemonic: mnemonic, encryptPassword: "other-password")) { error in
+                XCTAssertEqual((error as? CocoaError)?.code, .fileReadUnknown)
+            }
+        }
+
+        // A path that cannot become a directory must not fail initialization or allow writes.
+        try Data().write(to: keyDirectory)
+        let blocked = try KeyStore(keyDirectory: keyDirectory)
+        assertStorageUnavailable(blocked)
+        try fileManager.removeItem(at: keyDirectory)
+        let account = try blocked.import(mnemonic: mnemonic, encryptPassword: password)
+        XCTAssertEqual(blocked.accounts.count, 1)
+
+        // An unlistable directory hides nothing permanently and still blocks duplicate imports.
+        try fileManager.setAttributes([.posixPermissions: 0], ofItemAtPath: keyDirectory.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: keyDirectory.path) }
+        let unlistable = try KeyStore(keyDirectory: keyDirectory)
+        assertStorageUnavailable(unlistable)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: keyDirectory.path)
+        XCTAssertEqual(unlistable.account(for: account.address)?.url, account.url)
+        XCTAssertEqual(try unlistable.exportMnemonic(account: account, password: password), mnemonic)
+        XCTAssertThrowsError(try unlistable.import(mnemonic: mnemonic, encryptPassword: "other-password")) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else {
+                return XCTFail("Expected accountAlreadyExists, got \(error)")
+            }
+        }
+    }
+
     func testKeyFilesStayProtectedAcrossReloadAndAtomicUpdates() throws {
         let fileManager = FileManager.default
         let documents = try fileManager.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
