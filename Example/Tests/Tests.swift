@@ -4085,6 +4085,29 @@ final class ABIv2RegressionTests: XCTestCase {
         XCTAssertEqual(element.decodeReturnData(tokenWord)?["value"] as? String, "USDT")
     }
 
+    func testJavaTronProtobufEnumSpellingsParseLikeSolidity() throws {
+        let pairs = [
+            ("{\"type\":\"Function\",\"name\":\"balanceOf\",\"stateMutability\":\"View\",\"inputs\":[{\"name\":\"who\",\"type\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}]}",
+             "{\"type\":\"function\",\"name\":\"balanceOf\",\"stateMutability\":\"view\",\"inputs\":[{\"name\":\"who\",\"type\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}]}"),
+            ("{\"type\":\"Function\",\"name\":\"transfer\",\"stateMutability\":\"Nonpayable\",\"inputs\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}]}",
+             "{\"type\":\"function\",\"name\":\"transfer\",\"stateMutability\":\"nonpayable\",\"inputs\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}]}"),
+            ("{\"type\":\"Constructor\",\"stateMutability\":\"Payable\",\"inputs\":[]}",
+             "{\"type\":\"constructor\",\"stateMutability\":\"payable\",\"inputs\":[]}"),
+            ("{\"type\":\"Event\",\"name\":\"Transfer\",\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"}]}",
+             "{\"type\":\"event\",\"name\":\"Transfer\",\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"}]}")
+        ]
+        for (javaTron, solidity) in pairs {
+            XCTAssertEqual(String(describing: try parseRecord(javaTron)), String(describing: try parseRecord(solidity)))
+        }
+        let stillInvalid = [
+            "{\"type\":\"FUNCTION\",\"name\":\"f\"}",
+            "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"VIEW\"}",
+            "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"UnknownMutabilityType\"}",
+            "{\"type\":\"Constructor\",\"stateMutability\":\"View\"}"
+        ]
+        for json in stillInvalid { XCTAssertThrowsError(try parseRecord(json)) }
+    }
+
     func testTypedNegativeZeroFromBigIntThreeIsNormalized() throws {
         let negativeZero = try XCTUnwrap(BigInt("-0"))
         XCTAssertEqual(TLCore.ABIv2Encoder.convertToBigUInt(negativeZero as AnyObject), BigUInt(0))

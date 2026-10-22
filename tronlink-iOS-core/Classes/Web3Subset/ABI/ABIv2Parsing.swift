@@ -54,8 +54,25 @@ extension ABIv2 {
 }
 
 extension ABIv2.Record {
-    /// Parses record to ABIv2.Element
+    /// java-tron JSON (for example `getcontract`) spells these enums by their protobuf names.
+    private static let protobufEntryTypes = [
+        "Function": "function", "Constructor": "constructor", "Event": "event",
+        "Fallback": "fallback", "Receive": "receive", "Error": "error"
+    ]
+    private static let protobufStateMutabilities = [
+        "Pure": "pure", "View": "view", "Nonpayable": "nonpayable", "Payable": "payable"
+    ]
+
+    /// Parses record to ABIv2.Element. Accepts Solidity spellings and the exact java-tron
+    /// protobuf enum names; any other spelling is still rejected.
     public func parse() throws -> ABIv2.Element {
+        var record = self
+        record.type = record.type.map { ABIv2.Record.protobufEntryTypes[$0] ?? $0 }
+        record.stateMutability = record.stateMutability.map { ABIv2.Record.protobufStateMutabilities[$0] ?? $0 }
+        return try record.parseNormalized()
+    }
+
+    private func parseNormalized() throws -> ABIv2.Element {
         let typeString = self.type != nil ? self.type! : "function"
         guard let type = ABIv2.ElementType(rawValue: typeString) else {
             throw ABIv2.ParsingError.elementTypeInvalid
