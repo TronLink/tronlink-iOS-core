@@ -1,3 +1,5 @@
+#import <Foundation/Foundation.h>
+
 #if !defined(GPB_GRPC_FORWARD_DECLARE_MESSAGE_PROTO) || !GPB_GRPC_FORWARD_DECLARE_MESSAGE_PROTO
 #import "Api_Tron.pbobjc.h"
 #endif
@@ -14,6 +16,7 @@
   @class AccountCreateContract;
   @class AccountNetMessage;
   @class AccountPaginated;
+  @class AccountPermissionUpdateContract;
   @class AccountResourceMessage;
   @class AccountUpdateContract;
   @class AddressPrKeyPairMessage;
@@ -28,8 +31,21 @@
   @class BuyStorageBytesContract;
   @class BuyStorageContract;
   @class BytesMessage;
+  @class CanDelegatedMaxSizeRequestMessage;
+  @class CanDelegatedMaxSizeResponseMessage;
+  @class CanWithdrawUnfreezeAmountRequestMessage;
+  @class CanWithdrawUnfreezeAmountResponseMessage;
+  @class CancelAllUnfreezeV2Contract;
   @class ChainParameters;
+  @class ClearABIContract;
   @class CreateSmartContract;
+  @class DecryptNotes;
+  @class DecryptNotesMarked;
+  @class DelegateResourceContract;
+  @class DelegatedResourceAccountIndex;
+  @class DelegatedResourceList;
+  @class DelegatedResourceMessage;
+  @class DiversifierMessage;
   @class DynamicProperties;
   @class EasyTransferByPrivateMessage;
   @class EasyTransferMessage;
@@ -41,11 +57,27 @@
   @class ExchangeList;
   @class ExchangeTransactionContract;
   @class ExchangeWithdrawContract;
+  @class ExpandedSpendingKeyMessage;
   @class FreezeBalanceContract;
+  @class FreezeBalanceV2Contract;
+  @class GetAvailableUnfreezeCountRequestMessage;
+  @class GetAvailableUnfreezeCountResponseMessage;
+  @class IncomingViewingKeyDiversifierMessage;
+  @class IncomingViewingKeyMessage;
+  @class IncrementalMerkleVoucherInfo;
+  @class IvkDecryptAndMarkParameters;
+  @class IvkDecryptParameters;
+  @class NfParameters;
   @class NodeList;
+  @class NoteParameters;
   @class NumberMessage;
+  @class OutputPointInfo;
+  @class OvkDecryptParameters;
   @class PaginatedMessage;
   @class ParticipateAssetIssueContract;
+  @class PaymentAddressMessage;
+  @class PrivateParameters;
+  @class PrivateParametersWithoutAsk;
   @class Proposal;
   @class ProposalApproveContract;
   @class ProposalCreateContract;
@@ -56,20 +88,28 @@
   @class SellStorageContract;
   @class SetAccountIdContract;
   @class SmartContract;
+  @class SpendAuthSigParameters;
+  @class SpendResult;
   @class TransactionExtention;
   @class TransactionInfo;
   @class TransactionList;
   @class TransactionListExtention;
   @class TransactionSign;
+  @class TransactionSignWeight;
   @class TransferAssetContract;
   @class TransferContract;
   @class TriggerSmartContract;
+  @class UnDelegateResourceContract;
   @class UnfreezeAssetContract;
   @class UnfreezeBalanceContract;
+  @class UnfreezeBalanceV2Contract;
   @class UpdateAssetContract;
+  @class UpdateBrokerageContract;
   @class UpdateSettingContract;
+  @class ViewingKeyMessage;
   @class VoteWitnessContract;
   @class WithdrawBalanceContract;
+  @class WithdrawExpireUnfreezeContract;
   @class WitnessCreateContract;
   @class WitnessList;
   @class WitnessUpdateContract;
@@ -424,6 +464,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)unDelegateResourceWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
+- (GRPCProtoCall *)RPCToUnDelegateResourceWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
+
+// Preserve the selector exposed by earlier releases as a not-yet-started alias.
 - (GRPCProtoCall *)RPCToUnDelegateResourceWithRequestWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
 #pragma mark CanDelegatedMaxSize(CanDelegatedMaxSizeRequestMessage) returns (CanDelegatedMaxSizeResponseMessage)
@@ -790,8 +833,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (GRPCProtoCall *)RPCToDeployContractWithRequest:(CreateSmartContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
-#pragma mark ClearABIContract(ClearABIContract) returns (TransactionExtention)
+#pragma mark ClearContractABI(ClearABIContract) returns (TransactionExtention)
 
+// Keep the published selectors; the server RPC is named ClearContractABI.
 - (void)clearABIContractWithRequest:(ClearABIContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;
 
 - (GRPCProtoCall *)RPCToClearABIContractWithRequest:(ClearABIContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler;

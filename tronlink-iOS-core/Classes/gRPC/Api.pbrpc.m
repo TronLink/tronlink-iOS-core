@@ -538,6 +538,11 @@
           responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
 }
 
+// Compatibility with the misspelled selector in previously published headers.
+- (GRPCProtoCall *)RPCToUnDelegateResourceWithRequestWithRequest:(UnDelegateResourceContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler{
+    return [self RPCToUnDelegateResourceWithRequest:request handler:handler];
+}
+
 #pragma mark CanDelegatedMaxSize(CanDelegatedMaxSizeRequestMessage) returns (CanDelegatedMaxSizeResponseMessage)
 
 - (void)getCanDelegatedMaxSizeWithRequest:(CanDelegatedMaxSizeRequestMessage *)request handler:(void(^)(CanDelegatedMaxSizeResponseMessage *_Nullable response, NSError *_Nullable error))handler{
@@ -1108,14 +1113,14 @@
         responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
 }
 
-#pragma mark ClearABIContract(ClearABIContract) returns (TransactionExtention)
+#pragma mark ClearContractABI(ClearABIContract) returns (TransactionExtention)
 
 - (void)clearABIContractWithRequest:(ClearABIContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler {
-    [self RPCToClearABIContractWithRequest:request handler:handler];
+    [[self RPCToClearABIContractWithRequest:request handler:handler] start];
 }
 // Returns a not-yet-started RPC object.
 - (GRPCProtoCall *)RPCToClearABIContractWithRequest:(ClearABIContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler {
-    return [self RPCToMethod:@"ClearABIContract"
+    return [self RPCToMethod:@"ClearContractABI"
         requestsWriter:[GRXWriter writerWithValue:request]
          responseClass:[TransactionExtention class]
     responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
@@ -1436,7 +1441,7 @@
 }
 
 - (GRPCProtoCall *)RPCToUpdateBrokerageWithRequest:(UpdateBrokerageContract *)request handler:(void(^)(TransactionExtention *_Nullable response, NSError *_Nullable error))handler {
-    return [self RPCToMethod:@"UpdateBrokerageContract"
+    return [self RPCToMethod:@"UpdateBrokerage"
               requestsWriter:[GRXWriter writerWithValue:request]
                responseClass:[TransactionExtention class]
           responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
@@ -1485,7 +1490,7 @@
 - (GRPCProtoCall *)RPCToScanAndMarkNoteByIvkWithRequest:(IvkDecryptAndMarkParameters *)request handler:(void(^)(DecryptNotesMarked *_Nullable response, NSError *_Nullable error))handler {
     return [self RPCToMethod:@"ScanAndMarkNoteByIvk"
               requestsWriter:[GRXWriter writerWithValue:request]
-               responseClass:[DecryptNotes class]
+               responseClass:[DecryptNotesMarked class]
           responsesWriteable:[GRXWriteable writeableWithSingleHandler:handler]];
 }
 
@@ -1856,13 +1861,13 @@
 @end
 @implementation WalletExtension
 
-//// Designated initializer
-//- (instancetype)initWithHost:(NSString *)host {
-//  self = [super initWithHost:host
-//                 packageName:@"protocol"
-//                 serviceName:@"WalletExtension"];
-//  return self;
-//}
+// Designated initializer
+- (instancetype)initWithHost:(NSString *)host {
+  self = [super initWithHost:host
+                 packageName:@"protocol"
+                 serviceName:@"WalletExtension"];
+  return self;
+}
 
 // Override superclass initializer to disallow different package and service names.
 - (instancetype)initWithHost:(NSString *)host

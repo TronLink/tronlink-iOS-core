@@ -2,9 +2,9 @@ import Foundation
 
 public extension String {
     func isTRXAddress() -> Bool {
-        if self.isEmpty {
-            return false
-        }
+        // TRON Base58Check addresses are exactly 34 ASCII bytes. Inspect only a
+        // bounded prefix before the arbitrary-precision Base58 decoder sees input.
+        guard utf8.prefix(35).count == 34 else { return false }
         
         let data = self.base58CheckData
         if data == nil {

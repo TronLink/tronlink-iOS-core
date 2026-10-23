@@ -1,0 +1,183 @@
+
+import BigInt
+import Foundation
+
+/// Encodes fields according to Ethereum's Application Binary Interface Specification
+///
+/// - SeeAlso: https://solidity.readthedocs.io/en/develop/abi-spec.html
+public final class ABIEncoder: Codable {
+    private let encodedIntSize = 32
+
+    /// Encoded data
+    public var data = Data()
+
+    /// Creates an `ABIEncoder`.
+    public init() {}
+
+    /// Encodes an `ABIValue`
+    public func encode(_ value: ABIValue) throws {
+        try value.validate()
+        switch value {
+        case .uint(_, let value):
+            try encode(value)
+        case .int(_, let value):
+            try encode(value)
+        case .address(let address):
+            try encode(address)
+        case .bool(let value):
+            try encode(value)
+        case .fixed(_, _, let value):
+            try encode(value)
+        case .ufixed(_, _, let value):
+            try encode(value)
+        case .bytes(let data):
+            try encode(data, static: true)
+        case .function(let f, let args):
+            try encode(signature: f.description)
+            try encode(tuple: args)
+        case .array(_, let array):
+            try encode(tuple: array)
+        case .dynamicBytes(let data):
+            try encode(data, static: false)
+        case .string(let string):
+            try encode(string)
+        case .dynamicArray(_, let array):
+            try encode(array.count)
+            try encode(tuple: array)
+        case .tuple(let array):
+            try encode(tuple: array)
+        }
+    }
+
+    /// Encodes a tuple
+    public func encode(tuple: [ABIValue]) throws {
+        var headSize = 0
+        for subvalue in tuple {
+            try subvalue.validate()
+            if subvalue.isDynamic {
+                headSize += 32
+            } else {
+                headSize += subvalue.length
+            }
+        }
+
+        var dynamicOffset = 0
+        for subvalue in tuple {
+            if subvalue.isDynamic {
+                try encode(headSize + dynamicOffset)
+                dynamicOffset += subvalue.length
+            } else {
+                try encode(subvalue)
+            }
+        }
+
+        for subvalue in tuple where subvalue.isDynamic {
+            try encode(subvalue)
+        }
+    }
+
+    /// Encodes a function call
+    public func encode(function: Function, arguments: [Any]) throws {
+        let values = try function.castArguments(arguments)
+        try encode(signature: function.description)
+        try encode(tuple: values)
+    }
+
+    /// Encodes a boolean field.
+    public func encode(_ value: Bool) throws {
+        data.append(Data(repeating: 0, count: encodedIntSize - 1))
+        data.append(value ? 1 : 0)
+    }
+
+    /// Encodes an unsigned integer.
+    public func encode(_ value: UInt) throws {
+        try encode(BigUInt(value))
+    }
+
+    /// Encodes a `BigUInt` field.
+    ///
+    /// - Throws: `ABIError.integerOverflow` if the value has more than 256 bits.
+    public func encode(_ value: BigUInt) throws {
+        let valueData = value.serialize()
+        if valueData.count > encodedIntSize {
+            throw ABIError.integerOverflow
+        }
+
+        data.append(Data(repeating: 0, count: encodedIntSize - valueData.count))
+        data.append(valueData)
+    }
+
+    /// Encodes a signed integer.
+    public func encode(_ value: Int) throws {
+        try encode(BigInt(value))
+    }
+
+    /// Encodes a `BigInt` field.
+    ///
+    /// - Throws: `ABIError.integerOverflow` if the value is outside the int256 range.
+    public func encode(_ value: BigInt) throws {
+        guard let valueData = value.abiEncode(bits: 256) else {
+            throw ABIError.integerOverflow
+        }
+        data.append(valueData)
+    }
+
+    /// Encodes a static or dynamic byte array
+    public func encode(_ bytes: Data, static: Bool) throws {
+        if `static` {
+            try ABIType.bytes(bytes.count).validate()
+        }
+        if !`static` {
+            try encode(bytes.count)
+        }
+        let padding = ((bytes.count + 31) / 32) * 32 - bytes.count
+        data.append(bytes)
+        data.append(Data(repeating: 0, count: padding))
+    }
+
+    /// Encodes an address as a 32-byte ABI slot (12 zero bytes + 20-byte address).
+    ///
+    /// Accepts 20-byte EVM form, 21-byte TRON `0x41` prefix, Permit2-style `0x00`
+    /// prefix, or a 32-byte left-padded word. Empty / other lengths throw instead
+    /// of writing a short slot that would shift later arguments.
+    public func encode(_ address: Address) throws {
+        guard let addressData = ABIEncoder.evmAddress20(from: address.data) else {
+            throw ABIError.invalidAddress
+        }
+        data.append(Data(repeating: 0, count: encodedIntSize - addressData.count))
+        data.append(addressData)
+    }
+
+    /// 20-byte EVM address for ABI encoding, or `nil` if `raw` cannot be used as address.
+    static func evmAddress20(from raw: Data) -> Data? {
+        switch raw.count {
+        case 20:
+            return raw
+        case 21 where raw.first == 0x41 || raw.first == 0x00:
+            return Data(raw.dropFirst())
+        case 32 where raw.prefix(12).allSatisfy({ $0 == 0 }):
+            return Data(raw.suffix(20))
+        default:
+            return nil
+        }
+    }
+
+    /// Encodes a string
+    ///
+    /// - Throws: `ABIError.invalidUTF8String` if the string cannot be encoded as UTF8.
+    public func encode(_ string: String) throws {
+        guard let bytes = string.data(using: .utf8) else {
+            throw ABIError.invalidUTF8String
+        }
+        try encode(bytes, static: false)
+    }
+
+    /// Encodes a function signature
+    public func encode(signature: String) throws {
+        guard let bytes = signature.data(using: .utf8) else {
+            throw ABIError.invalidUTF8String
+        }
+        let hash = EthereumCrypto.hash(bytes)
+        data.append(hash[0..<4])
+    }
+}

@@ -1,6 +1,6 @@
 import XCTest
+import GRPCClient
 @testable import TLCore
-import TronKeystore
 
 private final class AddressMappingStoreStub: TRXAddressMappingStore {
     var loadResult: [String: String]?
@@ -51,15 +51,6 @@ class Tests: XCTestCase {
         return keyStore
     }()
     
-    private lazy var tWallet: TWallet = {
-        // 18.206.50.220:50051
-        // 47.90.214.183:50051
-        let fullNode = "18.206.50.220:50051"
-//        GRPCCall.useInsecureConnections(forHost: fullNode)
-        let tWallet = TWallet.init(host: fullNode)
-        return tWallet
-    }()
-
     private static func randomPassword() -> String {
         var generator = SystemRandomNumberGenerator()
 
@@ -342,6 +333,221 @@ class Tests: XCTestCase {
         XCTAssertEqual(config.uploadCallCount, 0)
     }
 
+    func testMetricsUploadAllowsOnlyOnlineAndPreReleaseEnvironments() {
+        let manager = TRXStatisticalUploadManager.shared
+        let originalConfig = manager.dataConfig
+        defer { manager.dataConfig = originalConfig }
+        let environments = [(false, false, false), (true, false, true), (false, true, true), (true, true, true)]
+
+        for (online, preRelease, allowed) in environments {
+            let config = MetricsDataSourceStub()
+            config.isOnlineEnvironment = online
+            config.isPreReleaseEnvironment = preRelease
+            manager.dataConfig = config
+            XCTAssertFalse(manager.isCollectionDisabled(config), "Local collection policy must remain unchanged")
+            XCTAssertEqual(manager.isCurrentUploadConfig(config, chain: config.environmentKey,
+                                                         walletAddress: config.walletAddress), allowed)
+            var failed = false
+            TRXStatisticalUploadViewModel().uploadStatisticalDatabase(
+                assets: [], transactions: [], dataConfig: config,
+                chain: config.environmentKey, walletAddress: config.walletAddress,
+                success: { _, _ in }, failure: { failed = true })
+
+            XCTAssertEqual(config.uploadCallCount, allowed ? 1 : 0)
+            XCTAssertEqual(failed, !allowed)
+        }
+    }
+
+    func testMetricsUploadRechecksEnvironmentBeforeNetwork() {
+        let config = MetricsDataSourceStub()
+        let manager = TRXStatisticalUploadManager.shared
+        let originalConfig = manager.dataConfig
+        manager.dataConfig = config
+        defer { manager.dataConfig = originalConfig }
+        let chain = config.environmentKey
+        let address = config.walletAddress
+        XCTAssertTrue(manager.isCurrentUploadConfig(config, chain: chain, walletAddress: address))
+
+        // Keep the same object, chain and wallet: identity checks alone cannot catch this change.
+        config.isOnlineEnvironment = false
+        config.isPreReleaseEnvironment = false
+        var failed = false
+        TRXStatisticalUploadViewModel().uploadStatisticalDatabase(
+            assets: [], transactions: [], dataConfig: config, chain: chain, walletAddress: address,
+            success: { _, _ in XCTFail("A changed environment must be checked before upload") },
+            failure: { failed = true })
+
+        XCTAssertTrue(failed)
+        XCTAssertEqual(config.uploadCallCount, 0)
+    }
+
+    func testMetricsAllowedEnvironmentsStillRespectPrivacyAndIdentityGates() {
+        let manager = TRXStatisticalUploadManager.shared
+        let originalConfig = manager.dataConfig
+        defer { manager.dataConfig = originalConfig }
+        let disableCases: [(MetricsDataSourceStub) -> Void] = [
+            { $0.isShastaEnvironment = true },
+            { $0.isWatchWallet = true },
+            { $0.isBasicFunctionOpen = true },
+            { $0.isTokenCloudSyncClose = true },
+            { $0.environmentKey = "" },
+            { $0.walletAddress = "" },
+            { $0.environmentKey = "another-chain" },
+            { $0.walletAddress = "another-wallet" }
+        ]
+        for online in [true, false] {
+            for disable in disableCases {
+                let config = MetricsDataSourceStub()
+                config.isOnlineEnvironment = online
+                config.isPreReleaseEnvironment = !online
+                manager.dataConfig = config
+                let chain = config.environmentKey
+                let address = config.walletAddress
+                disable(config)
+                var failed = false
+                TRXStatisticalUploadViewModel().uploadStatisticalDatabase(
+                    assets: [], transactions: [], dataConfig: config, chain: chain, walletAddress: address,
+                    success: { _, _ in XCTFail("An allowed environment must not bypass other gates") },
+                    failure: { failed = true })
+
+                XCTAssertTrue(failed)
+                XCTAssertEqual(config.uploadCallCount, 0)
+            }
+        }
+    }
+
+    func testMetricsDecimalAdditionRejectsInvalidAndOutOfRangeValues() {
+        XCTAssertEqual("0.1".tronCore_decimalNumberByAdding(numberString: "0.2")?.stringValue, "0.3")
+        XCTAssertEqual("".tronCore_decimalNumberByAdding(numberString: "2")?.stringValue, "2")
+        XCTAssertEqual("-0.1".tronCore_decimalNumberByAdding(numberString: "-0.2")?.stringValue, "-0.3")
+        XCTAssertNotNil(String(repeating: "9", count: 78).tronCore_metricsDecimalNumber())
+        XCTAssertNil("NaN".tronCore_decimalNumberByAdding(numberString: "1"))
+        XCTAssertNil("1".tronCore_decimalNumberByAdding(numberString: String(repeating: "9", count: 1_000)))
+        XCTAssertNil(("0." + String(repeating: "0", count: 128) + "1").tronCore_metricsDecimalNumber())
+        // Both operands fit the supported range, but their sum exceeds it.
+        let large = "8" + String(repeating: "0", count: 126)
+        XCTAssertNotNil(large.tronCore_metricsDecimalNumber())
+        XCTAssertNil(large.tronCore_decimalNumberByAdding(numberString: large))
+        // Previously, two individually representable 2e165 inputs could overflow on addition.
+        let overflowOperand = "2" + String(repeating: "0", count: 165)
+        XCTAssertNil(overflowOperand.tronCore_decimalNumberByAdding(numberString: overflowOperand))
+    }
+
+    private func withTransactionMetricsContext(_ body: (TRXStatisticalUploadManager, MetricsDataSourceStub, String) -> Void) {
+        let manager = TRXStatisticalUploadManager.shared
+        let previousConfig = manager.dataConfig
+        let config = MetricsDataSourceStub()
+        config.environmentKey = "metrics-regression-\(UUID().uuidString)"
+        config.walletAddress = "T-metrics-regression-\(UUID().uuidString)"
+        manager.dataConfig = config
+        let uid = TRXAddressMapManager.shared.id(for: config.walletAddress)
+        defer {
+            manager.dataConfig = previousConfig
+            TRXAddressMapManager.shared.removeMapping(for: config.walletAddress)
+        }
+        body(manager, config, uid)
+    }
+
+    func testConcurrentTransactionMetricsPreserveEveryIncrement() {
+        withTransactionMetricsContext { manager, config, uid in
+            let db = TRXMetricsDBManager.shared
+            // First round includes competing first inserts; second round updates an existing row.
+            for round in 1...2 {
+                DispatchQueue.concurrentPerform(iterations: 32) { _ in
+                    manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "0.25",
+                                                   energy: "1", bandwidth: "2", burn: "0.1")
+                }
+                let rows = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid)
+                XCTAssertEqual(rows.count, 1)
+                XCTAssertEqual(rows.first?.count, round * 32)
+                XCTAssertEqual(rows.first?.tokenAmount, String(round * 8))
+                XCTAssertEqual(rows.first?.energy, String(round * 32))
+                XCTAssertEqual(rows.first?.bandwidth, String(round * 64))
+                XCTAssertEqual(rows.first?.burn, round == 1 ? "3.2" : "6.4")
+                XCTAssertEqual(rows.first?.A1, round * 32)
+            }
+            manager.upsertTransactionsData(actionType: 1053, tokenAddress: "other-token", tokenAmount: "5",
+                                           energy: "0", bandwidth: "0", burn: "0")
+            let rows = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid)
+            XCTAssertEqual(rows.count, 2)
+            XCTAssertEqual(rows.first(where: { $0.actionType == 1051 })?.count, 64)
+            XCTAssertEqual(rows.first(where: { $0.actionType == 1053 })?.count, 1)
+        }
+    }
+
+    func testInvalidTransactionMetricsDoNotInsertOrPartiallyUpdate() {
+        withTransactionMetricsContext { manager, config, uid in
+            let db = TRXMetricsDBManager.shared
+            let invalid = "2" + String(repeating: "0", count: 165)
+            manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: invalid,
+                                           energy: "0", bandwidth: "0", burn: "0")
+            XCTAssertTrue(db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid).isEmpty)
+            manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "1",
+                                           energy: "2", bandwidth: "3", burn: "4")
+            for index in 0..<4 {
+                var values = ["1", "2", "3", "4"]
+                values[index] = invalid
+                manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: values[0],
+                                               energy: values[1], bandwidth: values[2], burn: values[3])
+            }
+            let row = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid).first
+            XCTAssertEqual(row?.count, 1)
+            XCTAssertEqual(row?.tokenAmount, "1")
+            XCTAssertEqual(row?.energy, "2")
+            XCTAssertEqual(row?.bandwidth, "3")
+            XCTAssertEqual(row?.burn, "4")
+            XCTAssertEqual(row?.A1, 1)
+        }
+    }
+
+    func testTransactionMetricsOverflowPreservesStoredRowAndAllowsNextWrite() {
+        withTransactionMetricsContext { manager, config, uid in
+            let db = TRXMetricsDBManager.shared
+            manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "1",
+                                           energy: "2", bandwidth: "3", burn: "4")
+            guard let seed = db.getUpdatedTransactionSyncModels(forChain: config.environmentKey, uId: uid).first else {
+                XCTFail("Expected a stored transaction statistics row")
+                return
+            }
+            func recordOne() {
+                manager.upsertTransactionsData(actionType: 1051, tokenAddress: "_", tokenAmount: "1",
+                                               energy: "2", bandwidth: "3", burn: "4")
+            }
+            // An acknowledged row must not become dirty, or change any field, on failure.
+            seed.updated = false
+            for field in 0..<3 {
+                seed.count = field == 0 ? Int.max : 1
+                seed.A1 = field == 1 ? Int.max : 1
+                seed.tokenAmount = field == 2 ? "2" + String(repeating: "0", count: 165) : "1"
+                XCTAssertTrue(db.upsertTransactionSync(model: seed))
+                recordOne()
+                let saved = db.getTransactionSyncModel(chain: config.environmentKey, uId: uid, actionType: 1051,
+                                                      tokenAddress: "_", date: seed.date ?? "")
+                XCTAssertEqual(saved?.count, seed.count)
+                XCTAssertEqual(saved?.A1, seed.A1)
+                XCTAssertEqual(saved?.tokenAmount, seed.tokenAmount)
+                XCTAssertEqual(saved?.energy, "2")
+                XCTAssertEqual(saved?.bandwidth, "3")
+                XCTAssertEqual(saved?.burn, "4")
+                XCTAssertEqual(saved?.updated, false)
+            }
+            seed.count = 1
+            seed.A1 = 1
+            seed.tokenAmount = "1"
+            XCTAssertTrue(db.upsertTransactionSync(model: seed))
+            recordOne()
+            let saved = db.getTransactionSyncModel(chain: config.environmentKey, uId: uid, actionType: 1051,
+                                                  tokenAddress: "_", date: seed.date ?? "")
+            XCTAssertEqual(saved?.count, 2)
+            XCTAssertEqual(saved?.tokenAmount, "2")
+            XCTAssertEqual(saved?.energy, "4")
+            XCTAssertEqual(saved?.bandwidth, "6")
+            XCTAssertEqual(saved?.burn, "8")
+            XCTAssertEqual(saved?.A1, 2)
+            XCTAssertEqual(saved?.updated, true)
+        }
+    }
+
     func testMetricsReportNumberBounds() {
         let viewModel = TRXStatisticalUploadViewModel()
         let asset = TRXAssetSyncModel()
@@ -593,6 +799,54 @@ class Tests: XCTestCase {
         XCTAssertEqual(decoded, payload)
     }
 
+    func testBase58RoundTripsLeadingZeroBytes() {
+        let rotatedAlphabet = Array(Base58String.btcAlphabet.dropFirst()) + [Base58String.btcAlphabet[0]]
+        let alphabets = [Base58String.btcAlphabet, Base58String.flickrAlphabet, rotatedAlphabet]
+        let payloads = [
+            Data(),
+            Data([0x00]),
+            Data([0x00, 0x00]),
+            Data([0x00, 0x00, 0x01, 0x02, 0x03]),
+            Data([0x01, 0x02, 0x03]),
+        ]
+
+        for (alphabetIndex, alphabet) in alphabets.enumerated() {
+            for payload in payloads {
+                let encoded = String(base58Encoding: payload, alphabet: alphabet)
+                XCTAssertEqual(Data(base58Decoding: encoded, alphabet: alphabet), payload,
+                               "raw Base58 round trip failed for alphabet \(alphabetIndex)")
+
+                let checkEncoded = String(base58CheckEncoding: payload, alphabet: alphabet)
+                XCTAssertEqual(Data(base58CheckDecoding: checkEncoded, alphabet: alphabet), payload,
+                               "Base58Check round trip failed for alphabet \(alphabetIndex)")
+            }
+        }
+    }
+
+    func testBase58CanonicalVectorsPreserveLeadingZeroBytes() {
+        let vectors: [(alphabet: [UInt8], bytes: Data, encoded: String)] = [
+            (Base58String.btcAlphabet, Data(), ""),
+            (Base58String.btcAlphabet, Data([0x0a]), "B"),
+            (Base58String.btcAlphabet, Data([0x00]), "1"),
+            (Base58String.btcAlphabet, Data([0x00, 0x00]), "11"),
+            (Base58String.btcAlphabet, Data([0x00, 0x0a]), "1B"),
+            (Base58String.btcAlphabet, Data([0x00, 0x00, 0x0a]), "11B"),
+            (Base58String.flickrAlphabet, Data(), ""),
+            (Base58String.flickrAlphabet, Data([0x0a]), "b"),
+            (Base58String.flickrAlphabet, Data([0x00]), "1"),
+            (Base58String.flickrAlphabet, Data([0x00, 0x00]), "11"),
+            (Base58String.flickrAlphabet, Data([0x00, 0x0a]), "1b"),
+            (Base58String.flickrAlphabet, Data([0x00, 0x00, 0x0a]), "11b"),
+        ]
+
+        for vector in vectors {
+            XCTAssertEqual(String(base58Encoding: vector.bytes, alphabet: vector.alphabet),
+                           vector.encoded)
+            XCTAssertEqual(Data(base58Decoding: vector.encoded, alphabet: vector.alphabet),
+                           vector.bytes)
+        }
+    }
+
     func testStrictHexAddressConversionRejectsGarbage() {
         var payload = Data([0x41])
         payload.append(contentsOf: Array(repeating: UInt8(0x11), count: 20))
@@ -678,67 +932,100 @@ class Tests: XCTestCase {
         wait(for: [exp], timeout: 60)
     }
     
-    // Sign Transaction
-    func testSignTransaction() {
-        let exp = expectation(description: "testSignTransaction")
-        TLWalletCore.createWalletAccount(keyStore: self.keyStore, password: self.password) {  result in
-            switch result {
-            case .success(let account):
-                let walletAddress = String(base58CheckEncoding: account.address.data)
-                print("createWallet: \(walletAddress)")
-                XCTAssert(walletAddress.count > 0)
+    // Sign serialized transaction data without depending on a live full node.
+    func testSignTransaction() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-                let newContract: TransferContract = TransferContract()
-                newContract.ownerAddress = walletAddress.base58CheckData
-                newContract.toAddress = walletAddress.base58CheckData
-                newContract.amount = 1
+        let password = "transaction-signing-password"
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        let store = try KeyStore(keyDirectory: directory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let walletAddress = String(base58CheckEncoding: account.address.data)
 
-                self.tWallet.getNowBlock2(withRequest: EmptyMessage()) { blockExtention, error in
-                    if blockExtention == nil || error != nil {
-                        XCTAssert(false)
-                    }
-                    
-                    let transaction = TronTransaction()
-                    let rawData: Transaction_raw = Transaction_raw()
-                    rawData.refBlockHash = blockExtention?.blockid.subdata(in: Range(NSRange(location: 8, length: 8))!)
-                    
-                    var result = Data()
-                    let uint8Convert = Data([UInt8(truncatingIfNeeded: (blockExtention?.blockHeader.rawData.number ?? 0) >> 8),UInt8(truncatingIfNeeded: (blockExtention?.blockHeader.rawData.number ?? 0))])
-                    result.append(uint8Convert)
-                    rawData.refBlockBytes = result
-                    
-                    let transactionContract: Transaction_Contract = Transaction_Contract()
-                    transactionContract.type = .transferContract
-                    transactionContract.parameter.typeURL = "type.googleapis.com/protocol." + "TransferContract"
-                    transactionContract.parameter.value = newContract.data() ?? Data()
-                    rawData.contractArray = [transactionContract]
-                    transaction.rawData = rawData
-                    
-                    let data = transaction.rawData.data() ?? Data()
-                    let signResult = TLWalletCore.signTranscation(keyStore: self.keyStore, transaction: data, password: self.password, address: walletAddress)
-                            
-                    switch signResult {
-                    case .success(let data):
-                        print(data)
-                        exp.fulfill()
-                        XCTAssert(true)
-                        break
-                    case .failure(let error):
-                        print(error)
-                        exp.fulfill()
-                        XCTAssert(false)
-                        break
-                    }
-                }
-                break
-            case .failure(let error):
-                print(error)
-                exp.fulfill()
-                XCTAssert(false)
-                break
-            }
+        let transfer = TransferContract()
+        transfer.ownerAddress = account.address.data
+        transfer.toAddress = account.address.data
+        transfer.amount = 1
+
+        let contract = Transaction_Contract()
+        contract.type = .transferContract
+        contract.parameter.typeURL = "type.googleapis.com/protocol.TransferContract"
+        contract.parameter.value = try XCTUnwrap(transfer.data())
+
+        let rawData = Transaction_raw()
+        rawData.refBlockHash = Data(repeating: 0x11, count: 8)
+        rawData.refBlockBytes = Data([0x12, 0x34])
+        rawData.contractArray = [contract]
+        let serialized = try XCTUnwrap(rawData.data())
+
+        let signature: Data
+        switch TLWalletCore.signTranscation(keyStore: store,
+                                            transaction: serialized,
+                                            password: password,
+                                            address: walletAddress) {
+        case .success(let value):
+            signature = value
+        case .failure(let error):
+            return XCTFail("Failed to sign serialized transaction: \(error)")
         }
-        wait(for: [exp], timeout: 60)
+
+        guard signature.count == 65 else {
+            return XCTFail("Expected a 65-byte recoverable signature, got \(signature.count) bytes")
+        }
+        XCTAssertLessThan(signature[64], 4)
+
+        let digest = serialized.sha256T()
+        let fixtureWallet = try Wallet(mnemonic: mnemonic)
+        defer { fixtureWallet.clear() }
+        let expectedPublicKey = try fixtureWallet.getKey(at: 0).publicKey
+        let recoveredPublicKey = try SECP256K1.recoverPublicKey(hash: digest, signature: signature)
+        XCTAssertEqual(recoveredPublicKey, expectedPublicKey)
+
+        XCTAssertEqual(account.address.data.count, 21)
+        XCTAssertEqual(account.address.data.first, 0x41)
+        let expectedAddress = Data(account.address.data.dropFirst())
+        XCTAssertEqual(try Web3Utils.publicToAddressData(recoveredPublicKey), expectedAddress)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: digest, signature: signature).addressData,
+                       expectedAddress)
+
+        for chainId in ["abc", "0xabc", "1g", "g1", "0x"] {
+            guard case .failure(.failedToSignTransaction) = TLWalletCore.signTranscation(
+                keyStore: store, transaction: serialized, password: password, address: walletAddress, chainId
+            ) else {
+                return XCTFail("Malformed chain ID must not produce a signature: \(chainId)")
+            }
+            let transaction = TronTransaction()
+            transaction.rawData = rawData
+            guard case .failure(.failedToSignTransaction) = TLWalletCore.signTranscation(
+                keyStore: store, transaction: transaction, password: password, address: walletAddress, chainId
+            ) else {
+                return XCTFail("Malformed chain ID must not sign a transaction: \(chainId)")
+            }
+            XCTAssertEqual(transaction.signatureArray.count, 0)
+        }
+
+        let chainBytes = Data(repeating: 0x11, count: 32)
+        let chainId = "0x" + chainBytes.hexString
+        let chainDigest = (digest + chainBytes).sha256T()
+        guard case .success(let chainSignature) = TLWalletCore.signTranscation(
+            keyStore: store, transaction: serialized, password: password, address: walletAddress, chainId
+        ) else {
+            return XCTFail("Valid chain ID should still sign serialized data")
+        }
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: chainDigest, signature: chainSignature).addressData,
+                       expectedAddress)
+        let chainTransaction = TronTransaction()
+        chainTransaction.rawData = rawData
+        guard case .success = TLWalletCore.signTranscation(
+            keyStore: store, transaction: chainTransaction, password: password, address: walletAddress, chainId
+        ) else {
+            return XCTFail("Valid chain ID should still sign a transaction")
+        }
+        XCTAssertEqual(chainTransaction.signatureArray.count, 1)
+        let objectSignature = try XCTUnwrap(chainTransaction.signatureArray.firstObject as? Data)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: chainDigest, signature: objectSignature).addressData,
+                       expectedAddress)
     }
 
     func testSignTransactionAddsOneSignaturePerSigner() throws {
@@ -910,5 +1197,6063 @@ private final class MetricsDataSourceStub: TRXMetricsDataSource {
     func uploadStatisticalData(parameters: [String: Any], visible: Bool, success: @escaping (Bool, Bool) -> Void,
                                failure: @escaping () -> Void) {
         uploadCallCount += 1
+    }
+}
+
+import BigInt
+import CryptoSwift
+
+final class SingleTLCorePublicAPITests: XCTestCase {
+    func testWalletABIAndWeb3APIsAreAvailableFromTLCore() throws {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        let wallet = try Wallet(mnemonic: mnemonic)
+        let walletKey = try wallet.getKey(at: 0)
+        XCTAssertEqual(walletKey.address.data.count, 20)
+        XCTAssertEqual(walletKey.privateKey.hexString,
+                       "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
+        let keystoreKey = try KeystoreKey(password: "single-module-smoke", mnemonic: mnemonic)
+        XCTAssertEqual(keystoreKey.address.data.first, 0x41)
+
+        let encoder = ABIEncoder()
+        try encoder.encode(BigUInt(42))
+        XCTAssertEqual(encoder.data.count, 32)
+
+        let privateKey = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        try privateKey.verify()
+        XCTAssertTrue(privateKey.address.isValid)
+        XCTAssertNotNil(ABIv2Encoder.encode(types: [.uint(bits: 256)], values: [BigUInt(42) as AnyObject]))
+    }
+}
+
+final class DataPaddingBoundsTests: XCTestCase {
+    func testUnrepresentableTargetLengthsReturnNil() {
+        // Check the final target size even when the padding alone would fit Int.
+        let invalidLengths = [UInt64(Int.max) + 1, UInt64.max]
+        let inputs = [Data(), Data([0x01]), Data([0xaa, 0x12, 0x34, 0xbb])[1..<3]]
+        for input in inputs {
+            for length in invalidLengths {
+                for isNegative in [false, true] {
+                    XCTAssertNil(input.setLengthLeft(length, isNegative: isNegative))
+                    XCTAssertNil(input.setLengthRight(length, isNegative: isNegative))
+                }
+            }
+        }
+    }
+
+    func testExistingPaddingAndShorterLengthBehaviorIsPreserved() {
+        let inputs = [Data([0x12, 0x34]), Data([0xaa, 0x12, 0x34, 0xbb])[1..<3]]
+        for input in inputs {
+            XCTAssertEqual(input.setLengthLeft(4), Data([0x00, 0x00, 0x12, 0x34]))
+            XCTAssertEqual(input.setLengthRight(4), Data([0x12, 0x34, 0x00, 0x00]))
+            XCTAssertEqual(input.setLengthLeft(4, isNegative: true), Data([0xff, 0xff, 0x12, 0x34]))
+            XCTAssertEqual(input.setLengthRight(4, isNegative: true), Data([0x12, 0x34, 0xff, 0xff]))
+            for isNegative in [false, true] {
+                XCTAssertEqual(input.setLengthLeft(2, isNegative: isNegative), input)
+                XCTAssertEqual(input.setLengthRight(2, isNegative: isNegative), input)
+                XCTAssertNil(input.setLengthLeft(1, isNegative: isNegative))
+                XCTAssertNil(input.setLengthRight(1, isNegative: isNegative))
+                XCTAssertNil(input.setLengthLeft(0, isNegative: isNegative))
+                XCTAssertNil(input.setLengthRight(0, isNegative: isNegative))
+            }
+        }
+    }
+
+    func testEmptyDataPaddingIsPreserved() {
+        for isNegative in [false, true] {
+            XCTAssertEqual(Data().setLengthLeft(0, isNegative: isNegative), Data())
+            XCTAssertEqual(Data().setLengthRight(0, isNegative: isNegative), Data())
+            let expected = isNegative ? Data([0xff, 0xff]) : Data([0x00, 0x00])
+            XCTAssertEqual(Data().setLengthLeft(2, isNegative: isNegative), expected)
+            XCTAssertEqual(Data().setLengthRight(2, isNegative: isNegative), expected)
+        }
+    }
+}
+
+final class TwosComplementEncodingBoundaryTests: XCTestCase {
+    func testExactSignedBytesAndHistoricalEmptyZero() {
+        let cases: [(Int, [UInt8])] = [
+            (0, []), (1, [0x01]), (127, [0x7f]), (128, [0x00, 0x80]),
+            (255, [0x00, 0xff]), (256, [0x01, 0x00]),
+            (32767, [0x7f, 0xff]), (32768, [0x00, 0x80, 0x00]),
+            (-1, [0xff]), (-127, [0x81]), (-128, [0x80]),
+            (-129, [0xff, 0x7f]), (-255, [0xff, 0x01]), (-256, [0xff, 0x00]),
+            (-32768, [0x80, 0x00]), (-32769, [0xff, 0x7f, 0xff]),
+            (-65535, [0xff, 0x00, 0x01]), (-65536, [0xff, 0x00, 0x00])
+        ]
+        for (integer, bytes) in cases {
+            let value = BigInt(integer)
+            let encoded = value.toTwosComplement()
+            XCTAssertEqual(encoded, Data(bytes), "value: \(integer)")
+            XCTAssertEqual(BigInt.fromTwosComplement(data: encoded), value)
+        }
+    }
+
+    func testSignBoundariesThroughAndBeyondABIWidths() {
+        for byteCount in Array(1...32) + [33, 64] {
+            let limit = BigInt(1) << (byteCount * 8 - 1)
+            let zeros = Data(repeating: 0, count: byteCount - 1)
+            let ones = Data(repeating: 0xff, count: byteCount - 1)
+            let cases: [(BigInt, Data)] = [
+                (limit - 1, Data([0x7f]) + ones),
+                (limit, Data([0x00, 0x80]) + zeros),
+                (-limit, Data([0x80]) + zeros),
+                (-limit - 1, Data([0xff, 0x7f]) + ones)
+            ]
+            for (value, expected) in cases {
+                let encoded = value.toTwosComplement()
+                XCTAssertEqual(encoded, expected, "byteCount: \(byteCount), value: \(value)")
+                XCTAssertEqual(BigInt.fromTwosComplement(data: encoded), value)
+            }
+        }
+    }
+
+    func testFixedWidthABIBytesRemainUnchanged() {
+        let cases: [(Int, Data)] = [
+            (0, Data(repeating: 0, count: 32)),
+            (128, Data(repeating: 0, count: 31) + Data([0x80])),
+            (-128, Data(repeating: 0xff, count: 31) + Data([0x80])),
+            (-129, Data(repeating: 0xff, count: 31) + Data([0x7f])),
+            (-65535, Data(repeating: 0xff, count: 30) + Data([0x00, 0x01]))
+        ]
+        for (integer, expected) in cases {
+            XCTAssertEqual(BigInt(integer).abiEncode(bits: 256), expected)
+        }
+    }
+}
+
+final class TwosComplementDecodingBoundaryTests: XCTestCase {
+    func testEmptyDataDecodesAsZero() {
+        XCTAssertEqual(BigInt.fromTwosComplement(data: Data()), BigInt(0))
+        XCTAssertEqual(BigInt.fromTwosComplement(data: Data([0xa5]).dropFirst()), BigInt(0))
+        XCTAssertEqual(BigInt.fromTwosComplement(data: BigInt(0).toTwosComplement()), BigInt(0))
+    }
+
+    func testNonzeroIndexSlicesUseTheirOwnSignByte() {
+        let cases: [([UInt8], Int)] = [
+            ([0x00], 0), ([0x7f], 127), ([0x80], -128), ([0xff], -1),
+            ([0x00, 0x80], 128), ([0xff, 0x00], -256), ([0x80, 0x00], -32768)
+        ]
+        for (bytes, expected) in cases {
+            let storage = Data([0xa5, 0x5a] + bytes + [0x55])
+            let slice = storage[2..<(2 + bytes.count)]
+            XCTAssertEqual(slice.startIndex, 2)
+            XCTAssertEqual(BigInt.fromTwosComplement(data: slice), BigInt(expected))
+            XCTAssertEqual(BigInt.fromTwosComplement(data: slice),
+                           BigInt.fromTwosComplement(data: Data(slice)))
+        }
+    }
+
+    func testFixedWidthSignsRemainExactThrough256Bits() {
+        for byteCount in [1, 8, 32] {
+            let limit = BigInt(1) << (byteCount * 8 - 1)
+            let cases: [(Data, BigInt)] = [
+                (Data([0x80]) + Data(repeating: 0, count: byteCount - 1), -limit),
+                (Data([0x7f]) + Data(repeating: 0xff, count: byteCount - 1), limit - 1),
+                (Data(repeating: 0xff, count: byteCount), -1),
+                (Data(repeating: 0, count: byteCount), 0)
+            ]
+            for (bytes, expected) in cases {
+                let slice = (Data([0xa5]) + bytes).dropFirst()
+                XCTAssertEqual(slice.startIndex, 1)
+                XCTAssertEqual(BigInt.fromTwosComplement(data: slice), expected)
+                XCTAssertEqual(BigInt.fromTwosComplement(data: bytes), expected)
+            }
+        }
+    }
+}
+
+final class BigIntegerAmountFormattingBoundaryTests: XCTestCase {
+    func testNegativePrecisionReturnsNoNumericValueForUnsignedAndSignedAmounts() {
+        for amount in [BigUInt(0), BigUInt(1), BigUInt(1234567)] {
+            for invalid in [-1, Int.min] {
+                XCTAssertEqual(amount.string(unitDecimals: invalid, decimals: 6), "")
+                XCTAssertEqual(amount.string(unitDecimals: 6, decimals: invalid), "")
+                XCTAssertEqual(amount.string(unitDecimals: 6, decimals: invalid,
+                                             options: [.fallbackToScientific]), "")
+                for signed in [BigInt(amount), -BigInt(amount)] {
+                    XCTAssertEqual(signed.string(unitDecimals: invalid, decimals: 6), "")
+                    XCTAssertEqual(signed.string(unitDecimals: 6, decimals: invalid), "")
+                }
+            }
+        }
+    }
+
+    func testUnitOverloadsAlsoRejectNegativeDisplayPrecision() {
+        let units: [Web3Units] = [.wei, .mWei, .eth]
+        for unit in units {
+            for invalid in [-1, Int.min] {
+                XCTAssertEqual(BigUInt(1).string(units: unit, decimals: invalid), "")
+                XCTAssertEqual(BigInt(-1).string(units: unit, decimals: invalid), "")
+            }
+        }
+    }
+
+    func testValidPrecisionPreservesExactScalingAndTruncation() throws {
+        let cases: [(String, Int, Int, String)] = [
+            ("1234567", 6, 6, "1.234567"),
+            ("1234567", 6, 2, "1.23"),
+            ("1234500", 6, 6, "1.2345"),
+            ("1234567", 6, 0, "1"),
+            ("1", 6, 6, "0.000001"),
+            ("1", 6, 2, "0"),
+            ("7", 0, 18, "7"),
+            ("0", 6, 6, "0"),
+            ("1234567", 6, Int.max, "1.234567"),
+            ("9007199254740993000001", 6, 6, "9007199254740993.000001")
+        ]
+        for (input, unitDecimals, decimals, expected) in cases {
+            let amount = try XCTUnwrap(BigUInt(input))
+            XCTAssertEqual(amount.string(unitDecimals: unitDecimals, decimals: decimals), expected)
+            XCTAssertEqual(BigInt(amount).string(unitDecimals: unitDecimals, decimals: decimals), expected)
+            if amount != 0 {
+                XCTAssertEqual((-BigInt(amount)).string(unitDecimals: unitDecimals, decimals: decimals),
+                               "-" + expected)
+            }
+        }
+    }
+
+    func testFormattingOptionsAndScientificFallbackRemainCompatible() {
+        XCTAssertEqual(BigUInt(1234500).string(unitDecimals: 6, options: []), "1.234500")
+        XCTAssertEqual(BigUInt(1234500).string(unitDecimals: 6, decimalSeparator: ","), "1,2345")
+        XCTAssertEqual(BigUInt(12).string(unitDecimals: 18, decimals: 4,
+                                        options: [.fallbackToScientific]), "1.2e-17")
+        XCTAssertEqual(BigInt(-12).string(unitDecimals: 18, decimals: 4,
+                                         options: [.fallbackToScientific]), "-1.2e-17")
+        XCTAssertEqual(BigUInt(0).string(unitDecimals: 18, decimals: 4,
+                                       options: [.fallbackToScientific]), "0")
+        XCTAssertEqual(BigUInt(1).string(units: .eth), "0.000000000000000001")
+        XCTAssertEqual(BigInt(-1).string(units: .eth), "-0.000000000000000001")
+    }
+}
+
+final class NaturalUnitsConversionTests: XCTestCase {
+    func testDirectAmountParsingRejectsNegativePrecision() {
+        for input in ["0", "1", "123", "1.25"] {
+            for decimals in [-1, Int.min] {
+                XCTAssertNil(BigUInt(input, decimals: decimals))
+            }
+        }
+    }
+
+    func testDigitlessAmountsAreNotAcceptedAsZero() {
+        for input in ["", " ", "\t\r\n", ".", ",", " \t.\n", " , "] {
+            for decimals in [0, 6, 18] {
+                XCTAssertNil(BigUInt(input, decimals: decimals))
+            }
+            XCTAssertNil(BigUInt(input, units: .eth))
+            XCTAssertThrowsError(try NaturalUnits(input)) { error in
+                guard case NaturalUnits.Error.cannotConvert(let value) = error else {
+                    return XCTFail("Expected cannotConvert, got \(error)")
+                }
+                XCTAssertEqual(value, input)
+            }
+        }
+    }
+
+    func testZeroAndOmittedDecimalPartsRemainCompatible() throws {
+        let cases: [(String, Int, String)] = [
+            ("0", 0, "0"), (" 0 ", 6, "0"), ("0.000000", 6, "0"),
+            (".0", 6, "0"), ("0.", 0, "0"), ("0,", 0, "0"),
+            (".5", 6, "500000"), (",5", 6, "500000"),
+            ("1.", 6, "1000000"), ("1,", 6, "1000000"),
+            ("0001.2300", 6, "1230000")
+        ]
+        for (input, decimals, expected) in cases {
+            XCTAssertEqual(try XCTUnwrap(BigUInt(input, decimals: decimals)).description, expected)
+            XCTAssertEqual(try NaturalUnits(input).number(with: decimals).description, expected)
+        }
+        for input in ["1.2.3", "1,2.3", "1 2", "1e3", "-1", "0.0000001"] {
+            XCTAssertNil(BigUInt(input, decimals: 6))
+        }
+    }
+
+    func testInsufficientPrecisionThrowsInsteadOfReturningZero() throws {
+        for input in ["1.0000001", "0.0000001"] {
+            let amount = try NaturalUnits(input)
+            XCTAssertThrowsError(try amount.number(with: 6)) { error in
+                guard case NaturalUnits.Error.cannotConvert(let value) = error else {
+                    return XCTFail("Expected cannotConvert, got \(error)")
+                }
+                XCTAssertEqual(value, input)
+            }
+        }
+    }
+
+    func testNegativeIntegerAmountsAreRejectedAtInitialization() {
+        for input in [-1, Int.min] {
+            XCTAssertThrowsError(try NaturalUnits(input)) { error in
+                guard case NaturalUnits.Error.cannotConvert(let value) = error else {
+                    return XCTFail("Expected cannotConvert, got \(error)")
+                }
+                XCTAssertEqual(value, input.description)
+            }
+        }
+    }
+
+    func testNegativePrecisionIsRejectedEvenForZero() throws {
+        for input in [0, 1] {
+            let amount = try NaturalUnits(input)
+            for decimals in [-1, Int.min] {
+                XCTAssertThrowsError(try amount.number(with: decimals))
+            }
+        }
+    }
+
+    func testActualZeroRemainsAValidAmount() throws {
+        XCTAssertEqual(try NaturalUnits(0).number(with: 0), BigUInt(0))
+        XCTAssertEqual(try NaturalUnits("0").number(with: 6), BigUInt(0))
+        XCTAssertEqual(try NaturalUnits("0.000000").number(with: 6), BigUInt(0))
+    }
+
+    func testValidAmountsKeepExactScalingAndAcceptedFormats() throws {
+        let cases: [(String, Int, String)] = [
+            ("1.000001", 6, "1000001"),
+            ("0.000000000000000001", 18, "1"),
+            ("9007199254740993.000001", 6, "9007199254740993000001"),
+            ("2", 0, "2"),
+            (" 1,25 ", 6, "1250000")
+        ]
+        for (input, decimals, expected) in cases {
+            XCTAssertEqual(try NaturalUnits(input).number(with: decimals).description, expected)
+        }
+        XCTAssertEqual(try NaturalUnits(2).number(with: 6), BigUInt(2000000))
+    }
+
+    /// The app uses this optional parser directly, without the NaturalUnits wrapper.
+    func testSharedBigUIntParserRetainsItsFailureContract() throws {
+        XCTAssertNil(BigUInt("1.0000001", decimals: 6))
+        XCTAssertEqual(try XCTUnwrap(BigUInt("1.000001", decimals: 6)), BigUInt(1000001))
+    }
+}
+
+final class NEMSerializationBoundsTests: XCTestCase {
+    private let commonHeader = Array(Data(hex:
+        "01010000010000680403020120000000" +
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+        "080706050403020144332211"))
+
+    private func serialize(capacity: Int, offset: Int = 0,
+                           _ write: (inout nem_transaction_ctx, UnsafePointer<UInt8>?) -> Bool)
+        -> (success: Bool, offset: Int, bytes: [UInt8]) {
+        // Keep physical guard storage so a logical capacity overrun is observable.
+        let padding = 8
+        var storage = [UInt8](repeating: 0xa5, count: max(capacity, 128) + 2 * padding)
+        let signer = (0..<32).map { UInt8($0) }
+        var context = nem_transaction_ctx()
+        let success = storage.withUnsafeMutableBufferPointer { output in
+            signer.withUnsafeBufferPointer { key in
+                nem_transaction_start(&context, key.baseAddress,
+                                      output.baseAddress?.advanced(by: padding), capacity)
+                context.offset = offset
+                return write(&context, key.baseAddress)
+            }
+        }
+        XCTAssertTrue(storage.prefix(padding).allSatisfy { $0 == 0xa5 })
+        XCTAssertTrue(storage.dropFirst(padding + capacity).allSatisfy { $0 == 0xa5 },
+                      "Wrote beyond declared capacity \(capacity)")
+        return (success, context.offset, Array(storage.dropFirst(padding).prefix(capacity)))
+    }
+
+    private func writeCommon(_ context: inout nem_transaction_ctx,
+                             _ signer: UnsafePointer<UInt8>?) -> Bool {
+        return nem_transaction_write_common(&context, 0x0101, 0x68000001, 0x01020304,
+                                            signer, 0x0102030405060708, 0x11223344)
+    }
+
+    func testCommonHeaderRejectsEveryShortCapacityIncluding56Through59() {
+        for capacity in 0..<60 {
+            let result = serialize(capacity: capacity, writeCommon)
+            XCTAssertFalse(result.success, "Capacity \(capacity)")
+            XCTAssertEqual(result.offset, 0)
+            XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+        }
+    }
+
+    func testCommonHeaderKeepsGoldenEncodingAtExactCapacity() {
+        let result = serialize(capacity: 60, writeCommon)
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(result.offset, 60)
+        XCTAssertEqual(result.bytes, commonHeader)
+    }
+
+    func testAppendingChecksRemainingCapacityAndPreservesEarlierBytes() {
+        for capacity in [66, 67] {
+            let result = serialize(capacity: capacity, offset: 7, writeCommon)
+            XCTAssertEqual(result.success, capacity == 67)
+            XCTAssertEqual(result.offset, capacity == 67 ? 67 : 7)
+            XCTAssertTrue(result.bytes.prefix(7).allSatisfy { $0 == 0xa5 })
+            if capacity == 67 {
+                XCTAssertEqual(Array(result.bytes.dropFirst(7)), commonHeader)
+            } else {
+                XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+            }
+        }
+    }
+
+    func testMosaicCountsBothLengthPrefixesBeforeWriting() {
+        let golden = Array(Data(hex: "160000000a000000010000006101000000620100000000000000"))
+        for capacity in 0...26 {
+            let result = serialize(capacity: capacity) { context, _ in
+                nem_transaction_write_mosaic(&context, "a", "b", 1)
+            }
+            XCTAssertEqual(result.success, capacity == 26)
+            XCTAssertEqual(result.offset, capacity == 26 ? 26 : 0)
+            if capacity == 26 {
+                XCTAssertEqual(result.bytes, golden)
+            } else {
+                XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+            }
+        }
+    }
+
+    func testTransferNeverWritesPastCapacityAcrossSuccessiveBlocks() {
+        let recipient = String(repeating: "A", count: 40)
+        let golden = commonHeader + [0x28, 0, 0, 0] + [UInt8](repeating: 0x41, count: 40)
+            + [1, 0, 0, 0, 0, 0, 0, 0] + [0, 0, 0, 0]
+        for capacity in 0...116 {
+            let result = serialize(capacity: capacity) { context, signer in
+                nem_transaction_create_transfer(&context, 0x68, 0x01020304, signer,
+                                                0x0102030405060708, 0x11223344,
+                                                recipient, 1, nil, 0, false, 0)
+            }
+            XCTAssertEqual(result.success, capacity == 116)
+            // Earlier complete blocks may remain on failure; the failing block is untouched.
+            let written = capacity < 60 ? 0 : (capacity < 112 ? 60 : (capacity < 116 ? 112 : 116))
+            XCTAssertEqual(result.offset, written)
+            XCTAssertEqual(Array(result.bytes.prefix(written)), Array(golden.prefix(written)))
+            XCTAssertTrue(result.bytes.dropFirst(written).allSatisfy { $0 == 0xa5 })
+        }
+    }
+
+    func testInvalidOffsetCannotWrapTheCapacityCheck() {
+        // size_t is imported as Int; preserve the C SIZE_MAX - 3 bit pattern.
+        for offset in [65, Int(bitPattern: UInt.max - 3)] {
+            let result = serialize(capacity: 64, offset: offset, writeCommon)
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.offset, offset)
+            XCTAssertTrue(result.bytes.allSatisfy { $0 == 0xa5 })
+        }
+    }
+
+    func testBlobLengthMustFitIts32BitPrefixBeforeReadingInput() {
+        let result = serialize(capacity: 128) { context, signer in
+            var inner = nem_transaction_ctx()
+            inner.buffer = UnsafeMutablePointer(mutating: signer)
+            inner.offset = Int(UInt32.max) + 1
+            inner.size = inner.offset
+            // Deliberately oversized metadata must be rejected without reading the blob.
+            // Advertise enough capacity to isolate the uint32 length check.
+            context.size = Int.max
+            return nem_transaction_create_multisig(&context, 0x68, 0, signer, 0, 0, &inner)
+        }
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.offset, 60)
+        XCTAssertTrue(result.bytes.dropFirst(60).allSatisfy { $0 == 0xa5 })
+    }
+}
+
+final class EmbeddedWeb3GoldenTests: XCTestCase {
+    private let privateKeyData = Data(repeating: 0, count: 31) + Data([1])
+    private let messageHash = Data(repeating: 0x11, count: 32)
+
+    func testPrivateKeySignAndRecoverMatchesGoldenValues() throws {
+        let key = TLCore.PrivateKey(privateKeyData)
+        try key.verify()
+        XCTAssertEqual(key.publicKey.hex,
+                       "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+        XCTAssertEqual(key.address.address, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
+        let signature = try key.sign(hash: messageHash)
+        try signature.check()
+        XCTAssertEqual(signature.data.hex,
+                       "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01")
+        XCTAssertEqual(signature.v, 1)
+        XCTAssertEqual(signature.r.serialize().count, 32)
+        XCTAssertLessThanOrEqual(signature.s.serialize().count, 32)
+        XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: messageHash, signature: signature.data), key.address)
+        XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(messageHash, signature: signature.data.hex), key.address)
+    }
+
+    func testStatelessSigningPreservesGoldenOutputAndRejectsInvalidInputs() throws {
+        let signature = try TLCore.PrivateKey.sign(hash: messageHash, privateKey: privateKeyData)
+        XCTAssertEqual(signature.data.hex,
+                       "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01")
+        XCTAssertEqual(privateKeyData, Data(repeating: 0, count: 31) + Data([1]))
+        XCTAssertTrue(EthereumCrypto.verify(signature: signature.data, message: messageHash,
+                                           publicKey: EthereumCrypto.getPublicKey(from: privateKeyData)))
+        XCTAssertThrowsError(try TLCore.PrivateKey.sign(hash: Data(repeating: 0x11, count: 31),
+                                                       privateKey: privateKeyData))
+        XCTAssertThrowsError(try TLCore.PrivateKey.sign(hash: messageHash,
+                                                       privateKey: Data(repeating: 0, count: 32)))
+        XCTAssertThrowsError(try TLCore.PrivateKey.sign(hash: messageHash,
+                                                       privateKey: Data(repeating: 0xff, count: 32)))
+    }
+
+    func testPersonalMessageHashMatchesRawByteEnvelopes() throws {
+        let cases: [(Data, Data)] = [
+            (Data(), Data("\u{19}Ethereum Signed Message:\n0".utf8)),
+            (Data("hello".utf8), Data("\u{19}Ethereum Signed Message:\n5hello".utf8)),
+            (Data("你好".utf8), Data("\u{19}Ethereum Signed Message:\n6你好".utf8)),
+            (Data([0x00, 0xff]), Data("\u{19}Ethereum Signed Message:\n2".utf8) + Data([0x00, 0xff]))
+        ]
+        for (message, envelope) in cases {
+            // Use the separate C-backed Keccak implementation as the digest oracle.
+            XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(message),
+                           EthereumCrypto.hash(envelope))
+        }
+    }
+
+    func testPersonalMessageHashDoesNotReuseAnEmbeddedEnvelope() throws {
+        let message = Data("0ab".utf8)
+        // The valid envelope for "0ab" is also a 30-byte message starting with prefix + "30".
+        // The old prefix detection hashed these two different messages identically.
+        let wrappedMessage = Data("\u{19}Ethereum Signed Message:\n30ab".utf8)
+        XCTAssertEqual(wrappedMessage.count, 30)
+        let expectedMessageHash = EthereumCrypto.hash(wrappedMessage)
+        let expectedWrappedHash = EthereumCrypto.hash(
+            Data("\u{19}Ethereum Signed Message:\n30".utf8) + wrappedMessage
+        )
+
+        XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(message), expectedMessageHash)
+        XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(wrappedMessage), expectedWrappedHash)
+        XCTAssertNotEqual(try TLCore.Web3Utils.hashPersonalMessage(message),
+                          try TLCore.Web3Utils.hashPersonalMessage(wrappedMessage))
+
+        let buffer = Data([0xff]) + wrappedMessage
+        XCTAssertEqual(try TLCore.Web3Utils.hashPersonalMessage(buffer.dropFirst()), expectedWrappedHash)
+    }
+
+    func testPersonalRecoveryBindsSignatureToOriginalMessage() throws {
+        let key = TLCore.PrivateKey(privateKeyData)
+        let message = Data("0ab".utf8)
+        let wrappedMessage = Data("\u{19}Ethereum Signed Message:\n30ab".utf8)
+        let signature = try key.sign(hash: EthereumCrypto.hash(wrappedMessage))
+
+        XCTAssertEqual(try TLCore.Web3Utils.personalECRecover(message, signature: signature.data), key.address)
+        XCTAssertEqual(try TLCore.Web3Utils.personalECRecover(message.hex, signature: signature.data.hex), key.address)
+        XCTAssertNotEqual(try TLCore.Web3Utils.personalECRecover(wrappedMessage, signature: signature.data), key.address)
+        XCTAssertNotEqual(try TLCore.Web3Utils.personalECRecover(wrappedMessage.hex, signature: signature.data.hex), key.address)
+
+        let wrappedHash = EthereumCrypto.hash(
+            Data("\u{19}Ethereum Signed Message:\n30".utf8) + wrappedMessage
+        )
+        let wrappedSignature = try key.sign(hash: wrappedHash)
+        XCTAssertEqual(try TLCore.Web3Utils.personalECRecover(wrappedMessage, signature: wrappedSignature.data), key.address)
+        // Main-app callers that supply a digest keep their existing recovery behavior.
+        XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: wrappedHash, signature: wrappedSignature.data), key.address)
+        XCTAssertEqual(try TLCore.Web3Utils.getAddressFromSignature(wrappedHash, signature: wrappedSignature.data.hex), key.address)
+    }
+
+    func testABIv2EncodingAndDecodingMatchesGoldenValues() throws {
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("(address,uint256[])[]"),
+                       .array(type: .tuple(types: [.address, .array(type: .uint(bits: 256), length: 0)]), length: 0))
+        let embeddedType = try TLCore.ABIv2TypeParser.parseTypeString("uint256[][2]")
+        guard case let .array(type: embeddedInner, length: embeddedOuterLength) = embeddedType,
+              case let .array(type: embeddedLeaf, length: embeddedInnerLength) = embeddedInner,
+              case let .uint(bits: embeddedBits) = embeddedLeaf else {
+            return XCTFail("Embedded parser did not produce the expected nested array structure")
+        }
+        XCTAssertEqual(embeddedOuterLength, 2)
+        XCTAssertEqual(embeddedInnerLength, 0)
+        XCTAssertEqual(embeddedBits, 256)
+
+        let encoded = try XCTUnwrap(TLCore.ABIv2Encoder.encode(
+            types: [.uint(bits: 256)],
+            values: [BigUInt(42) as AnyObject]
+        ))
+        XCTAssertEqual(encoded.hex, String(repeating: "0", count: 62) + "2a")
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.uint(bits: 256)], data: encoded))
+        XCTAssertEqual(decoded.first as? BigUInt, BigUInt(42))
+    }
+
+    func testMergedHexHelpersPreserveBothRequiredBehaviors() throws {
+        XCTAssertEqual(Data([0x00, 0xff]).hex, "00ff")
+        XCTAssertEqual("TRON".hex, "54524f4e")
+        XCTAssertNil(Data.fromHex("0xabc"))
+        XCTAssertEqual(Data.fromHex("0x0abc"), Data([0x0a, 0xbc]))
+        XCTAssertThrowsError(try "0x".dataFromHex())
+    }
+
+    func testEventLogDecodesApprovedCompatibilityFields() throws {
+        let json = """
+        {
+          "address": "0x53066cddbc0099eb6c96785d9b3df2aaeede5da3",
+          "blockHash": "0x779c1f08f2b5252873f08fd6ec62d75bb54f956633bbb59d33bd7c49f1a3d389",
+          "blockNumber": "0x4f58f8",
+          "data": "0x0000000000000000000000000000000000000000000000004563918244f40000",
+          "logIndex": "0x84",
+          "removed": "0x0",
+          "topics": [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x000000000000000000000000efdcf2c36f3756ce7247628afdb632fa4ee12ec5",
+            "0x000000000000000000000000d5395c132c791a7f46fa8fc27f0ab6bacd824484"
+          ],
+          "transactionHash": "0x9f7bb2633abb3192d35f65e50a96f9f7ca878fa2ee7bf5d3fca489c0c60dc79a",
+          "transactionIndex": "0x99"
+        }
+        """
+        let log = try JSONDecoder().decode(TLCore.EventLog.self, from: try XCTUnwrap(json.data(using: .utf8)))
+        XCTAssertEqual(log.address.addressData.count, 20)
+        XCTAssertEqual(log.blockNumber, BigUInt(0x4f58f8))
+        XCTAssertEqual(log.logIndex, BigUInt(0x84))
+        XCTAssertGreaterThanOrEqual(log.topics.count, 2)
+        XCTAssertTrue(log.topics.allSatisfy { $0.count == 32 })
+    }
+
+    func testEventLogRemovedAcceptsBooleansAndPreservesLegacyValues() throws {
+        var object: [String: Any] = [
+            "address": "0x1111111111111111111111111111111111111111",
+            "blockHash": "0x" + String(repeating: "00", count: 32),
+            "blockNumber": "0x1", "data": "0x", "logIndex": "0x0",
+            "topics": [String](),
+            "transactionHash": "0x" + String(repeating: "00", count: 32),
+            "transactionIndex": "0x0"
+        ]
+        let cases: [(Any?, Bool)] = [
+            (true, true), (false, false),
+            ("0x1", true), ("0x0", false), ("0x2", false),
+            (nil, false), (NSNull(), false)
+        ]
+        for (removed, expected) in cases {
+            object["removed"] = removed
+            let data = try JSONSerialization.data(withJSONObject: object)
+            let log = try JSONDecoder().decode(TLCore.EventLog.self, from: data)
+            XCTAssertEqual(log.removed, expected, "removed: \(String(describing: removed))")
+        }
+        // Preserve the existing failure for malformed legacy hex strings.
+        object["removed"] = "not-hex"
+        let invalid = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(try JSONDecoder().decode(TLCore.EventLog.self, from: invalid))
+    }
+
+}
+
+final class EmbeddedABIGoldenTests: XCTestCase {
+    func testEmbeddedAddressAndIntegerEncodingMatchGoldenValues() throws {
+        let bytes = Data([0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d,
+                          0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf])
+        let address = TLCore.Address(data: bytes)
+        XCTAssertEqual(address.eip55String, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
+        let encoder = TLCore.ABIEncoder()
+        try encoder.encode(BigUInt(42))
+        XCTAssertEqual(encoder.data.hexString, String(repeating: "0", count: 62) + "2a")
+    }
+
+    func testEmbeddedFunctionDynamicValuesAndRLPMatchGoldenValues() throws {
+        let function = TLCore.Function(
+            name: "submit",
+            parameters: [.address, .uint(bits: 256), .bool, .string, .dynamicArray(.uint(bits: 256))]
+        )
+        XCTAssertEqual(function.description, "submit(address,uint256,bool,string,uint256[])")
+        XCTAssertEqual(TLCore.RLP.encode([Data([0x01]), Data([0x02, 0x03])] as [Any]),
+                       Data([0xc4, 0x01, 0x82, 0x02, 0x03]))
+    }
+
+    func testAddressEncodingAlwaysWrites32ByteSlot() throws {
+        let evm20 = Data(repeating: 0xaa, count: 20)
+        let expected = Data(repeating: 0, count: 12) + evm20
+
+        let encoder20 = ABIEncoder()
+        try encoder20.encode(Address(data: evm20))
+        XCTAssertEqual(encoder20.data, expected)
+
+        let encoder41 = ABIEncoder()
+        try encoder41.encode(Address(data: Data([0x41]) + evm20))
+        XCTAssertEqual(encoder41.data, expected)
+
+        let encoder00 = ABIEncoder()
+        try encoder00.encode(Address(data: Data([0x00]) + evm20))
+        XCTAssertEqual(encoder00.data, expected)
+
+        let encoder32 = ABIEncoder()
+        try encoder32.encode(Address(data: expected))
+        XCTAssertEqual(encoder32.data, expected)
+        XCTAssertEqual(encoder32.data.count, 32)
+    }
+
+    func testEmptyAddressEncodingThrowsWithoutWritingBytes() {
+        let encoder = ABIEncoder()
+        let invalidAddresses = [
+            Data(),
+            Data([0x01]),
+            Data([0x42]) + Data(repeating: 0xaa, count: 20),
+            Data(repeating: 0xaa, count: 19),
+            Data(repeating: 0xaa, count: 22),
+            Data([0x01]) + Data(repeating: 0, count: 31),
+            Data(repeating: 0xaa, count: 33),
+        ]
+
+        for rawAddress in invalidAddresses {
+            XCTAssertThrowsError(try encoder.encode(Address(data: rawAddress))) { error in
+                XCTAssertEqual(error as? ABIError, .invalidAddress)
+            }
+            XCTAssertTrue(encoder.data.isEmpty)
+        }
+    }
+
+    func testTransferFromDoesNotCollapseEmptyToSlot() {
+        let from = Address(data: Data(repeating: 0xaa, count: 20))
+        let encoder = ABIEncoder()
+        let function = Function(name: "transferFrom", parameters: [.address, .address, .uint(bits: 256)])
+        XCTAssertThrowsError(try encoder.encode(function: function, arguments: [from, Address(data: Data()), 12345])) { error in
+            XCTAssertEqual(error as? ABIError, .invalidAddress)
+        }
+    }
+
+    func testDynamicFixedArrayAndNestedTupleMatchSolidityABIEncode() throws {
+        // Single-value Solidity `abi.encode(T)` (ethers v6 AbiCoder, same layout as solc).
+        // Encoding `.tuple([value])` is that 1-tuple wrapper.
+        let string2 = ABIValue.array(.string, [.string("a"), .string("bc")])
+        let pair = ABIValue.tuple([.string("hello"), .uint(bits: 256, BigUInt(42))])
+        let cases: [(String, ABIValue, String)] = [
+            (
+                "string[2]",
+                string2,
+                "0000000000000000000000000000000000000000000000000000000000000020" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "0000000000000000000000000000000000000000000000000000000000000080" +
+                "0000000000000000000000000000000000000000000000000000000000000001" +
+                "6100000000000000000000000000000000000000000000000000000000000000" +
+                "0000000000000000000000000000000000000000000000000000000000000002" +
+                "6263000000000000000000000000000000000000000000000000000000000000"
+            ),
+            (
+                "(string,uint256)",
+                pair,
+                "0000000000000000000000000000000000000000000000000000000000000020" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "000000000000000000000000000000000000000000000000000000000000002a" +
+                "0000000000000000000000000000000000000000000000000000000000000005" +
+                "68656c6c6f000000000000000000000000000000000000000000000000000000"
+            ),
+            (
+                "(string[2],uint256)",
+                .tuple([string2, .uint(bits: 256, BigUInt(7))]),
+                "0000000000000000000000000000000000000000000000000000000000000020" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "0000000000000000000000000000000000000000000000000000000000000007" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "0000000000000000000000000000000000000000000000000000000000000080" +
+                "0000000000000000000000000000000000000000000000000000000000000001" +
+                "6100000000000000000000000000000000000000000000000000000000000000" +
+                "0000000000000000000000000000000000000000000000000000000000000002" +
+                "6263000000000000000000000000000000000000000000000000000000000000"
+            ),
+            (
+                "(string,uint256)[2]",
+                .array(.tuple([.string, .uint(bits: 256)]), [
+                    .tuple([.string("x"), .uint(bits: 256, BigUInt(1))]),
+                    .tuple([.string("yz"), .uint(bits: 256, BigUInt(2))])
+                ]),
+                "0000000000000000000000000000000000000000000000000000000000000020" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "00000000000000000000000000000000000000000000000000000000000000c0" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "0000000000000000000000000000000000000000000000000000000000000001" +
+                "0000000000000000000000000000000000000000000000000000000000000001" +
+                "7800000000000000000000000000000000000000000000000000000000000000" +
+                "0000000000000000000000000000000000000000000000000000000000000040" +
+                "0000000000000000000000000000000000000000000000000000000000000002" +
+                "0000000000000000000000000000000000000000000000000000000000000002" +
+                "797a000000000000000000000000000000000000000000000000000000000000"
+            ),
+        ]
+
+        for (name, value, expected) in cases {
+            let encoder = ABIEncoder()
+            try encoder.encode(.tuple([value]))
+            XCTAssertEqual(encoder.data.hexString, expected, name)
+        }
+    }
+
+    func testERC20ConvenienceEncodersThrowForInvalidAddress() throws {
+        let invalid = Address(data: Data())
+        let valid = Address(data: Data(repeating: 0xaa, count: 20))
+        let encoders: [() throws -> Data] = [
+            { try ERC20Encoder.encodeBalanceOf(address: invalid) },
+            { try ERC20Encoder.encodeAllowance(owner: valid, spender: invalid) },
+            { try ERC20Encoder.encodeTransfer(to: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeTransfer(from: valid, to: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeApprove(spender: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeDepositTRC20(spender: invalid, tokens: 1) },
+            { try ERC20Encoder.encodeExchangeBalance(contractOwner: valid, tokens: [invalid]) }
+        ]
+        for encode in encoders {
+            XCTAssertThrowsError(try encode()) { error in
+                XCTAssertEqual(error as? ABIError, .invalidAddress)
+            }
+        }
+        let addressWord = String(repeating: "0", count: 24) + String(repeating: "aa", count: 20)
+        let amountWord = String(repeating: "0", count: 63) + "1"
+        XCTAssertEqual(try ERC20Encoder.encodeApprove(spender: valid, tokens: 1).hexString,
+                       "095ea7b3" + addressWord + amountWord)
+        XCTAssertEqual(try ERC20Encoder.encodeTransfer(to: valid, tokens: 1).hexString,
+                       "a9059cbb" + addressWord + amountWord)
+        XCTAssertEqual(try ERC20Encoder.encodeTransfer(from: valid, to: valid, tokens: 1).hexString,
+                       "23b872dd" + addressWord + addressWord + amountWord)
+    }
+
+    func testERC20HelpersThrowOnOverflowInsteadOfTrappingOrReturningEmptyData() throws {
+        let valid = Address(data: Data(repeating: 0xaa, count: 20))
+        let overflow = BigUInt(1) << 256
+        let encoders: [() throws -> Data] = [
+            { try ERC20Encoder.encodeOwnerOf(tokenId: overflow) },
+            { try ERC20Encoder.encodeTransfer(to: valid, tokens: overflow) },
+            { try ERC20Encoder.encodeApprove(spender: valid, tokens: overflow) },
+            { try ERC20Encoder.encodeDepositTRC10(tokenId: overflow, tokens: 1) },
+            { try ERC20Encoder.encodeWithdrawTRC10(tokenId: 1, tokens: overflow) },
+            { try ERC20Encoder.encodeWithdrawTRC20(tokens: overflow) },
+            { try ERC20Encoder.encodetTrxToTokenSwapInput(minTokens: overflow, deadline: 1) },
+            { try ERC20Encoder.encodeTokenToTokenSwapInput(tokensSold: overflow, minTokensBought: 1,
+                                                         minTrxBought: 1, deadline: 1, tokenAddr: valid) }
+        ]
+        for encode in encoders {
+            XCTAssertThrowsError(try encode()) { error in
+                XCTAssertEqual(error as? ABIError, .integerOverflow)
+            }
+        }
+        XCTAssertEqual(try ERC20Encoder.encodeOwnerOf(tokenId: overflow - 1).hexString,
+                       "6352211e" + String(repeating: "f", count: 64))
+    }
+
+    func testSwapHelperRejectsInvalidTupleArguments() throws {
+        let valid = Address(data: Data(repeating: 0xaa, count: 20))
+        let cases: [([Any], ABIError)] = [
+            ([BigUInt(1), BigUInt(2), valid], .invalidNumberOfArguments),
+            ([BigUInt(1), BigUInt(2), valid, BigUInt(3), BigUInt(4)], .invalidNumberOfArguments),
+            (["invalid", BigUInt(2), valid, BigUInt(3)], .invalidArgumentType),
+            ([-1, BigUInt(2), valid, BigUInt(3)], .integerOverflow)
+        ]
+        for (tuple, expected) in cases {
+            XCTAssertThrowsError(try ERC20Encoder.encodeSwapExactInput(path: [valid], poolVersion: ["v1"],
+                versionLen: [1], fees: [0], tuple: tuple)) { error in
+                XCTAssertEqual(error as? ABIError, expected)
+            }
+        }
+    }
+
+    func testERC20FixedSelectorsRemainNonThrowing() {
+        XCTAssertEqual(ERC20Encoder.encodeTotalSupply().hexString, "18160ddd")
+        XCTAssertEqual(ERC20Encoder.encodeName().hexString, "06fdde03")
+        XCTAssertEqual(ERC20Encoder.encodeSymbol().hexString, "95d89b41")
+        XCTAssertEqual(ERC20Encoder.encodeDecimals().hexString, "313ce567")
+        XCTAssertEqual(ERC20Encoder.encodeDepositTRX().count, 4)
+        XCTAssertEqual(ERC20Encoder.encodeWithdrawTRX().count, 4)
+        XCTAssertEqual(ERC20Encoder.encodeWithdrawFee().count, 4)
+    }
+
+    func testEmbeddedTronDerivationAndBase58MatchGoldenValues() throws {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        let key = try TLCore.Wallet(mnemonic: mnemonic).getKey(at: 0)
+        XCTAssertEqual(key.privateKey.hexString,
+                       "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
+        XCTAssertEqual(key.address.data.count, 20)
+        let keystoreKey = try TLCore.KeystoreKey(
+            password: "baseline-password",
+            mnemonic: mnemonic
+        )
+        XCTAssertEqual(keystoreKey.address.data.count, 21)
+        XCTAssertEqual(keystoreKey.address.data.first, 0x41)
+        XCTAssertEqual(Data(keystoreKey.address.data.dropFirst()), key.address.data)
+        let zeroAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+        var zeroAddressData = Data([0x41])
+        zeroAddressData.append(Data(repeating: 0, count: 20))
+        XCTAssertEqual(zeroAddress.base58CheckData, zeroAddressData)
+        XCTAssertEqual(String(base58CheckEncoding: zeroAddressData), zeroAddress)
+    }
+
+    func testProtobufAddressRetainsBehaviorUnderSwiftRename() {
+        let proto = TronProtoAddress()
+        proto.host = Data([127, 0, 0, 1])
+        proto.port = 18888
+        XCTAssertEqual(proto.host, Data([127, 0, 0, 1]))
+        XCTAssertEqual(proto.port, 18888)
+    }
+}
+final class ABIValueBoundsTests: XCTestCase {
+    private func encoded(_ value: ABIValue) throws -> Data {
+        let encoder = ABIEncoder()
+        try encoder.encode(value)
+        return encoder.data
+    }
+
+    func testEveryIntegerWidthPreservesBoundaryWordsAndRejectsOverflow() throws {
+        for byteCount in 1...32 {
+            let bits = byteCount * 8
+            let unsignedMaximum = (BigUInt(1) << bits) - 1
+            let signedLimit = BigInt(1) << (bits - 1)
+            let signedMaximum = signedLimit - 1
+            let signedMinimum = -signedLimit
+            let unsignedWord = Data(repeating: 0, count: 32 - byteCount) + Data(repeating: 0xff, count: byteCount)
+            let signedMaxWord = Data(repeating: 0, count: 32 - byteCount)
+                + Data([0x7f]) + Data(repeating: 0xff, count: byteCount - 1)
+            let signedMinWord = Data(repeating: 0xff, count: 32 - byteCount)
+                + Data([0x80]) + Data(repeating: 0, count: byteCount - 1)
+
+            XCTAssertEqual(try encoded(ABIValue(BigUInt(0), type: .uint(bits: bits))), Data(repeating: 0, count: 32))
+            XCTAssertEqual(try encoded(ABIValue(unsignedMaximum, type: .uint(bits: bits))), unsignedWord)
+            XCTAssertEqual(try encoded(ABIValue(signedMaximum, type: .int(bits: bits))), signedMaxWord)
+            XCTAssertEqual(try encoded(ABIValue(signedMinimum, type: .int(bits: bits))), signedMinWord)
+            XCTAssertThrowsError(try ABIValue(unsignedMaximum + 1, type: .uint(bits: bits)))
+            XCTAssertThrowsError(try ABIValue(signedMaximum + 1, type: .int(bits: bits)))
+            XCTAssertThrowsError(try ABIValue(signedMinimum - 1, type: .int(bits: bits)))
+            XCTAssertThrowsError(try encoded(.uint(bits: bits, unsignedMaximum + 1)))
+            XCTAssertThrowsError(try encoded(.int(bits: bits, signedMaximum + 1)))
+            XCTAssertThrowsError(try encoded(.int(bits: bits, signedMinimum - 1)))
+        }
+        XCTAssertThrowsError(try ABIValue(256, type: .uint(bits: 8)))
+        XCTAssertThrowsError(try ABIValue(UInt(256), type: .uint(bits: 8)))
+        XCTAssertThrowsError(try ABIValue(-1, type: .uint(bits: 8)))
+        XCTAssertThrowsError(try ABIValue(128, type: .int(bits: 8)))
+    }
+
+    func testInvalidDeclarationsFailBeforeShiftsOrPadding() {
+        for bits in [Int.min, -8, 0, 7, 9, 257, Int.max] {
+            XCTAssertThrowsError(try ABIValue(BigUInt(0), type: .uint(bits: bits)))
+            XCTAssertThrowsError(try encoded(.int(bits: bits, 0)))
+            XCTAssertThrowsError(try ABIValue([] as [Any], type: .dynamicArray(.uint(bits: bits))))
+        }
+        for length in [Int.min, 0, 33, Int.max] {
+            XCTAssertThrowsError(try ABIValue(Data(), type: .bytes(length)))
+        }
+        XCTAssertThrowsError(try ABIValue([] as [Any], type: .array(.bool, -1)))
+        for scale in [0, 81, Int.max] {
+            XCTAssertThrowsError(try ABIValue(BigInt(0), type: .fixed(128, scale)))
+            XCTAssertThrowsError(try encoded(.ufixed(bits: 128, scale, 0)))
+        }
+    }
+
+    func testFixedPointUsesTheDeclaredBoundsForItsScaledInteger() throws {
+        XCTAssertEqual(try encoded(ABIValue(BigInt(-128), type: .fixed(8, 2))),
+                       Data(repeating: 0xff, count: 31) + Data([0x80]))
+        XCTAssertEqual(try encoded(ABIValue(BigUInt(255), type: .ufixed(8, 2))),
+                       Data(repeating: 0, count: 31) + Data([0xff]))
+        XCTAssertThrowsError(try ABIValue(BigInt(128), type: .fixed(8, 2)))
+        XCTAssertThrowsError(try encoded(.fixed(bits: 8, 2, -129)))
+        XCTAssertThrowsError(try ABIValue(BigUInt(256), type: .ufixed(8, 2)))
+    }
+
+    func testFixedBytesKeepRightPaddingAndTheirDeclaredArrayType() throws {
+        for length in 1...32 {
+            for count in [0, 1, length] {
+                let bytes = Data(repeating: 0xab, count: count)
+                let value = try ABIValue(bytes, type: .bytes(length))
+                XCTAssertEqual(value.type, .bytes(length))
+                XCTAssertEqual(value.length, 32)
+                XCTAssertEqual(try encoded(value), bytes + Data(repeating: 0, count: 32 - count))
+            }
+            XCTAssertThrowsError(try ABIValue(Data(repeating: 1, count: length + 1), type: .bytes(length)))
+        }
+
+        let bytes: [Any] = [Data([0xaa]), Data()]
+        let value = try ABIValue(bytes, type: .array(.bytes(2), 2))
+        XCTAssertEqual(try encoded(value), Data([0xaa]) + Data(repeating: 0, count: 63))
+        XCTAssertThrowsError(try encoded(.bytes(Data())))
+        XCTAssertThrowsError(try encoded(.bytes(Data(repeating: 1, count: 33))))
+
+        let dynamic = ABIEncoder()
+        try dynamic.encode(Data(repeating: 0xab, count: 33), static: false)
+        XCTAssertEqual(dynamic.data.count, 96)
+        XCTAssertEqual(dynamic.data.prefix(32), Data(repeating: 0, count: 31) + Data([33]))
+    }
+
+    func testFixedArrayAndTupleCountsMustMatchAtEveryLevel() throws {
+        let invalidArrays: [[Any]] = [[1], [1, 2, 3]]
+        for values in invalidArrays {
+            XCTAssertThrowsError(try ABIValue(values, type: .array(.uint(bits: 8), 2))) { error in
+                XCTAssertEqual(error as? ABIError, .invalidNumberOfArguments)
+            }
+            XCTAssertThrowsError(try ABIValue(values, type: .tuple([.uint(bits: 8), .uint(bits: 8)]))) { error in
+                XCTAssertEqual(error as? ABIError, .invalidNumberOfArguments)
+            }
+            XCTAssertThrowsError(try ABIValue([values] as [Any], type: .dynamicArray(.array(.uint(bits: 8), 2))))
+        }
+        let values: [Any] = [1, 2]
+        let array = try ABIValue(values, type: .array(.uint(bits: 8), 2))
+        XCTAssertEqual(try encoded(array),
+                       Data(repeating: 0, count: 31) + Data([1]) + Data(repeating: 0, count: 31) + Data([2]))
+    }
+
+    func testDirectEnumValuesFailBeforeWritingTupleOrFunctionData() {
+        let invalidValues: [ABIValue] = [
+            .tuple([.uint(bits: 256, 1), .uint(bits: 8, 256)]),
+            .dynamicArray(.uint(bits: 8), [.uint(bits: 8, 1), .uint(bits: 8, 256)]),
+            .array(.uint(bits: 8), [.bool(true)]),
+            .function(Function(name: "f", parameters: [.uint(bits: 8)]), [])
+        ]
+        for value in invalidValues {
+            let encoder = ABIEncoder()
+            encoder.data = Data([0xde, 0xad])
+            XCTAssertThrowsError(try encoder.encode(value))
+            XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
+        }
+
+        let encoder = ABIEncoder()
+        encoder.data = Data([0xde, 0xad])
+        XCTAssertThrowsError(try encoder.encode(function: Function(name: "f", parameters: [.uint(bits: 8)]), arguments: [256]))
+        XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
+        XCTAssertThrowsError(try encoder.encode(tuple: [.uint(bits: 256, 1), .bytes(Data(repeating: 1, count: 33))]))
+        XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
+    }
+
+    func testRawSignedEncoderRejectsOverflowAndNormalizesNegativeZero() throws {
+        let limit = BigInt(1) << 255
+        for value in [limit, -limit - 1] {
+            let encoder = ABIEncoder()
+            XCTAssertThrowsError(try encoder.encode(value))
+            XCTAssertTrue(encoder.data.isEmpty)
+        }
+        var negativeZero = BigInt(0)
+        negativeZero.sign = .minus
+        let encoder = ABIEncoder()
+        try encoder.encode(negativeZero)
+        XCTAssertEqual(encoder.data, Data(repeating: 0, count: 32))
+    }
+
+    func testPermit2MaximaAndTRC20TransferKeepTheirCalldata() throws {
+        let address = Address(data: Data(repeating: 0xaa, count: 20))
+        let amount = (BigUInt(1) << 160) - 1
+        let expiration = (BigUInt(1) << 48) - 1
+        let function = Function(name: "approve", parameters: [.address, .address, .uint(bits: 160), .uint(bits: 48)])
+        let encoder = ABIEncoder()
+        try encoder.encode(function: function, arguments: [address, address, amount, expiration])
+        XCTAssertEqual(encoder.data.count, 132)
+        XCTAssertEqual(encoder.data.subdata(in: 68..<100), Data(repeating: 0, count: 12) + Data(repeating: 0xff, count: 20))
+        XCTAssertEqual(encoder.data.subdata(in: 100..<132), Data(repeating: 0, count: 26) + Data(repeating: 0xff, count: 6))
+        XCTAssertThrowsError(try ABIValue(amount + 1, type: .uint(bits: 160)))
+        XCTAssertThrowsError(try ABIValue(expiration + 1, type: .uint(bits: 48)))
+        XCTAssertEqual(try ERC20Encoder.encodeTransfer(to: address, tokens: 1).hexString,
+                       "a9059cbb" + String(repeating: "0", count: 24) + String(repeating: "aa", count: 20)
+                       + String(repeating: "0", count: 63) + "1")
+    }
+}
+
+final class DerivationPathIndexTests: XCTestCase {
+    /// Public BIP39 test vector.
+    private let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+    func testIndexRejectsValuesOutsideUInt32WithoutTrapping() {
+        for value in [Int.min, -1, 0x1_0000_0000, Int.max] {
+            for hardened in [false, true] {
+                XCTAssertNil(DerivationPath.Index(value, hardened: hardened).derivationIndex)
+            }
+        }
+
+        var index = DerivationPath.Index(0)
+        index.value = -1
+        XCTAssertNil(index.derivationIndex)
+    }
+
+    func testBoundaryIndicesPreserveTheirEncodedChildNumbers() {
+        let cases: [(Int, Bool, UInt32)] = [
+            (0, false, 0),
+            (0, true, 0x80000000),
+            (0x7fffffff, false, 0x7fffffff),
+            (0x7fffffff, true, 0xffffffff),
+            (0x80000000, false, 0x80000000),
+            (0x80000000, true, 0x80000000),
+            (0xffffffff, false, 0xffffffff),
+            (0xffffffff, true, 0xffffffff)
+        ]
+        for (value, hardened, expected) in cases {
+            let index = DerivationPath.Index(value, hardened: hardened)
+            XCTAssertEqual(index.derivationIndex, expected)
+            let parsed = DerivationPath("m/" + index.description)
+            XCTAssertEqual(parsed?.indices.first?.derivationIndex, expected)
+        }
+    }
+
+    func testPathParserRejectsNegativeAndUnrepresentableComponents() {
+        let values = ["-1", String(Int.min), "4294967296", String(Int.max), "9223372036854775808"]
+        for value in values {
+            for suffix in ["", "'"] {
+                XCTAssertNil(DerivationPath("m/\(value)\(suffix)/0"))
+                XCTAssertNil(DerivationPath("m/44'/195'/0'/0/\(value)\(suffix)"))
+            }
+        }
+    }
+
+    func testWalletRejectsInvalidPathsAndPlaceholderIndicesWithoutFallback() throws {
+        let wallet = try TLCore.Wallet(mnemonic: mnemonic, path: "m/44'/195'/0'/0/x")
+        for index in [-1, 0x1_0000_0000, Int.max] {
+            XCTAssertThrowsError(try wallet.getKey(at: index)) { error in
+                guard case TLCore.Wallet.Error.invalidDerivationPath = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+
+        for component in ["-1", "-1'", "4294967296", "4294967296'"] {
+            wallet.path = "m/44'/195'/0'/0/" + component
+            XCTAssertThrowsError(try wallet.getKey(at: 0)) { error in
+                guard case TLCore.Wallet.Error.invalidDerivationPath = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+
+        // Failed derivations must not alter the wallet's subsequent valid result.
+        wallet.path = TLCore.Wallet.defaultPath
+        XCTAssertEqual(try wallet.getKey(at: 0).privateKey.hexString,
+                       "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
+    }
+
+    func testLegacyEncodedHardenedPathsPreserveDerivedKeys() throws {
+        let paths = [
+            ("m/44'/195'/2147483648'/0/0", "m/44'/195'/0'/0/0"),
+            ("m/44'/195'/0'/0/2147483648", "m/44'/195'/0'/0/0'"),
+            ("m/44'/195'/0'/0/4294967295", "m/44'/195'/0'/0/2147483647'"),
+            ("m/44'/195'/0'/0/4294967295'", "m/44'/195'/0'/0/2147483647'")
+        ]
+        let wallet = try TLCore.Wallet(mnemonic: mnemonic)
+        for (legacy, canonical) in paths {
+            wallet.path = canonical
+            let expected = try wallet.getKey(at: 0)
+            wallet.path = legacy
+            let actual = try wallet.getKey(at: 0)
+            XCTAssertEqual(actual.privateKey, expected.privateKey)
+            XCTAssertEqual(actual.publicKey, expected.publicKey)
+            XCTAssertEqual(DerivationPath(legacy)?.description, legacy)
+        }
+
+        wallet.path = "m/44'/195'/0'/0/x"
+        let placeholderKey = try wallet.getKey(at: 0xffffffff)
+        wallet.path = "m/44'/195'/0'/0/2147483647'"
+        XCTAssertEqual(placeholderKey.privateKey, try wallet.getKey(at: 0).privateKey)
+    }
+}
+
+final class EmbeddedKeystoreTests: XCTestCase {
+    /// BIP39 test vector.
+    private let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    private let password = "keystore-password"
+
+    private var keyDirectory: URL!
+    private var shouldRemoveKeyDirectory = true
+
+    override func setUp() {
+        super.setUp()
+        keyDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        shouldRemoveKeyDirectory = true
+    }
+
+    override func tearDown() {
+        if shouldRemoveKeyDirectory {
+            try? FileManager.default.removeItem(at: keyDirectory)
+        }
+        super.tearDown()
+    }
+
+    func testPrivateKeyExportSurvivesHDNodeCleanup() throws {
+        let expected = "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28"
+        let wallet = try Wallet(mnemonic: mnemonic)
+        var key: HDKey? = try wallet.getKey(at: 0)
+        weak var releasedKey = key
+        let privateKey = try XCTUnwrap(key?.privateKey)
+        let publicKey = try XCTUnwrap(key?.publicKey)
+        let address = try XCTUnwrap(key?.address)
+        key = nil
+
+        XCTAssertNil(releasedKey)
+        XCTAssertEqual(privateKey.hexString, expected)
+        XCTAssertEqual(Data(try KeystoreKey.decodeAddress(from: publicKey).data.dropFirst()), address.data)
+        XCTAssertEqual(try wallet.getKey(at: 0).privateKey, privateKey)
+
+        let hdStore = try KeyStore(keyDirectory: keyDirectory)
+        _ = try hdStore.import(mnemonic: mnemonic, encryptPassword: password)
+        let rawStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("raw"))
+        let rawKey = try KeystoreKey(password: password, key: privateKey)
+        _ = try rawStore.import(json: JSONEncoder().encode(rawKey), password: password, newPassword: password)
+
+        for store in [hdStore, rawStore] {
+            let account = try XCTUnwrap(store.accounts.first)
+            let walletAddress = account.address.data.addressString
+            guard case .success(let exported) = TLWalletCore.walletExportPrivateKey(
+                keyStore: store, password: password, address: walletAddress) else {
+                return XCTFail("Expected a successful private key export")
+            }
+            XCTAssertEqual(exported, expected)
+            guard case .failure(.failedToExportPrivateKey) = TLWalletCore.walletExportPrivateKey(
+                keyStore: store, password: "wrong-password", address: walletAddress) else {
+                return XCTFail("Expected a failed export for the wrong password")
+            }
+            guard case .failure(.accountNotFound) = TLWalletCore.walletExportPrivateKey(
+                keyStore: store, password: password, address: "") else {
+                return XCTFail("Expected an account-not-found failure")
+            }
+        }
+    }
+
+    func testUnavailableDirectoryIsRetriedInsteadOfFailingInitialization() throws {
+        let fileManager = FileManager.default
+        func assertStorageUnavailable(_ store: KeyStore) {
+            XCTAssertTrue(store.accounts.isEmpty)
+            XCTAssertThrowsError(try store.import(mnemonic: mnemonic, encryptPassword: "other-password")) { error in
+                XCTAssertEqual((error as? CocoaError)?.code, .fileReadUnknown)
+            }
+        }
+
+        // A path that cannot become a directory must not fail initialization or allow writes.
+        try Data().write(to: keyDirectory)
+        let blocked = try KeyStore(keyDirectory: keyDirectory)
+        assertStorageUnavailable(blocked)
+        try fileManager.removeItem(at: keyDirectory)
+        let account = try blocked.import(mnemonic: mnemonic, encryptPassword: password)
+        XCTAssertEqual(blocked.accounts.count, 1)
+
+        // An unlistable directory hides nothing permanently and still blocks duplicate imports.
+        try fileManager.setAttributes([.posixPermissions: 0], ofItemAtPath: keyDirectory.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: keyDirectory.path) }
+        let unlistable = try KeyStore(keyDirectory: keyDirectory)
+        assertStorageUnavailable(unlistable)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: keyDirectory.path)
+        XCTAssertEqual(unlistable.account(for: account.address)?.url, account.url)
+        XCTAssertEqual(try unlistable.exportMnemonic(account: account, password: password), mnemonic)
+        XCTAssertThrowsError(try unlistable.import(mnemonic: mnemonic, encryptPassword: "other-password")) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else {
+                return XCTFail("Expected accountAlreadyExists, got \(error)")
+            }
+        }
+    }
+
+    func testKeyFilesStayProtectedAcrossReloadAndAtomicUpdates() throws {
+        let fileManager = FileManager.default
+        let documents = try fileManager.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let directory = documents.appendingPathComponent(UUID().uuidString)
+        defer { try? fileManager.removeItem(at: directory) }
+        keyDirectory = directory.appendingPathComponent("keys")
+
+        func assertProtected(_ url: URL) throws {
+            #if !targetEnvironment(simulator)
+            let attributes = try fileManager.attributesOfItem(atPath: url.path)
+            XCTAssertEqual(attributes[.protectionKey] as? String, FileProtectionType.complete.rawValue)
+            #endif
+            let freshURL = URL(fileURLWithPath: url.path)
+            XCTAssertEqual(try freshURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        }
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        XCTAssertEqual(try keyDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        try assertProtected(account.url)
+
+        // Simulate a legacy file; migration must only change metadata, never key bytes.
+        try fileManager.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: account.url.path)
+        var legacyURL = account.url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = false
+        try legacyURL.setResourceValues(values)
+        let originalJSON = try Data(contentsOf: account.url)
+        // A readable file whose metadata cannot change must still block duplicate imports.
+        try fileManager.setAttributes([.immutable: true], ofItemAtPath: account.url.path)
+        do {
+            defer { try? fileManager.setAttributes([.immutable: false], ofItemAtPath: account.url.path) }
+            var immutableURL = URL(fileURLWithPath: account.url.path)
+            values.isExcludedFromBackup = true
+            XCTAssertThrowsError(try immutableURL.setResourceValues(values))
+            let metadataUnavailable = try KeyStore(keyDirectory: keyDirectory)
+            XCTAssertEqual(metadataUnavailable.account(for: account.address)?.url, account.url)
+            XCTAssertEqual(try metadataUnavailable.exportMnemonic(account: account, password: password), mnemonic)
+            XCTAssertThrowsError(try metadataUnavailable.import(mnemonic: mnemonic, encryptPassword: "duplicate-password")) { error in
+                guard case KeyStore.Error.accountAlreadyExists = error else {
+                    return XCTFail("Expected accountAlreadyExists, got \(error)")
+                }
+            }
+            XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: keyDirectory.path).count, 1)
+            // Retrying known metadata failures must not undo an explicit account deletion.
+            var copiedAccount = account
+            copiedAccount.url = keyDirectory.appendingPathComponent("metadata-copy.json")
+            try metadataUnavailable.addAccount(account: copiedAccount)
+            try metadataUnavailable.delete(account: copiedAccount, password: password)
+            XCTAssertTrue(metadataUnavailable.accounts.isEmpty)
+            XCTAssertNil(metadataUnavailable.key(for: account.address))
+            XCTAssertEqual(try Data(contentsOf: account.url), originalJSON)
+        }
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try Data(contentsOf: account.url), originalJSON)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: password), mnemonic)
+        try assertProtected(account.url)
+
+        // A transient read failure must not permanently remove the account from the cache.
+        try fileManager.setAttributes([.posixPermissions: 0], ofItemAtPath: account.url.path)
+        let unavailable = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertTrue(unavailable.accounts.isEmpty)
+        XCTAssertThrowsError(try unavailable.import(mnemonic: mnemonic, encryptPassword: "duplicate-password")) { error in
+            XCTAssertEqual((error as? CocoaError)?.code, .fileReadUnknown)
+        }
+        let stagedPassword = "staged-keystore-password"
+        try unavailable.addKey(key: KeystoreKey(password: stagedPassword, mnemonic: mnemonic))
+        var unavailableAccount = account
+        unavailableAccount.url = keyDirectory.appendingPathComponent("pending-account.json")
+        XCTAssertThrowsError(try unavailable.addAccount(account: unavailableAccount))
+        XCTAssertFalse(fileManager.fileExists(atPath: unavailableAccount.url.path))
+        // Even a cached account cannot be deleted while another file's identity is unknown.
+        let readableCopyURL = keyDirectory.appendingPathComponent("readable-copy.json")
+        try originalJSON.write(to: readableCopyURL, options: [.completeFileProtection])
+        do {
+            defer { try? fileManager.removeItem(at: readableCopyURL) }
+            let partiallyAvailable = try KeyStore(keyDirectory: keyDirectory)
+            let loadedAccount = try XCTUnwrap(partiallyAvailable.account(for: account.address))
+            XCTAssertThrowsError(try partiallyAvailable.delete(account: loadedAccount, password: password)) { error in
+                XCTAssertEqual((error as? CocoaError)?.code, .fileReadUnknown)
+            }
+            XCTAssertTrue(fileManager.fileExists(atPath: readableCopyURL.path))
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: account.url.path)
+        XCTAssertEqual(unavailable.accounts.count, 1)
+        XCTAssertEqual(unavailable.account(for: account.address)?.url, account.url)
+        XCTAssertEqual(try unavailable.exportMnemonic(account: account, password: stagedPassword), mnemonic)
+        try fileManager.createDirectory(at: keyDirectory.appendingPathComponent("ignored-directory"), withIntermediateDirectories: true, attributes: nil)
+
+        let externalDirectory = directory.appendingPathComponent("external")
+        try fileManager.createDirectory(at: externalDirectory, withIntermediateDirectories: true, attributes: nil)
+        var externalAccount = account
+        externalAccount.url = externalDirectory
+        // Replacing a directory fails before committing either the file or cached password.
+        XCTAssertThrowsError(try reloaded.update(account: externalAccount, password: password, newPassword: "failed-password"))
+        XCTAssertEqual(try Data(contentsOf: account.url), originalJSON)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: password), mnemonic)
+        XCTAssertFalse(try fileManager.contentsOfDirectory(atPath: directory.path).contains { $0.hasPrefix(".keystore-") })
+
+        let newPassword = "updated-keystore-password"
+        try reloaded.update(account: account, password: password, newPassword: newPassword)
+        try assertProtected(account.url)
+        let updated = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(updated.accounts.first?.address, account.address)
+        XCTAssertEqual(try updated.exportMnemonic(account: account, password: newPassword), mnemonic)
+        XCTAssertThrowsError(try updated.exportMnemonic(account: account, password: password))
+
+        // Public Account.url may point outside keyDirectory; only the key file is excluded.
+        externalAccount.url = externalDirectory.appendingPathComponent("key.json")
+        try updated.addAccount(account: externalAccount)
+        try assertProtected(externalAccount.url)
+        let externalJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: externalAccount.url)) as? NSDictionary)
+        let savedJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: account.url)) as? NSDictionary)
+        XCTAssertEqual(externalJSON, savedJSON)
+        XCTAssertNotEqual(try externalDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+
+        // A save-time directory attribute failure must be retried on later reads.
+        var directoryURL = URL(fileURLWithPath: keyDirectory.path)
+        values.isExcludedFromBackup = false
+        try directoryURL.setResourceValues(values)
+        try fileManager.setAttributes([.immutable: true], ofItemAtPath: keyDirectory.path)
+        do {
+            defer { try? fileManager.setAttributes([.immutable: false], ofItemAtPath: keyDirectory.path) }
+            XCTAssertThrowsError(try updated.update(account: externalAccount, password: newPassword, newPassword: "failed-directory-password"))
+        }
+        XCTAssertEqual(updated.accounts.count, 1)
+        let recoveredDirectoryURL = URL(fileURLWithPath: keyDirectory.path)
+        XCTAssertEqual(try recoveredDirectoryURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        XCTAssertEqual(try updated.exportMnemonic(account: externalAccount, password: newPassword), mnemonic)
+    }
+
+    /// The passphrase is a BIP39 derivation input, so losing it across a restart silently
+    /// re-derives a different private key for the same address.
+    func testPassphraseSurvivesReload() throws {
+        let passphrase = "correct horse battery staple"
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        _ = try store.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password)
+
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(reloaded.accounts.first)
+        let exported = try reloaded.exportPrivateKey(account: account, password: password)
+
+        let expected = try Wallet(mnemonic: mnemonic, passphrase: passphrase).getKey(at: 0).privateKey
+        XCTAssertEqual(exported, expected)
+    }
+
+    /// An empty passphrase must keep producing the pre-existing payload layout, otherwise keys
+    /// written by earlier versions no longer decode.
+    func testKeyWithoutPassphraseSurvivesReload() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        _ = try store.import(mnemonic: mnemonic, encryptPassword: password)
+
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(reloaded.accounts.first)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: password), mnemonic)
+
+        let expected = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: password), expected)
+    }
+
+    /// Guards the round trip against a payload split that would hand the passphrase bytes back
+    /// as part of the mnemonic.
+    func testExportedMnemonicExcludesPassphrase() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: "p@ss", encryptPassword: password)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+    }
+
+    func testHDObjectsDoNotRetainMnemonicOrPassphrase() throws {
+        let passphrase = "p@ss"
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase)
+        let walletFields = Mirror(reflecting: wallet).children.compactMap { $0.label }
+        let walletStrings = Mirror(reflecting: wallet).children.compactMap { $0.value as? String }
+        XCTAssertFalse(walletFields.contains("mnemonic"))
+        XCTAssertFalse(walletFields.contains("passphrase"))
+        XCTAssertFalse(walletStrings.contains(mnemonic))
+        XCTAssertFalse(walletStrings.contains(passphrase))
+
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic, passphrase: passphrase)
+        let keyFields = Mirror(reflecting: key).children.compactMap { $0.label }
+        let keyStrings = Mirror(reflecting: key).children.compactMap { $0.value as? String }
+        XCTAssertFalse(keyFields.contains("mnemonic"))
+        XCTAssertFalse(keyFields.contains("passphrase"))
+        XCTAssertFalse(keyStrings.contains(mnemonic))
+        XCTAssertFalse(keyStrings.contains(passphrase))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password)
+        let cachedKey = try XCTUnwrap(store.key(for: account.address))
+        let cachedStrings = Mirror(reflecting: cachedKey).children.compactMap { $0.value as? String }
+        XCTAssertFalse(cachedStrings.contains(mnemonic))
+        XCTAssertFalse(cachedStrings.contains(passphrase))
+
+        wallet.clear()
+        XCTAssertThrowsError(try wallet.getKey(at: 0)) { error in
+            guard case Wallet.Error.cleared = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+    }
+
+    func testGeneratedMnemonicCopiesEntropyOutputBeforeBufferCleanup() throws {
+        XCTAssertEqual(try Mnemonic.generate(from: Data(repeating: 0, count: 16)), mnemonic)
+    }
+
+    func testGeneratedHDWalletReturnsMnemonicWithoutRetainingIt() throws {
+        let generated = try KeystoreKey.generateHDWallet(password: password)
+        XCTAssertTrue(Mnemonic.isValid(generated.mnemonic))
+        XCTAssertEqual(try KeystoreKey(password: password, mnemonic: generated.mnemonic).address,
+                       generated.key.address)
+        XCTAssertFalse(Mirror(reflecting: generated.key).children.compactMap { $0.label }.contains("mnemonic"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        XCTAssertTrue(Mnemonic.isValid(try store.exportMnemonic(account: account, password: password)))
+    }
+
+    func testEncryptedKeyGenerationIsRejectedWithoutSideEffects() throws {
+        XCTAssertThrowsError(try KeystoreKey(password: password, type: .encryptedKey)) { error in
+            guard case EncryptError.generateKeyPairFail = error else {
+                return XCTFail("Expected generateKeyPairFail, got \(error)")
+            }
+        }
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertThrowsError(try store.createAccount(password: password, type: .encryptedKey)) { error in
+            guard case EncryptError.generateKeyPairFail = error else {
+                return XCTFail("Expected generateKeyPairFail, got \(error)")
+            }
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: []).isEmpty)
+    }
+
+    func testDeleteRequiresCorrectPassword() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+
+        XCTAssertThrowsError(try store.delete(account: account, password: "wrong-password")) { error in
+            guard case DecryptError.invalidPassword = error else {
+                return XCTFail("Expected invalidPassword, got \(error)")
+            }
+        }
+        XCTAssertNotNil(store.account(for: account.address))
+        XCTAssertNotNil(store.key(for: account.address))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: account.url.path))
+
+        let unrelatedURL = keyDirectory.appendingPathComponent("unrelated")
+        try Data().write(to: unrelatedURL)
+        var suppliedAccount = account
+        suppliedAccount.url = unrelatedURL
+
+        try store.delete(account: suppliedAccount, password: password)
+        XCTAssertNil(store.account(for: account.address))
+        XCTAssertNil(store.key(for: account.address))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedURL.path))
+    }
+
+    /// The official TREZOR vector also applies to NFKD-equivalent compatibility characters.
+    /// https://github.com/trezor/python-mnemonic/blob/master/vectors.json (first English vector)
+    func testBIP39NormalizesMnemonicAndPassphraseAgainstOfficialVector() throws {
+        let expected = Data(hex: "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04")
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "TREZOR"), expected)
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "ＴＲＥＺＯＲ"), expected)
+        let compatibilityMnemonic = mnemonic.replacingOccurrences(of: " ", with: "\u{3000}")
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: compatibilityMnemonic, passphrase: "TREZOR"), expected)
+        XCTAssertNotEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "ＴＲＥＺＯＲ", normalization: .legacy), expected)
+    }
+
+    func testCanonicalUnicodePassphrasesAgreeOnlyInBIP39Mode() throws {
+        let composed = "\u{00e9}"
+        let decomposed = "e\u{0301}"
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: composed),
+                       try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: decomposed))
+        XCTAssertNotEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: composed, normalization: .legacy),
+                          try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: decomposed, normalization: .legacy))
+    }
+
+    func testNewBIP39EntryPointsRejectNULPassphrases() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        for passphrase in ["\u{0000}suffix", "prefix\u{0000}suffix", "prefix\u{0000}"] {
+            XCTAssertThrowsError(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase)) { error in
+                guard case Mnemonic.Error.seedDerivationFailed = error else {
+                    return XCTFail("Expected seedDerivationFailed")
+                }
+            }
+            XCTAssertThrowsError(try Wallet(mnemonic: mnemonic, passphrase: passphrase))
+            XCTAssertThrowsError(try Wallet(mnemonic: mnemonic, newPassphrase: passphrase))
+            // This constructor derives already-normalized inputs in legacy mode internally.
+            XCTAssertThrowsError(try KeystoreKey(password: password, mnemonic: mnemonic, passphrase: passphrase)) { error in
+                guard case Mnemonic.Error.seedDerivationFailed = error else {
+                    return XCTFail("Expected seedDerivationFailed before keystore encryption")
+                }
+            }
+            XCTAssertThrowsError(try store.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password))
+            XCTAssertThrowsError(try store.generateWalletAddress(mnemonic: mnemonic, password: passphrase))
+            XCTAssertThrowsError(try store.checkingAccountAlreadyExists(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password))
+            XCTAssertTrue(store.accounts.isEmpty)
+        }
+    }
+
+    func testExplicitLegacyRecoveryPreservesNULPrefixDerivation() throws {
+        let cases = [("\u{0000}suffix", ""), ("prefix\u{0000}suffix", "prefix"), ("prefix\u{0000}", "prefix")]
+        for (storedPassphrase, effectivePrefix) in cases {
+            XCTAssertEqual(
+                try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: storedPassphrase, normalization: .legacy),
+                try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: effectivePrefix, normalization: .legacy)
+            )
+        }
+    }
+
+    /// A keystore encryption password is independent of the BIP39 derivation passphrase.
+    func testNULInEncryptionPasswordDoesNotChangeMnemonicWalletIdentity() throws {
+        let encryptionPassword = "encryption\u{0000}suffix"
+        let key = try KeystoreKey(password: encryptionPassword, mnemonic: mnemonic)
+        let expected = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        XCTAssertEqual(try key.privateKey(password: encryptionPassword), expected)
+        XCTAssertEqual(try KeystoreKey.splitMnemonicPayload(key.decrypt(password: encryptionPassword)).passphrase, "")
+        XCTAssertThrowsError(try key.decrypt(password: "encryption"))
+    }
+
+    /// Model a pre-fix HD payload without using the new mnemonic constructor to create it.
+    /// Its historical key is derived independently from the prefix before the first NUL.
+    func testLegacyNULKeystoreRetainsIdentityAcrossStoredKeyOperations() throws {
+        let effectivePrefix = "p\u{00e9}"
+        let storedPassphrase = effectivePrefix + "\u{0000}ignored-suffix"
+        let path = "m/44'/195'/1'/0/2"
+        let originalPrivateKey = try Wallet(mnemonic: mnemonic, passphrase: effectivePrefix, path: path, normalization: .legacy).getKey(at: 0).privateKey
+        var oldKey = try KeystoreKey(password: password, key: originalPrivateKey)
+        oldKey.type = .hierarchicalDeterministicWallet
+        oldKey.derivationPath = path
+        var oldPayload = Data(mnemonic.utf8)
+        oldPayload.append(0)
+        oldPayload.append(contentsOf: storedPassphrase.utf8)
+        oldKey.crypto = try KeystoreKeyHeader(password: password, data: oldPayload)
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try JSONEncoder().encode(oldKey).write(to: keyDirectory.appendingPathComponent("legacy-nul.json"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertEqual(account.address, oldKey.address)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), originalPrivateKey)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+
+        let transaction = Data([1, 2, 3]) // Deterministic input to the serialized-transaction signing API.
+        let hash = transaction.sha256T()
+        let expectedSignature = EthereumCrypto.sign(hash: hash, privateKey: originalPrivateKey)
+        guard expectedSignature.count == 65 else {
+            XCTFail("Expected a complete signature for the public test fixture")
+            return
+        }
+        let signingKey = try XCTUnwrap(store.key(for: account.address))
+        XCTAssertEqual(try signingKey.sign(hash: hash, password: password), expectedSignature)
+        XCTAssertEqual(try signingKey.signHashes([hash], password: password), [expectedSignature])
+        switch TLWalletCore.signTranscation(keyStore: store, transaction: transaction, password: password, address: account.address.data.addressString) {
+        case .success(let signature):
+            var transactionSignature = expectedSignature
+            if transactionSignature[64] >= 27 { transactionSignature[64] -= 27 }
+            XCTAssertEqual(signature, transactionSignature)
+        case .failure:
+            XCTFail("Existing HD wallet must remain able to sign transactions")
+        }
+
+        let exported = try store.export(account: account, password: password, newPassword: "export-password")
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.address, account.address)
+        XCTAssertEqual(exportedKey.derivationPath, path)
+        XCTAssertEqual(try exportedKey.decrypt(password: "export-password"), oldPayload)
+        let importedStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported-nul"))
+        let imported = try importedStore.import(json: exported, password: "export-password", newPassword: password)
+        XCTAssertEqual(imported.address, account.address)
+        XCTAssertEqual(try importedStore.exportPrivateKey(account: imported, password: password), originalPrivateKey)
+
+        try store.update(account: account, password: password, newPassword: "updated-password")
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let updatedKey = try XCTUnwrap(reloaded.key(for: account.address))
+        XCTAssertEqual(updatedKey.derivationPath, path)
+        XCTAssertEqual(try updatedKey.decrypt(password: "updated-password"), oldPayload)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: "updated-password"), originalPrivateKey)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: account, password: "updated-password"), mnemonic)
+        XCTAssertEqual(try updatedKey.sign(hash: hash, password: "updated-password"), expectedSignature)
+
+        let recoveryStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("recovered-nul"))
+        let recovered = try recoveryStore.import(mnemonic: mnemonic, passphrase: storedPassphrase, derivationPath: path, encryptPassword: password, normalization: .legacy)
+        XCTAssertEqual(recovered.address, account.address)
+        XCTAssertEqual(try recoveryStore.generateWalletAddress(derivationPath: path, mnemonic: mnemonic, password: storedPassphrase, normalization: .legacy), account.address)
+    }
+
+    func testPassphraseByteLimitUsesSelectedNormalization() throws {
+        let expands = String(repeating: "\u{00e9}", count: 100) // 200 bytes raw, 300 in NFKD.
+        XCTAssertThrowsError(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: expands)) { error in
+            guard case Mnemonic.Error.passphraseTooLong = error else {
+                return XCTFail("Expected passphraseTooLong, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: expands, normalization: .legacy).count, 64)
+        let contracts = String(repeating: "\u{ff21}", count: 100) // 300 bytes raw, 100 in NFKD.
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: contracts),
+                       try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: String(repeating: "A", count: 100)))
+    }
+
+    func testNewUnicodeKeystorePersistsCanonicalBytesAndReloads() throws {
+        let composed = "\u{00e9}"
+        let decomposed = "e\u{0301}"
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: composed, encryptPassword: password)
+        let key = try XCTUnwrap(store.key(for: account.address))
+        let payload = try key.decrypt(password: password)
+        let stored = try KeystoreKey.splitMnemonicPayload(payload)
+        // Swift String equality ignores canonical representation; compare bytes instead.
+        XCTAssertEqual(Array(stored.passphrase.utf8), Array(decomposed.utf8))
+        let expected = try Wallet(mnemonic: mnemonic, passphrase: decomposed, normalization: .legacy).getKey(at: 0).privateKey
+        XCTAssertEqual(try key.privateKey(password: password), expected)
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: password), expected)
+        XCTAssertEqual(try store.generateWalletAddress(mnemonic: mnemonic, password: composed), account.address)
+        XCTAssertThrowsError(try store.checkingAccountAlreadyExists(mnemonic: mnemonic, passphrase: decomposed, encryptPassword: password)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else {
+                return XCTFail("Expected accountAlreadyExists, got \(error)")
+            }
+        }
+    }
+
+    /// Construct an old-format payload independently of the new mnemonic constructor.
+    /// The passphrase would exceed the new byte limit if old files were normalized on read.
+    func testLegacyUnicodeKeystoreRetainsIdentityAcrossAllStoredKeyOperations() throws {
+        let passphrase = String(repeating: "\u{00e9}", count: 100)
+        let originalPrivateKey = try Wallet(mnemonic: mnemonic, passphrase: passphrase, normalization: .legacy).getKey(at: 0).privateKey
+        var oldKey = try KeystoreKey(password: password, key: originalPrivateKey)
+        oldKey.type = .hierarchicalDeterministicWallet
+        var oldPayload = Data(mnemonic.utf8)
+        oldPayload.append(0)
+        oldPayload.append(contentsOf: passphrase.utf8)
+        oldKey.crypto = try KeystoreKeyHeader(password: password, data: oldPayload)
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try JSONEncoder().encode(oldKey).write(to: keyDirectory.appendingPathComponent("legacy.json"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), originalPrivateKey)
+        let hash = Data(repeating: 7, count: 32)
+        let expectedSignature = EthereumCrypto.sign(hash: hash, privateKey: originalPrivateKey)
+        XCTAssertEqual(try XCTUnwrap(store.key(for: account.address)).sign(hash: hash, password: password), expectedSignature)
+        let exported = try store.export(account: account, password: password, newPassword: "export-password")
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.address, account.address)
+        XCTAssertEqual(try exportedKey.decrypt(password: "export-password"), oldPayload)
+
+        let importedStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported"))
+        let imported = try importedStore.import(json: exported, password: "export-password", newPassword: password)
+        XCTAssertEqual(imported.address, account.address)
+        XCTAssertEqual(try importedStore.exportPrivateKey(account: imported, password: password), originalPrivateKey)
+        try store.update(account: account, password: password, newPassword: "updated-password")
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: "updated-password"), originalPrivateKey)
+        let updatedKey = try XCTUnwrap(reloaded.key(for: account.address))
+        XCTAssertEqual(try updatedKey.decrypt(password: "updated-password"), oldPayload)
+        XCTAssertEqual(try updatedKey.sign(hash: hash, password: "updated-password"), expectedSignature)
+
+        let recoveryStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("recovered"))
+        let recovered = try recoveryStore.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password, normalization: .legacy)
+        XCTAssertEqual(recovered.address, account.address)
+        XCTAssertEqual(try recoveryStore.generateWalletAddress(mnemonic: mnemonic, password: passphrase, normalization: .legacy), account.address)
+    }
+
+    func testDifferentPassphrasesDeriveDifferentKeys() throws {
+        let a = try Wallet(mnemonic: mnemonic, passphrase: "one").getKey(at: 0).privateKey
+        let b = try Wallet(mnemonic: mnemonic, passphrase: "two").getKey(at: 0).privateKey
+        XCTAssertNotEqual(a, b)
+    }
+
+    /// The C layer bounds the passphrase in bytes. Checking `String.count` let a multi-byte
+    /// passphrase past the guard and turned the derivation failure into a trap.
+    func testOverlongMultiBytePassphraseThrows() {
+        let passphrase = String(repeating: "🔑", count: 65) // 65 characters, 260 UTF-8 bytes
+        XCTAssertEqual(passphrase.count, 65)
+        XCTAssertEqual(passphrase.utf8.count, 260)
+        XCTAssertThrowsError(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase))
+    }
+
+    /// A 256-byte passphrase is exactly at the limit and must still derive.
+    func testPassphraseAtByteLimitDerives() throws {
+        let passphrase = String(repeating: "a", count: 256)
+        XCTAssertEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase).count, 64)
+    }
+
+    /// Invalid input must fail at the Swift API boundary with one stable error instead of reaching
+    /// encryption or public-key derivation.
+    func testInvalidPrivateKeyThrowsInsteadOfTrapping() {
+        let curveOrder = Data([
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+            0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+            0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+        ])
+        assertRejectsPrivateKey(Data(repeating: 1, count: 16))
+        assertRejectsPrivateKey(Data(repeating: 0, count: 32))
+        assertRejectsPrivateKey(curveOrder)
+        assertRejectsPrivateKey(Data(repeating: 0xff, count: 32))
+    }
+
+    func testNewHDKeyRejectsInvalidMnemonicInBothNormalizationModes() {
+        let invalidInputs = [
+            "",
+            Array(repeating: "abandon", count: 11).joined(separator: " "),
+            Array(repeating: "not-a-bip39-word", count: 12).joined(separator: " "),
+            // All words are in the word list, but the checksum is invalid.
+            Array(repeating: "abandon", count: 12).joined(separator: " "),
+        ]
+        let modes: [Mnemonic.Normalization] = [.bip39, .legacy]
+        for mode in modes {
+            for input in invalidInputs {
+                XCTAssertThrowsError(try KeystoreKey(password: password, mnemonic: input, normalization: mode)) { error in
+                    guard case EncryptError.invalidMnemonic = error else {
+                        return XCTFail("Expected invalidMnemonic, got \(error)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testExistingInvalidMnemonicRemainsUsableWithoutAllowingNewImports() throws {
+        // Public, intentionally invalid fixture; model an old file without using either
+        // mnemonic initializer, so new-input validation cannot prevent fixture creation.
+        let oldMnemonic = Array(repeating: "abandon", count: 12).joined(separator: " ")
+        XCTAssertFalse(Mnemonic.isValid(oldMnemonic))
+        let storedPassphrase = "fixture-passphrase"
+        let path = "m/44'/195'/1'/0/2"
+        let originalPrivateKey = try Wallet(mnemonic: oldMnemonic, passphrase: storedPassphrase,
+                                            path: path, normalization: .legacy).getKey(at: 0).privateKey
+        var oldKey = try KeystoreKey(password: password, key: originalPrivateKey)
+        oldKey.type = .hierarchicalDeterministicWallet
+        oldKey.derivationPath = path
+        var payload = Data(oldMnemonic.utf8)
+        payload.append(0)
+        payload.append(contentsOf: storedPassphrase.utf8)
+        oldKey.crypto = try KeystoreKeyHeader(password: password, data: payload)
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        try JSONEncoder().encode(oldKey).write(to: keyDirectory.appendingPathComponent("legacy-invalid-mnemonic.json"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(store.accounts.first)
+        let hash = Data(repeating: 0x42, count: 32)
+        let expectedSignature = EthereumCrypto.sign(hash: hash, privateKey: originalPrivateKey)
+        XCTAssertEqual(expectedSignature.count, 65)
+        XCTAssertEqual(account.address, oldKey.address)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), oldMnemonic)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), originalPrivateKey)
+        let signingKey = try XCTUnwrap(store.key(for: account.address))
+        XCTAssertEqual(try signingKey.sign(hash: hash, password: password), expectedSignature)
+
+        let newPassword = password + "-updated"
+        let exported = try store.export(account: account, password: password, newPassword: newPassword)
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.address, account.address)
+        XCTAssertEqual(exportedKey.derivationPath, path)
+        XCTAssertEqual(try exportedKey.decrypt(password: newPassword), payload)
+        XCTAssertEqual(try exportedKey.privateKey(password: newPassword), originalPrivateKey)
+
+        // Retain the existing strict import contract; compatibility is confined to
+        // operations on an already stored wallet, not a new unchecked import path.
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported-invalid"))
+        XCTAssertThrowsError(try target.import(json: exported, password: newPassword, newPassword: password)) { error in
+            guard case KeyStore.Error.invalidMnemonic = error else {
+                return XCTFail("Expected invalidMnemonic, got \(error)")
+            }
+        }
+        XCTAssertTrue(target.accounts.isEmpty)
+
+        try store.update(account: account, password: password, newPassword: newPassword)
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let updatedAccount = try XCTUnwrap(reloaded.account(for: account.address))
+        let updatedKey = try XCTUnwrap(reloaded.key(for: account.address))
+        XCTAssertEqual(updatedKey.derivationPath, path)
+        XCTAssertEqual(try updatedKey.decrypt(password: newPassword), payload)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: updatedAccount, password: newPassword), oldMnemonic)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: updatedAccount, password: newPassword), originalPrivateKey)
+        XCTAssertEqual(try updatedKey.sign(hash: hash, password: newPassword), expectedSignature)
+    }
+
+
+    /// `import(json:)` used to send every decrypted payload through the raw-key path. For an HD
+    /// keystore that made the private key the first 32 characters of the mnemonic.
+    func testHDKeystoreJSONRoundTripPreservesAddress() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: "p@ss", encryptPassword: password)
+        let json = try store.export(account: account, password: password, newPassword: password)
+
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported"))
+        let imported = try target.import(json: json, password: password, newPassword: password)
+
+        XCTAssertEqual(imported.address, account.address)
+        XCTAssertEqual(imported.type, .hierarchicalDeterministicWallet)
+        XCTAssertEqual(try target.exportMnemonic(account: imported, password: password), mnemonic)
+        XCTAssertEqual(try target.exportPrivateKey(account: imported, password: password),
+                       try store.exportPrivateKey(account: account, password: password))
+    }
+
+    func testUpdatePasswordPreservesCustomDerivationPathAndRejectsAddressChange() throws {
+        let customPath = "m/44'/195'/7'/0/3"
+        let importingStore = try KeyStore(keyDirectory: keyDirectory)
+        let account = try importingStore.import(mnemonic: mnemonic, derivationPath: customPath, encryptPassword: password)
+        let privateKey = try importingStore.exportPrivateKey(account: account, password: password)
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let storedAccount = try XCTUnwrap(store.account(for: account.address))
+
+        XCTAssertThrowsError(try store.update(account: storedAccount,
+                                              password: password,
+                                              newPassword: "wrong-path-password",
+                                              derivationPath: Wallet.defaultPath)) { error in
+            guard case KeyStore.Error.invalidKey = error else {
+                return XCTFail("expected invalidKey, got \(error)")
+            }
+        }
+
+        let unchangedStore = try KeyStore(keyDirectory: keyDirectory)
+        let unchangedAccount = try XCTUnwrap(unchangedStore.account(for: account.address))
+        XCTAssertEqual(try unchangedStore.generateWalletPath(account: unchangedAccount), customPath)
+        XCTAssertEqual(try unchangedStore.exportPrivateKey(account: unchangedAccount, password: password), privateKey)
+
+        let updatedPassword = "updated-keystore-password"
+        try unchangedStore.update(account: unchangedAccount, password: password, newPassword: updatedPassword)
+
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let reloadedAccount = try XCTUnwrap(reloaded.account(for: account.address))
+        XCTAssertEqual(try reloaded.generateWalletPath(account: reloadedAccount), customPath)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: reloadedAccount, password: updatedPassword), privateKey)
+    }
+
+    func testLegacyOversizedEncryptedKeyUsesFirst32BytesAcrossKeyStoreAPIs() throws {
+        let legacy = try makeLegacyOversizedEncryptedKey()
+        XCTAssertGreaterThan(try legacy.key.decrypt(password: password).count, legacy.privateKey.count)
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = Account(address: legacy.key.address,
+                              type: .encryptedKey,
+                              url: keyDirectory.appendingPathComponent("legacy-oversized.json"))
+        try store.addKey(key: legacy.key)
+        try store.addAccount(account: account)
+
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), legacy.privateKey)
+
+        let exported = try store.export(account: account, password: password, newPassword: password)
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.type, .encryptedKey)
+        XCTAssertEqual(try exportedKey.decrypt(password: password), legacy.privateKey)
+
+        let updatedPassword = "updated-keystore-password"
+        try store.update(account: account, password: password, newPassword: updatedPassword)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: updatedPassword), legacy.privateKey)
+
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("legacy-imported"))
+        let imported = try target.import(json: legacy.json, password: password, newPassword: updatedPassword)
+        XCTAssertEqual(imported.address, legacy.key.address)
+        XCTAssertEqual(try target.exportPrivateKey(account: imported, password: updatedPassword), legacy.privateKey)
+    }
+
+    /// A keystore whose declared address disagrees with the decrypted secret is tampered with.
+    func testImportRejectsAddressMismatch() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let json = try store.export(account: account, password: password, newPassword: password)
+
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: json, options: []) as? [String: Any])
+        object["address"] = String(repeating: "1", count: 42)
+        let tampered = try JSONSerialization.data(withJSONObject: object, options: [])
+
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("tampered"))
+        XCTAssertThrowsError(try target.import(json: tampered, password: password, newPassword: password)) { error in
+            switch error as? KeyStore.Error {
+            case .invalidKey: break
+            default: XCTFail("expected invalidKey, got \(error)")
+            }
+        }
+    }
+
+    /// A complete mnemonic payload is not a 32-byte private-key scalar.
+    func testKeystoreKeyRejectsLongMnemonicPayload() throws {
+        let payload = try XCTUnwrap(mnemonic.data(using: .ascii))
+        XCTAssertGreaterThan(payload.count, 32)
+        assertRejectsPrivateKey(payload)
+    }
+
+    /// Content heuristics must not reject a valid scalar solely because every byte is printable.
+    func testKeystoreKeyAcceptsPrintableASCIIScalar() throws {
+        let mnemonicPayload = try XCTUnwrap(mnemonic.data(using: .ascii))
+        let privateKey = Data(mnemonicPayload.prefix(32))
+        XCTAssertEqual(privateKey.count, 32)
+        XCTAssertTrue(privateKey.allSatisfy { (0x20 ... 0x7e).contains($0) })
+        XCTAssertTrue(EthereumCrypto.isValidPrivateKey(privateKey))
+        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    }
+
+    func testKeystoreKeyAcceptsScalarImmediatelyBelowCurveOrder() throws {
+        let privateKey = Data([
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+            0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+            0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x40,
+        ])
+        XCTAssertTrue(EthereumCrypto.isValidPrivateKey(privateKey))
+        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    }
+
+    /// The guard must not reject legitimate keys.
+    func testKeystoreKeyAcceptsValid32BytePrivateKey() throws {
+        let privateKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        XCTAssertEqual(privateKey.count, 32)
+        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    }
+
+    func testConcurrentImportStoresOneAccount() throws {
+        let password = self.password
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        let json = try JSONEncoder().encode(key)
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let queue = DispatchQueue(label: "org.tronlink.keystore.concurrent-import", attributes: .concurrent)
+        let start = DispatchSemaphore(value: 0)
+        let ready = DispatchGroup()
+        let group = DispatchGroup()
+        let resultLock = NSLock()
+        var successCount = 0
+        var duplicateCount = 0
+        var unexpectedErrors = [Swift.Error]()
+
+        for _ in 0..<2 {
+            ready.enter()
+            group.enter()
+            queue.async {
+                ready.leave()
+                start.wait()
+                defer { group.leave() }
+                do {
+                    _ = try store.import(json: json, password: password, newPassword: password)
+                    resultLock.lock()
+                    successCount += 1
+                    resultLock.unlock()
+                } catch KeyStore.Error.accountAlreadyExists {
+                    resultLock.lock()
+                    duplicateCount += 1
+                    resultLock.unlock()
+                } catch {
+                    resultLock.lock()
+                    unexpectedErrors.append(error)
+                    resultLock.unlock()
+                }
+            }
+        }
+
+        guard ready.wait(timeout: .now() + 5) == .success else {
+            start.signal()
+            start.signal()
+            if group.wait(timeout: .now() + 60) != .success {
+                shouldRemoveKeyDirectory = false
+            }
+            XCTFail("concurrent import workers failed to start")
+            return
+        }
+        start.signal()
+        start.signal()
+        guard group.wait(timeout: .now() + 60) == .success else {
+            // ponytail: synchronous import cannot be cancelled; use a subprocess if timeout cleanup becomes necessary.
+            shouldRemoveKeyDirectory = false
+            XCTFail("concurrent imports timed out")
+            return
+        }
+
+        XCTAssertEqual(successCount, 1)
+        XCTAssertEqual(duplicateCount, 1)
+        XCTAssertTrue(unexpectedErrors.isEmpty, "unexpected errors: \(unexpectedErrors)")
+        XCTAssertEqual(store.accounts.count, 1)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertNotNil(store.key(for: account.address))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: []).count, 1)
+        XCTAssertEqual(try KeyStore(keyDirectory: keyDirectory).accounts.count, 1)
+    }
+
+    // MARK: - TL-KDF-002: scrypt parameters arriving from untrusted keystore JSON
+
+    /// Every preset the app has ever written to disk, plus the desktop preset users import
+    /// from, must keep validating. A regression here bricks existing wallets rather than
+    /// merely rejecting an import, so this is the guard rail on the new upper bounds.
+    func testValidateAcceptsShippedAndStandardPresets() {
+        let salt = Data(repeating: 0xAB, count: 32)
+        let presets: [(String, Int, Int, Int)] = [
+            ("light — what 1.0.4 wrote on disk", ScryptParams.lightN, ScryptParams.defaultR, ScryptParams.lightP),
+            ("balanced — current default", ScryptParams.balancedN, ScryptParams.defaultR, ScryptParams.balancedP),
+            ("go-ethereum standard — imported from desktop", ScryptParams.standardN, ScryptParams.defaultR, ScryptParams.standardP),
+            // The memory ceiling itself: 128 * 8 * 2^19 == 512 MiB exactly. Pinning the
+            // boundary from the accepting side catches an off-by-one that would silently
+            // start rejecting the strongest configuration we intend to support.
+            ("largest n the memory cap admits at r = 8", 1 << 19, ScryptParams.defaultR, 1),
+        ]
+        for (label, n, r, p) in presets {
+            XCTAssertNoThrow(
+                try ScryptParams(salt: salt, n: n, r: r, p: p, desiredKeyLength: ScryptParams.defaultDesiredKeyLength),
+                "\(label) must remain valid"
+            )
+        }
+    }
+
+    /// The `r` / `p` / `dklen` ceilings deliberately match Android's
+    /// `org.tron.net.KeyStoreUtils`, which rejects `r` outside 1...64, `p` outside 1...16
+    /// and `dklen` outside 32...1024. A keystore is a file users carry between the two
+    /// apps, so a file accepted on one must be accepted on the other.
+    func testValidateMatchesAndroidBoundsForRPAndDklen() {
+        let salt = Data(repeating: 0xAB, count: 32)
+
+        // Exactly Android's ceilings — must be accepted.
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 4096, r: 64, p: 1, desiredKeyLength: 32))
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 4096, r: 8, p: 16, desiredKeyLength: 32))
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 4096, r: 8, p: 1, desiredKeyLength: 1024))
+
+        // One past each — must be refused on both clients.
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 4096, r: 65, p: 1, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 4096, r: 8, p: 17, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 4096, r: 8, p: 1, desiredKeyLength: 1025))
+
+        // At r = 1 the memory rule alone would allow 2^22, which Android rejects. The flat
+        // `maxN` ceiling keeps the two clients from diverging in that direction too.
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 1 << 20, r: 1, p: 1, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 1 << 21, r: 1, p: 1, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 1 << 22, r: 1, p: 1, desiredKeyLength: 32))
+    }
+
+    /// Android refuses a keystore carrying no scrypt salt, and so must we: deriving from
+    /// an empty salt makes the KDF output depend on the password alone.
+    func testValidateRejectsEmptySalt() {
+        XCTAssertThrowsError(
+            try ScryptParams(salt: Data(), n: 4096, r: 8, p: 1, desiredKeyLength: 32)
+        ) { error in
+            guard let validationError = error as? ScryptParams.ValidationError,
+                  case .emptySalt = validationError else {
+                XCTFail("Expected emptySalt, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// Hostile values must be *rejected*, not trapped.
+    ///
+    /// Before TL-KDF-002 the negative and zero cases below crashed inside `validate()`
+    /// itself — `UInt64(-1)` on the block-size line, and division by `p`/`r` on the
+    /// overflow line — so this test would have taken the whole runner down instead of
+    /// failing. `dklen = 0` and the oversized `n` values were accepted outright and blew
+    /// up further downstream, in `decrypt`'s slicing and in the scrypt allocator.
+    func testValidateRejectsHostileParametersWithoutTrapping() {
+        let salt = Data(repeating: 0xAB, count: 32)
+        let hostile: [(String, Int, Int, Int, Int)] = [
+            ("negative r", 4096, -1, 1, 32),
+            ("zero r", 4096, 0, 1, 32),
+            ("zero p", 4096, 8, 0, 32),
+            ("negative p", 4096, 8, -1, 32),
+            ("zero n", 0, 8, 1, 32),
+            ("negative n", -4096, 8, 1, 32),
+            ("n not a power of two", 4097, 8, 1, 32),
+            ("n one step past the memory cap", 1 << 20, 8, 1, 32),
+            ("n = 2^40", 1 << 40, 8, 1, 32),
+            ("dklen 0", 4096, 8, 1, 0),
+            ("dklen 16 — decrypt's two slices would overlap", 4096, 8, 1, 16),
+            ("negative dklen", 4096, 8, 1, -1),
+            ("dklen Int.max", 4096, 8, 1, Int.max),
+            ("dklen past its cap", 4096, 8, 1, 1025),
+            ("r past its cap", 4096, 65, 1, 32),
+            ("p past its cap", 4096, 8, 17, 32),
+        ]
+        for (label, n, r, p, dklen) in hostile {
+            XCTAssertThrowsError(
+                try ScryptParams(salt: salt, n: n, r: r, p: p, desiredKeyLength: dklen),
+                "\(label) must be rejected"
+            ) { error in
+                XCTAssertTrue(
+                    error is ScryptParams.ValidationError,
+                    "\(label) must fail with a typed ValidationError, got \(error)"
+                )
+            }
+        }
+    }
+
+    /// RFC 7914, Section 12: https://www.rfc-editor.org/rfc/rfc7914#section-12
+    func testScryptCleanupPreservesKnownOutputAndInstanceReuse() throws {
+        let params = try ScryptParams(salt: Data("NaCl".utf8), n: 1024, r: 8, p: 16, desiredKeyLength: 64)
+        let scrypt = Scrypt(params: params)
+        let expected = "fdbabe1c9d3472007856e7190d01e9fe" +
+            "7c6ad7cbc8237830e77376634b373162" +
+            "2eaf30d92e22a3886ff109279d9830da" +
+            "c727afb94a83ee6d8360cbdfa2cc0640"
+        let derivedKey = try scrypt.calculate(password: "password")
+        XCTAssertEqual(derivedKey.hexString, expected)
+        XCTAssertEqual(try scrypt.calculate(password: "password").hexString, expected)
+        XCTAssertEqual(derivedKey.hexString, expected)
+    }
+
+    /// Backward compatibility, end to end. The light preset is what every install predating
+    /// TL-KDF-001 has sitting on disk, so the new bounds must let those files through.
+    /// Loading never decrypts — `KeystoreKey(contentsOf:)` only decodes — so the bounds are
+    /// first reached at unlock time, and this asserts scrypt actually runs to completion there.
+    func testLegacyLightPresetStillDerivesUnderNewBounds() throws {
+        let params = try ScryptParams(salt: Data(repeating: 0xAB, count: 32),
+                                      n: ScryptParams.lightN,
+                                      r: ScryptParams.defaultR,
+                                      p: ScryptParams.lightP,
+                                      desiredKeyLength: ScryptParams.defaultDesiredKeyLength)
+        XCTAssertNil(params.validate())
+        XCTAssertEqual(try Scrypt(params: params).calculate(password: password).count, 32)
+
+        // And through the file path: a light-preset keystore must fail on its deliberately
+        // junk MAC, never on parameter validation — that is what proves it got through.
+        let json = makeKeystoreJSON(n: ScryptParams.lightN,
+                                    r: ScryptParams.defaultR,
+                                    p: ScryptParams.lightP,
+                                    dklen: ScryptParams.defaultDesiredKeyLength)
+        let key = try JSONDecoder().decode(KeystoreKey.self, from: json)
+        XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+            XCTAssertFalse(error is ScryptParams.ValidationError,
+                           "The light preset must not be rejected by the new bounds, got \(error)")
+        }
+    }
+
+    /// The actual attack path, end to end: a keystore file carrying hostile kdfparams.
+    ///
+    /// Decoding must stay permissive — `KeyStore.load()` silently skips files it cannot
+    /// decode, so tightening `init(from:)` would make a wallet vanish from the list with
+    /// no error at all. The rejection belongs at decryption time, where it surfaces as a
+    /// catchable error.
+    func testHostileKDFParamsDecodeButFailToDecrypt() throws {
+        let hostile: [(String, Int, Int, Int, Int)] = [
+            ("negative r", 4096, -1, 1, 32),
+            ("zero p", 4096, 8, 0, 32),
+            ("dklen 0", 4096, 8, 1, 0),
+            ("n = 2^40", 1 << 40, 8, 1, 32),
+        ]
+        for (label, n, r, p, dklen) in hostile {
+            let json = makeKeystoreJSON(n: n, r: r, p: p, dklen: dklen)
+            let key = try JSONDecoder().decode(KeystoreKey.self, from: json)
+            XCTAssertEqual(key.crypto.kdfParams.n, n, "\(label): decoding must stay permissive")
+            XCTAssertThrowsError(
+                try key.decrypt(password: password),
+                "\(label) must throw rather than trap or exhaust memory"
+            )
+        }
+    }
+
+    /// Builds a syntactically valid V3 keystore carrying arbitrary kdfparams. The MAC is
+    /// junk on purpose: these files must be rejected on their parameters, long before any
+    /// password check could matter.
+    private func makeKeystoreJSON(n: Int, r: Int, p: Int, dklen: Int) -> Data {
+        let json: [String: Any] = [
+            "address": "410000000000000000000000000000000000000000",
+            "type": "private-key",
+            "id": UUID().uuidString.lowercased(),
+            "version": 3,
+            "crypto": [
+                "ciphertext": String(repeating: "00", count: 32),
+                "cipher": "aes-128-ctr",
+                "cipherparams": ["iv": String(repeating: "00", count: 16)],
+                "kdf": "scrypt",
+                "kdfparams": [
+                    "salt": String(repeating: "00", count: 32),
+                    "dklen": dklen,
+                    "n": n,
+                    "p": p,
+                    "r": r,
+                ],
+                "mac": String(repeating: "00", count: 32),
+            ],
+        ]
+        // Force-try is fine here: the literal above is always serializable.
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    private func makeLegacyOversizedEncryptedKey() throws -> (key: KeystoreKey, privateKey: Data, json: Data) {
+        let privateKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        var payload = privateKey
+        payload.append(contentsOf: Array(" legacy oversized encrypted-key payload".utf8))
+
+        var key = try KeystoreKey(password: password, key: privateKey)
+        key.crypto = try KeystoreKeyHeader(password: password, data: payload)
+        key.type = .encryptedKey
+        return (key, privateKey, try JSONEncoder().encode(key))
+    }
+
+    private func assertRejectsPrivateKey(_ key: Data, file: StaticString = #file, line: UInt = #line) {
+        XCTAssertThrowsError(try KeystoreKey(password: password, key: key), file: file, line: line) { error in
+            switch error as? EncryptError {
+            case .invalidPrivateKey: break
+            default: XCTFail("expected invalidPrivateKey, got \(error)", file: file, line: line)
+            }
+        }
+    }
+}
+
+extension EmbeddedKeystoreTests {
+    func testUppercaseCryptoJSONRemainsDecodable() throws {
+        let privateKey = Data(repeating: 0, count: 31) + Data([1])
+        let key = try KeystoreKey(password: password, key: privateKey)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(key),
+            options: []
+        ) as? [String: Any])
+        object["Crypto"] = object.removeValue(forKey: "crypto")
+        let decoded = try JSONDecoder().decode(
+            KeystoreKey.self,
+            from: JSONSerialization.data(withJSONObject: object, options: [])
+        )
+        XCTAssertEqual(try decoded.decrypt(password: password), privateKey)
+        XCTAssertEqual(decoded.version, 3)
+        XCTAssertEqual(decoded.type, .encryptedKey)
+    }
+
+    func testAES128CBCKeystoreRemainsDecryptable() throws {
+        let privateKey = Data(repeating: 0, count: 31) + Data([1])
+        var key = try KeystoreKey(password: password, key: privateKey)
+        let derivedKey = try Scrypt(params: key.crypto.kdfParams).calculate(password: password)
+        let iv = Data(repeating: 0x22, count: CipherParams.blockSize)
+        let cipherText = try AES(
+            key: Array(derivedKey[0...15]),
+            blockMode: CBC(iv: Array(iv)),
+            padding: .noPadding
+        ).encrypt(Array(privateKey))
+        key.crypto.cipher = "aes-128-cbc"
+        key.crypto.cipherParams.iv = iv
+        key.crypto.cipherText = Data(cipherText)
+        key.crypto.mac = KeystoreKey.computeMAC(
+            prefix: derivedKey[(derivedKey.count - 16)..<derivedKey.count],
+            key: key.crypto.cipherText
+        )
+        XCTAssertEqual(try key.decrypt(password: password), privateKey)
+    }
+
+    func testEncodedAddressRemainsLowercaseAndPrefixFree() throws {
+        let privateKey = Data(repeating: 0, count: 31) + Data([1])
+        var key = try KeystoreKey(password: password, key: privateKey)
+        key.address = Address(data: Data(repeating: 0, count: 21))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(key),
+            options: []
+        ) as? [String: Any])
+        XCTAssertEqual(object["address"] as? String, String(repeating: "0", count: 42))
+    }
+}
+
+final class KeystoreCTRCounterRegressionTests: XCTestCase {
+    private let password = "ctr-regression-password"
+    private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+
+    func testDecryptionCleanupPreservesReturnedDataAcrossRepeatedCalls() throws {
+        for cipher in ["aes-128-ctr", "aes-128-cbc"] {
+            for plaintext in [privateKey, Data(repeating: 0x5a, count: 96)] {
+                let key = try makeKey(plaintext: plaintext, iv: iv(counter: 0), cipher: cipher)
+                let retainedResult = try key.decrypt(password: password)
+                var nextResult = try key.decrypt(password: password)
+                nextResult.resetBytes(in: 0 ..< nextResult.count)
+                XCTAssertEqual(retainedResult, plaintext)
+                XCTAssertEqual(nextResult, Data(repeating: 0, count: plaintext.count))
+                XCTAssertThrowsError(try key.decrypt(password: "wrong-password"))
+                XCTAssertEqual(try key.decrypt(password: password), plaintext)
+                XCTAssertEqual(retainedResult, plaintext)
+            }
+        }
+    }
+
+    func testMACVerificationHandlesTamperingLengthsAndSlices() throws {
+        for cipher in ["aes-128-ctr", "aes-128-cbc"] {
+            let original = try makeKey(plaintext: privateKey, iv: iv(counter: 0), cipher: cipher)
+            XCTAssertEqual(try original.decrypt(password: password), privateKey)
+
+            let padded = Data(repeating: 0xa5, count: 80) + original.crypto.mac + Data([0x5a])
+            var sliced = original
+            sliced.crypto.mac = padded[80..<112]
+            XCTAssertEqual(sliced.crypto.mac.startIndex, 80)
+            XCTAssertEqual(try sliced.decrypt(password: password), privateKey)
+
+            var invalidMACs = [Data(), Data([0]), Data(original.crypto.mac.dropLast()),
+                               original.crypto.mac + Data([0]), original.crypto.mac + original.crypto.mac]
+            for index in original.crypto.mac.indices {
+                var changed = original.crypto.mac
+                changed[index] ^= 1
+                let buffer = Data(repeating: 0xa5, count: 80) + changed + Data([0x5a])
+                invalidMACs.append(buffer[80..<112])
+            }
+            for mac in invalidMACs {
+                var key = original
+                key.crypto.mac = mac
+                // MAC rejection must still precede cipher/IV validation.
+                key.crypto.cipherParams.iv = Data()
+                XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+                    guard case .invalidPassword? = error as? DecryptError else {
+                        return XCTFail("Expected invalidPassword, got \(error)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testCTRDecryptAcceptsTheLastAvailableBlock() throws {
+        let cases: [(Int, UInt64)] = [
+            (1, .max), (16, .max),
+            (17, .max - 1), (32, .max - 1),
+            (33, .max - 2), (64, .max - 3),
+        ]
+        for (count, counter) in cases {
+            let plaintext = Data(repeating: 0x5a, count: count)
+            let key = try makeKey(plaintext: plaintext, iv: iv(counter: counter))
+            XCTAssertEqual(try key.decrypt(password: password), plaintext, "Length: \(count)")
+        }
+    }
+
+    func testCTRDecryptRejectsExhaustionEvenWithAValidMAC() throws {
+        let cases: [(Int, UInt64)] = [
+            (17, .max), (32, .max), (33, .max - 1), (49, .max - 2),
+        ]
+        for (count, counter) in cases {
+            var key = try makeKey(plaintext: Data(repeating: 0x5a, count: count), iv: iv(counter: 0))
+            // V3's MAC does not cover the IV: changing only the IV must not crash.
+            key.crypto.cipherParams.iv = iv(counter: counter)
+            XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+                guard case .invalidInitializationVector? = error as? CTR.Error else {
+                    return XCTFail("Expected invalid CTR IV, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testWrongPasswordStillPrecedesCounterValidation() throws {
+        var key = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        key.crypto.cipherParams.iv = iv(counter: .max)
+        XCTAssertThrowsError(try key.decrypt(password: "wrong-password")) { error in
+            guard case .invalidPassword? = error as? DecryptError else {
+                return XCTFail("Expected invalidPassword, got \(error)")
+            }
+        }
+    }
+
+    func testCTRRejectsInvalidIVLengths() throws {
+        let original = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        for count in [0, 8, 15, 17, 32] {
+            var key = original
+            key.crypto.cipherParams.iv = Data(repeating: 0, count: count)
+            XCTAssertThrowsError(try key.decrypt(password: password))
+        }
+    }
+
+    func testEmptyCiphertextKeepsTheExistingInvalidDataError() throws {
+        let key = try makeKey(plaintext: Data(), iv: iv(counter: .max))
+        XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+            guard case .invalidData? = error as? AES.Error else {
+                return XCTFail("Expected existing invalidData error, got \(error)")
+            }
+        }
+    }
+
+    func testCTRCapacityHandlesLargeCountsAndSlicedIV() throws {
+        var params = CipherParams()
+        let padded = Data([0xaa]) + iv(counter: 0)
+        params.iv = padded.dropFirst()
+        XCTAssertNoThrow(try params.validateCTRCapacity(forByteCount: Int.max))
+        params.iv = iv(counter: .max)
+        XCTAssertThrowsError(try params.validateCTRCapacity(forByteCount: Int.max))
+    }
+
+    func testImportRejectsUnsafeIVAndPreservesValidBoundaryKey() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try KeyStore(keyDirectory: directory)
+        var unsafe = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        unsafe.crypto.cipherParams.iv = iv(counter: .max)
+        XCTAssertThrowsError(try store.import(
+            json: JSONEncoder().encode(unsafe), password: password, newPassword: password
+        )) { error in
+            guard case .invalidInitializationVector? = error as? CTR.Error else {
+                return XCTFail("Expected invalid CTR IV, got \(error)")
+            }
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+
+        let valid = try makeKey(plaintext: privateKey, iv: iv(counter: .max - 1))
+        let account = try store.import(
+            json: JSONEncoder().encode(valid), password: password, newPassword: password
+        )
+        XCTAssertEqual(account.address, valid.address)
+        let reloaded = try KeyStore(keyDirectory: directory)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: password), privateKey)
+    }
+
+    func testCBCDoesNotApplyTheCTRCapacityLimit() throws {
+        let key = try makeKey(plaintext: privateKey, iv: iv(counter: .max), cipher: "aes-128-cbc")
+        XCTAssertEqual(try key.decrypt(password: password), privateKey)
+    }
+
+    private func iv(counter: UInt64) -> Data {
+        let suffix = (0..<8).map { UInt8(truncatingIfNeeded: counter >> (56 - 8 * $0)) }
+        return Data(repeating: 0x12, count: 8) + Data(suffix)
+    }
+
+    /// Encrypt only safe fixtures with the existing CryptoSwift implementation. Low-cost
+    /// scrypt parameters keep these counter tests independent of production KDF presets.
+    private func makeKey(plaintext: Data, iv: Data, cipher: String = "aes-128-ctr") throws -> KeystoreKey {
+        let params = try ScryptParams(salt: Data(repeating: 0x5a, count: 32), n: 16, r: 1, p: 1, desiredKeyLength: 32)
+        let derived = try Scrypt(params: params).calculate(password: password)
+        let ciphertext: Data
+        if cipher == "aes-128-cbc" {
+            ciphertext = Data(try AES(key: Array(derived.prefix(16)), blockMode: CBC(iv: Array(iv)), padding: .noPadding).encrypt(Array(plaintext)))
+        } else {
+            ciphertext = Data(try AES(key: Array(derived.prefix(16)), blockMode: CTR(iv: Array(iv)), padding: .noPadding).encrypt(Array(plaintext)))
+        }
+        var cipherParams = CipherParams()
+        cipherParams.iv = iv
+        var header = KeystoreKeyHeader(
+            cipherText: ciphertext, cipherParams: cipherParams, kdfParams: params,
+            mac: KeystoreKey.computeMAC(prefix: Data(derived.suffix(16)), key: ciphertext)
+        )
+        header.cipher = cipher
+        let crypto = try JSONSerialization.jsonObject(with: JSONEncoder().encode(header))
+        let json: [String: Any] = [
+            // secp256k1 scalar 1, with the TRON address prefix.
+            "address": "417e5f4552091a69125d5dfcb7b8c2659029395bdf",
+            "id": "00000000-0000-0000-0000-000000000401",
+            "type": "private-key", "version": 3, "crypto": crypto,
+        ]
+        return try JSONDecoder().decode(KeystoreKey.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+}
+
+// Expected ABI vectors below are independent handwritten words, not encoder output.
+final class ABIv2RegressionTests: XCTestCase {
+    private typealias Parameter = TLCore.ABIv2.Element.ParameterType
+
+    private func word(_ value: UInt64) -> Data {
+        var result = Data(repeating: 0, count: 32)
+        for byte in 0..<8 {
+            result[31 - byte] = UInt8((value >> (byte * 8)) & 0xff)
+        }
+        return result
+    }
+
+    private func words(_ values: [UInt64]) -> Data {
+        return values.reduce(into: Data()) { $0.append(word($1)) }
+    }
+
+    private func rightPaddedWord(_ bytes: Data) -> Data {
+        precondition(bytes.count <= 32)
+        return bytes + Data(repeating: 0, count: 32 - bytes.count)
+    }
+
+    private func signedByteWord(_ value: Int8) -> Data {
+        var result = Data(repeating: value < 0 ? 0xff : 0, count: 32)
+        result[31] = UInt8(bitPattern: value)
+        return result
+    }
+
+    private func parseRecord(_ json: String) throws -> TLCore.ABIv2.Element {
+        return try JSONDecoder().decode(TLCore.ABIv2.Record.self, from: Data(json.utf8)).parse()
+    }
+
+    private func eventLog(data: Data, topics: [Data]) throws -> TLCore.EventLog {
+        let object: [String: Any] = [
+            "address": "0x1111111111111111111111111111111111111111",
+            "blockHash": "0x" + String(repeating: "00", count: 32),
+            "blockNumber": "0x1", "data": "0x" + data.hex,
+            "logIndex": "0x0", "removed": "0x0",
+            "topics": topics.map { "0x" + $0.hex },
+            "transactionHash": "0x" + String(repeating: "00", count: 32),
+            "transactionIndex": "0x0"
+        ]
+        let json = try JSONSerialization.data(withJSONObject: object)
+        return try JSONDecoder().decode(TLCore.EventLog.self, from: json)
+    }
+
+    private func decodedUIntRows(_ value: AnyObject) throws -> [[BigUInt]] {
+        try XCTUnwrap(value as? [AnyObject]).map { row in
+            try XCTUnwrap(row as? [AnyObject]).map { try XCTUnwrap($0 as? BigUInt) }
+        }
+    }
+
+    private func decodedBoolRows(_ value: AnyObject) throws -> [[Bool]] {
+        try XCTUnwrap(value as? [AnyObject]).map { row in
+            try XCTUnwrap(row as? [AnyObject]).map { try XCTUnwrap($0 as? Bool) }
+        }
+    }
+
+    private func decodedStringRows(_ value: AnyObject) throws -> [[String]] {
+        try XCTUnwrap(value as? [AnyObject]).map { row in
+            try XCTUnwrap(row as? [AnyObject]).map { try XCTUnwrap($0 as? String) }
+        }
+    }
+
+    func testTwoDynamicMatricesMatchBatchBalanceCheckAndBridgeToAppTypes() throws {
+        let uintMatrix: Parameter = .array(type: .array(type: .uint(bits: 256), length: 0), length: 0)
+        let boolMatrix: Parameter = .array(type: .array(type: .bool, length: 0), length: 0)
+        // Each outer tail occupies 320 bytes. Inner offsets start immediately
+        // after the respective outer length word, not at the entire payload.
+        let expected = words([64, 384,
+                              3, 96, 192, 224, 2, 1, 2, 0, 1, 3,
+                              3, 96, 160, 256, 1, 1, 2, 0, 1, 0])
+        let balances: [[BigUInt]] = [[1, 2], [], [3]]
+        let flags = [[true], [false, true], []]
+        let values: [AnyObject] = [balances as AnyObject, flags as AnyObject]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [uintMatrix, boolMatrix], values: values), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [uintMatrix, boolMatrix], data: expected))
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(try decodedUIntRows(decoded[0]), balances)
+        XCTAssertEqual(try decodedBoolRows(decoded[1]), flags)
+    }
+
+    func testAllFourArrayDimensionKindsUseIndependentWordLayouts() throws {
+        let fixedRows: [[BigUInt]] = [[1, 2], [3, 4]]
+        let dynamicRows: [[BigUInt]] = [[1, 2], [3]]
+        let cases: [(String, [[BigUInt]], Data)] = [
+            ("uint256[2][2]", fixedRows, words([1, 2, 3, 4])),
+            ("uint256[][2]", dynamicRows, words([32, 64, 160, 2, 1, 2, 1, 3])),
+            ("uint256[2][]", fixedRows, words([32, 2, 1, 2, 3, 4])),
+            ("uint256[][]", dynamicRows, words([32, 2, 64, 160, 2, 1, 2, 1, 3]))
+        ]
+        for (typeString, value, expected) in cases {
+            let type = try TLCore.ABIv2TypeParser.parseTypeString(typeString)
+            XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value as AnyObject]), expected, typeString)
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected), typeString)
+            XCTAssertEqual(try decodedUIntRows(try XCTUnwrap(decoded.first, typeString)), value, typeString)
+        }
+    }
+
+    func testStringArrayWithThreeElementsDoesNotSkipFollowingArgument() throws {
+        let strings: Parameter = .array(type: .string, length: 0)
+        let tail = words([3, 96, 160, 224, 1])
+            + rightPaddedWord(Data("a".utf8))
+            + word(2) + rightPaddedWord(Data("bb".utf8))
+            + word(3) + rightPaddedWord(Data("ccc".utf8))
+        let expected = words([64, 9]) + tail
+        let types: [Parameter] = [strings, .uint(bits: 256)]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [["a", "bb", "ccc"] as AnyObject, BigUInt(9) as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? [String], ["a", "bb", "ccc"])
+        XCTAssertEqual(decoded[1] as? BigUInt, BigUInt(9))
+
+        // The old public spelling remains callable. Its consumed count must be
+        // a relative head width even when decoding starts at a nonzero pointer.
+        let nonzeroPointerData = words([7, 96, 9]) + tail
+        let single = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: nonzeroPointerData, pointer: 32, allowLegacyBytes32: false, minimumTail: 96)
+        XCTAssertEqual(single.value as? [String], ["a", "bb", "ccc"])
+        XCTAssertEqual(single.bytesConsumed, UInt64(32))
+        let next = TLCore.ABIv2Decoder.decodeSignleType(type: .uint(bits: 256), data: nonzeroPointerData, pointer: 64, allowLegacyBytes32: false, minimumTail: 96)
+        XCTAssertEqual(next.value as? BigUInt, BigUInt(9))
+        XCTAssertEqual(next.bytesConsumed, UInt64(32))
+    }
+
+    func testThreeStringArrayRowsUseOffsetsRelativeToEachOwnLengthWord() throws {
+        let type: Parameter = .array(type: .array(type: .string, length: 0), length: 0)
+        let value = [["a", "bb"], ["ccc"], []]
+        // Outer row tails occupy 224, 128 and 32 bytes respectively. The
+        // third row is empty, while the first two have different strings.
+        let expected = words([32, 3, 96, 320, 448, 2, 64, 128, 1])
+            + rightPaddedWord(Data("a".utf8))
+            + word(2) + rightPaddedWord(Data("bb".utf8))
+            + words([1, 32, 3]) + rightPaddedWord(Data("ccc".utf8))
+            + word(0)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
+        XCTAssertEqual(try decodedStringRows(decoded[0]), value)
+    }
+
+    func testDynamicTupleDoesNotAdvancePastFollowingInteger() throws {
+        let tupleType: Parameter = .tuple(types: [.uint(bits: 256), .string])
+        let types: [Parameter] = [tupleType, .uint(bits: 256)]
+        let tuple: [AnyObject] = [BigUInt(7) as AnyObject, "hi" as AnyObject]
+        let expected = words([64, 9, 7, 64, 2]) + rightPaddedWord(Data("hi".utf8))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [tuple as AnyObject, BigUInt(9) as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        let decodedTuple = try XCTUnwrap(decoded[0] as? [AnyObject])
+        XCTAssertEqual(decodedTuple[0] as? BigUInt, BigUInt(7))
+        XCTAssertEqual(decodedTuple[1] as? String, "hi")
+        XCTAssertEqual(decoded[1] as? BigUInt, BigUInt(9))
+    }
+
+    func testStaticTupleArrayContributesItsFullWidthBeforeDynamicString() throws {
+        let arrayType: Parameter = .array(type: .tuple(types: [.uint(bits: 256), .bool]), length: 2)
+        let types: [Parameter] = [arrayType, .string]
+        let rows: [[AnyObject]] = [[BigUInt(1) as AnyObject, true as AnyObject],
+                                  [BigUInt(2) as AnyObject, false as AnyObject]]
+        // Two 64-byte static tuples and one 32-byte offset form a 160-byte head.
+        let expected = words([1, 1, 2, 0, 160, 2]) + rightPaddedWord(Data("ok".utf8))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [rows as AnyObject, "ok" as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        let decodedRows = try XCTUnwrap(decoded[0] as? [[AnyObject]])
+        XCTAssertEqual(decodedRows.count, 2)
+        XCTAssertEqual(decodedRows[0][0] as? BigUInt, BigUInt(1))
+        XCTAssertEqual(decodedRows[0][1] as? Bool, true)
+        XCTAssertEqual(decodedRows[1][0] as? BigUInt, BigUInt(2))
+        XCTAssertEqual(decodedRows[1][1] as? Bool, false)
+        XCTAssertEqual(decoded[1] as? String, "ok")
+    }
+
+    func testTupleWithDynamicArrayUsesTupleRelativeOffsets() throws {
+        let type: Parameter = .tuple(types: [.uint(bits: 256), .array(type: .string, length: 0)])
+        let expected = words([32, 7, 64, 2, 64, 128, 1])
+            + rightPaddedWord(Data("a".utf8))
+            + word(2) + rightPaddedWord(Data("bb".utf8))
+        let tuple: [AnyObject] = [BigUInt(7) as AnyObject, ["a", "bb"] as AnyObject]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [tuple as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
+        let result = try XCTUnwrap(decoded[0] as? [AnyObject])
+        XCTAssertEqual(result[0] as? BigUInt, BigUInt(7))
+        XCTAssertEqual(result[1] as? [String], ["a", "bb"])
+    }
+
+    func testEmptyDynamicArrayAndStringHaveLengthWords() throws {
+        let types: [Parameter] = [.array(type: .uint(bits: 256), length: 0), .string]
+        let expected = words([64, 96, 0, 0])
+        let empty: [BigUInt] = []
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [empty as AnyObject, "" as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? [BigUInt], [])
+        XCTAssertEqual(decoded[1] as? String, "")
+    }
+
+    func testJSONTupleComponentsSurviveEveryArrayDimensionAndNestedTuple() throws {
+        let json = """
+        {"type":"function","name":"f","stateMutability":"view",
+         "inputs":[{"name":"items","type":"tuple[][2][]","components":[
+           {"name":"owner","type":"address"},
+           {"name":"flags","type":"tuple[]","components":[{"name":"n","type":"uint256"},{"name":"ok","type":"bool"}]}]}],
+         "outputs":[{"name":"items","type":"tuple[][2][]","components":[
+           {"name":"owner","type":"address"},
+           {"name":"flags","type":"tuple[]","components":[{"name":"n","type":"uint256"},{"name":"ok","type":"bool"}]}]}]}
+        """
+        guard case let .function(function) = try parseRecord(json) else { return XCTFail("Expected function") }
+        let leaf: Parameter = .tuple(types: [.address, .array(type: .tuple(types: [.uint(bits: 256), .bool]), length: 0)])
+        let expected: Parameter = .array(type: .array(type: .array(type: leaf, length: 0), length: 2), length: 0)
+        XCTAssertEqual(function.inputs.first?.type, expected)
+        XCTAssertEqual(function.outputs.first?.type, expected)
+        XCTAssertEqual(expected.abiRepresentation, "(address,(uint256,bool)[])[][2][]")
+        XCTAssertEqual(function.signature, "f((address,(uint256,bool)[])[][2][])")
+        let canonical = Data("f((address,(uint256,bool)[])[][2][])".utf8)
+        XCTAssertEqual(function.methodEncoding, Data(EthereumCrypto.hash(canonical).prefix(4)))
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("(address,(uint256,bool)[])[][2][]"), expected)
+    }
+
+    func testFunctionSelectorMatchesKnownERC20VectorAndMethodStringStaysFullHash() throws {
+        let json = """
+        {"type":"function","name":"transfer","stateMutability":"nonpayable",
+         "inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"}],"outputs":[]}
+        """
+        guard case let .function(function) = try parseRecord(json) else { return XCTFail("Expected function") }
+        XCTAssertEqual(function.signature, "transfer(address,uint256)")
+        XCTAssertEqual(function.methodEncoding, Data([0xa9, 0x05, 0x9c, 0xbb]))
+        XCTAssertEqual(function.methodString, "a9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c9049b")
+    }
+
+    func testModernJSONMutabilityDoesNotRequireLegacyPayable() throws {
+        for (mutability, isConstant, isPayable) in [("view", true, false), ("pure", true, false), ("nonpayable", false, false), ("payable", false, true)] {
+            let json = "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"\(mutability)\",\"inputs\":[],\"outputs\":[]}"
+            guard case let .function(function) = try parseRecord(json) else { return XCTFail("Expected function") }
+            XCTAssertEqual(function.constant, isConstant)
+            XCTAssertEqual(function.payable, isPayable)
+        }
+        guard case let .fallback(fallback) = try parseRecord("{\"type\":\"fallback\",\"stateMutability\":\"nonpayable\"}") else { return XCTFail("Expected fallback") }
+        XCTAssertFalse(fallback.payable)
+        guard case let .constructor(constructor) = try parseRecord("{\"type\":\"constructor\",\"stateMutability\":\"payable\",\"inputs\":[]}") else { return XCTFail("Expected constructor") }
+        XCTAssertTrue(constructor.payable)
+        XCTAssertThrowsError(try parseRecord("{\"type\":\"function\",\"name\":\"f\",\"inputs\":[{\"type\":\"tuple[]\"}],\"outputs\":[]}"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint7"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("bytes33"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256[00]"))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256garbage"))
+    }
+
+    func testReceiveAndCustomErrorJSONSupportIndependentRevertPayload() throws {
+        guard case let .receive(receive) = try parseRecord("{\"type\":\"receive\",\"stateMutability\":\"payable\"}") else {
+            return XCTFail("Expected receive")
+        }
+        XCTAssertTrue(receive.payable)
+        let json = """
+        {"type":"error","name":"Error","inputs":[{"name":"reason","type":"string"}]}
+        """
+        let element = try parseRecord(json)
+        guard case let .error(customError) = element else { return XCTFail("Expected custom error") }
+        let selector = Data([0x08, 0xc3, 0x79, 0xa0])
+        let argumentBytes = words([32, 2]) + rightPaddedWord(Data("no".utf8))
+        let payload = selector + argumentBytes
+        XCTAssertEqual(customError.signature, "Error(string)")
+        XCTAssertEqual(customError.methodEncoding, selector)
+        XCTAssertEqual(element.encodeParameters(["no" as AnyObject]), payload)
+        let decoded = try XCTUnwrap(element.decodeInputData(payload))
+        XCTAssertEqual(decoded["0"] as? String, "no")
+        XCTAssertEqual(decoded["reason"] as? String, "no")
+        XCTAssertNil(element.decodeInputData(Data([0, 0, 0, 0]) + argumentBytes))
+    }
+
+    func testIntegerBoundsAndSignedExtensionMatchWords() throws {
+        let types: [Parameter] = [.uint(bits: 8), .int(bits: 8), .int(bits: 8)]
+        let expected = word(255) + signedByteWord(-128) + word(127)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [BigUInt(255) as AnyObject, BigInt(-128) as AnyObject, BigInt(127) as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? BigUInt, BigUInt(255))
+        XCTAssertEqual(decoded[1] as? BigInt, BigInt(-128))
+        XCTAssertEqual(decoded[2] as? BigInt, BigInt(127))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 8), value: BigUInt(256) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 8), value: BigInt(128) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 8), value: BigInt(-129) as AnyObject))
+        for negative in [Int(-1) as AnyObject, BigInt(-1) as AnyObject, "-1" as AnyObject] {
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: negative))
+        }
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.uint(bits: 8)], data: word(256)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.int(bits: 8)], data: word(128)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.bool], data: word(2)))
+
+        let maximumUnsigned = (BigUInt(1) << 256) - 1
+        let maximumSigned = (BigInt(1) << 255) - 1
+        let minimumSigned = -(BigInt(1) << 255)
+        let allOnes = Data(repeating: 0xff, count: 32)
+        let signedMaximumWord = Data([0x7f]) + Data(repeating: 0xff, count: 31)
+        let signedMinimumWord = Data([0x80]) + Data(repeating: 0, count: 31)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: maximumUnsigned as AnyObject), allOnes)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: maximumSigned as AnyObject), signedMaximumWord)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: minimumSigned as AnyObject), signedMinimumWord)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: (maximumUnsigned + 1) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: (maximumSigned + 1) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: (minimumSigned - 1) as AnyObject))
+    }
+
+    func testEmptyOrSignOnlyIntegerStringsAreRejectedInsteadOfBecomingZero() {
+        // BigInt 3.x accepts some empty digit sequences as zero; ABI values
+        // must contain at least one actual digit after a sign or hex prefix.
+        for value in ["", "0x", "+", "-", "+0x"] {
+            XCTAssertNil(TLCore.ABIv2Encoder.convertToBigUInt(value as AnyObject), value)
+            XCTAssertNil(TLCore.ABIv2Encoder.convertToBigInt(value as AnyObject), value)
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: value as AnyObject), value)
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: value as AnyObject), value)
+        }
+    }
+
+    func testStringBeginningWithHexPrefixIsUTF8AndFunctionIsLeftAligned() throws {
+        let expectedString = words([32, 4]) + rightPaddedWord(Data("0x41".utf8))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.string], values: ["0x41" as AnyObject]), expectedString)
+        let string = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: expectedString))
+        XCTAssertEqual(string[0] as? String, "0x41")
+        let function = Data((1...24).map { UInt8($0) })
+        let expectedFunction = function + Data(repeating: 0, count: 8)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .function, value: function as AnyObject), expectedFunction)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.function], data: expectedFunction))
+        XCTAssertEqual(decoded[0] as? Data, function)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .function, value: Data(repeating: 1, count: 23) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .bytes(length: 2), value: Data([1, 2, 3]) as AnyObject))
+    }
+
+    func testAddressDecodesAsTwentyByteWeb3AddressAndAcceptsExplicitTRONPrefix() throws {
+        let address = Data(repeating: 0x11, count: 20)
+        let expected = Data(repeating: 0, count: 12) + address
+        for raw in [address, Data([0x41]) + address] {
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: raw as AnyObject), expected)
+        }
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.address], data: expected))
+        let result = try XCTUnwrap(decoded[0] as? TLCore.Web3Address)
+        XCTAssertEqual(result.addressData, address)
+        XCTAssertEqual(result.addressData.count, 20)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: Data(repeating: 1, count: 19) as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: (Data([0x42]) + address) as AnyObject))
+    }
+
+    func testLegacyTokenBytes32StringCompatibilityIsRestrictedToOneTopLevelString() throws {
+        let tokenWord = rightPaddedWord(Data("USDT".utf8))
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: tokenWord))
+        XCTAssertEqual(result[0] as? String, "USDT")
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string, .uint(bits: 256)], data: tokenWord + word(7)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.array(type: .string, length: 0)], data: words([32, 1]) + tokenWord))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: tokenWord))
+    }
+
+    func testInvalidArrayElementsAndTupleArityFailAsAWhole() {
+        let array: Parameter = .array(type: .uint(bits: 256), length: 0)
+        let invalid: [AnyObject] = [BigUInt(1) as AnyObject, "not-a-number" as AnyObject, BigUInt(3) as AnyObject]
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [array], values: [invalid as AnyObject]))
+        let tuple: Parameter = .tuple(types: [.uint(bits: 256), .bool])
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [tuple], values: [[BigUInt(1)] as AnyObject]))
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [tuple], values: [[BigUInt(1) as AnyObject, true as AnyObject, false as AnyObject] as AnyObject]))
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [.array(type: .uint(bits: 256), length: 2)], values: [[BigUInt(1)] as AnyObject]))
+        // bool[]: the second word is invalid. Returning only [true] is forbidden.
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.array(type: .bool, length: 0)], data: words([32, 2, 1, 2])))
+        // string[]: valid first element followed by an out-of-bounds pointer.
+        let badStrings = words([32, 2, 64, 999_968, 1]) + rightPaddedWord(Data("a".utf8))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.array(type: .string, length: 0)], data: badStrings))
+    }
+
+    func testMalformedOffsetsLengthsAndTruncationReturnNil() {
+        let type: Parameter = .array(type: .uint(bits: 256), length: 0)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([0, 0])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([33, 0, 0])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([96, 0])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: words([32, 2, 1])))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: word(32) + Data(repeating: 0xff, count: 32)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.uint(bits: 256)], data: Data(repeating: 0, count: 31)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: words([32, 64 * 1024 * 1024 + 1])))
+        let string = words([32, 1]) + rightPaddedWord(Data("a".utf8))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: Data(string.dropLast())))
+        let single = TLCore.ABIv2Decoder.decodeSignleType(type: .uint(bits: 256), data: word(1), pointer: UInt64.max)
+        XCTAssertNil(single.value)
+        XCTAssertNil(single.bytesConsumed)
+    }
+
+    func testDataSliceWithNonzeroStartIndexIsDecodedFromItsOwnBeginning() throws {
+        let type: Parameter = .array(type: .uint(bits: 256), length: 0)
+        let expected = words([32, 2, 5, 6])
+        let framed = Data([0xff]) + expected
+        let slice = framed.dropFirst()
+        XCTAssertEqual(slice.startIndex, 1)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: slice))
+        XCTAssertEqual(decoded[0] as? [BigUInt], [5, 6])
+        let bytes = (Data([0xff]) + Data([0xaa, 0xbb])).dropFirst()
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .bytes(length: 2), value: bytes as AnyObject), rightPaddedWord(Data([0xaa, 0xbb])))
+    }
+
+    func testSharedEmptyTupleArraysCannotBypassEncoderOrDecoderNodeBudget() {
+        var type: Parameter = .tuple(types: [])
+        var value = [AnyObject]() as AnyObject
+        // Only three 100-element containers are allocated here. Sharing the
+        // child object produces over one million logical nodes, zero ABI bytes.
+        for _ in 0..<3 {
+            type = .array(type: type, length: 100)
+            value = Array(repeating: value, count: 100) as AnyObject
+        }
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: [type], values: [value]))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: Data()))
+    }
+
+    func testSixtyThreeFixedArrayLevelsAroundEmptyTupleHaveConsistentDepthAccounting() throws {
+        var type: Parameter = .tuple(types: [])
+        var value = [AnyObject]() as AnyObject
+        for _ in 0..<63 {
+            type = .array(type: type, length: 1)
+            value = [value] as AnyObject
+        }
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [type], values: [value]), Data())
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: Data()))
+        var nested = try XCTUnwrap(decoded.first)
+        for _ in 0..<63 {
+            let array = try XCTUnwrap(nested as? [AnyObject])
+            XCTAssertEqual(array.count, 1)
+            nested = try XCTUnwrap(array.first)
+        }
+        XCTAssertTrue(try XCTUnwrap(nested as? [AnyObject]).isEmpty)
+    }
+
+    func testInvalidSchemaAndInputCannotUseMetadataFallback() throws {
+        let invalidRecords = [
+            "{\"type\":\"function\",\"inputs\":[]}",
+            "{\"type\":\"event\",\"name\":\"\",\"inputs\":[]}",
+            "{\"type\":\"error\",\"inputs\":[]}",
+            "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"unknown\"}",
+            "{\"type\":\"constructor\",\"stateMutability\":\"view\"}",
+            "{\"type\":\"fallback\",\"stateMutability\":\"pure\"}",
+            "{\"type\":\"receive\",\"stateMutability\":\"nonpayable\"}"
+        ]
+        for json in invalidRecords { XCTAssertThrowsError(try parseRecord(json)) }
+        let json = """
+        {"type":"function","name":"echo","stateMutability":"view",
+         "inputs":[{"name":"value","type":"string"}],
+         "outputs":[{"name":"value","type":"string"}]}
+        """
+        let element = try parseRecord(json)
+        let tokenWord = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertNil(element.decodeInputData(tokenWord))
+        XCTAssertNil(element.decodeInputData(Data()))
+        XCTAssertNil(element.decodeReturnData(Data()))
+        XCTAssertEqual(element.decodeReturnData(tokenWord)?["value"] as? String, "USDT")
+    }
+
+    func testJavaTronProtobufEnumSpellingsParseLikeSolidity() throws {
+        let pairs = [
+            ("{\"type\":\"Function\",\"name\":\"balanceOf\",\"stateMutability\":\"View\",\"inputs\":[{\"name\":\"who\",\"type\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}]}",
+             "{\"type\":\"function\",\"name\":\"balanceOf\",\"stateMutability\":\"view\",\"inputs\":[{\"name\":\"who\",\"type\":\"address\"}],\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}]}"),
+            ("{\"type\":\"Function\",\"name\":\"transfer\",\"stateMutability\":\"Nonpayable\",\"inputs\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}]}",
+             "{\"type\":\"function\",\"name\":\"transfer\",\"stateMutability\":\"nonpayable\",\"inputs\":[{\"name\":\"to\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"}],\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}]}"),
+            ("{\"type\":\"Constructor\",\"stateMutability\":\"Payable\",\"inputs\":[]}",
+             "{\"type\":\"constructor\",\"stateMutability\":\"payable\",\"inputs\":[]}"),
+            ("{\"type\":\"Event\",\"name\":\"Transfer\",\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"}]}",
+             "{\"type\":\"event\",\"name\":\"Transfer\",\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"}]}")
+        ]
+        for (javaTron, solidity) in pairs {
+            XCTAssertEqual(String(describing: try parseRecord(javaTron)), String(describing: try parseRecord(solidity)))
+        }
+        let stillInvalid = [
+            "{\"type\":\"FUNCTION\",\"name\":\"f\"}",
+            "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"VIEW\"}",
+            "{\"type\":\"function\",\"name\":\"f\",\"stateMutability\":\"UnknownMutabilityType\"}",
+            "{\"type\":\"Constructor\",\"stateMutability\":\"View\"}"
+        ]
+        for json in stillInvalid { XCTAssertThrowsError(try parseRecord(json)) }
+    }
+
+    func testTypedNegativeZeroFromBigIntThreeIsNormalized() throws {
+        let negativeZero = try XCTUnwrap(BigInt("-0"))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToBigUInt(negativeZero as AnyObject), BigUInt(0))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .int(bits: 256), value: negativeZero as AnyObject), word(0))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: negativeZero as AnyObject), word(0))
+    }
+
+    func testDepthAndDeclaredElementLimitsRejectSmallAdversarialInputs() {
+        var deeplyNested: Parameter = .uint(bits: 256)
+        for _ in 0..<80 { deeplyNested = .array(type: deeplyNested, length: 1) }
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [deeplyNested], data: word(1)))
+        XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256" + String(repeating: "[1]", count: 80)))
+        let zeroWidthElements: Parameter = .array(type: .tuple(types: []), length: 0)
+        // Zero-width tuples prevent payload length from serving as a node bound.
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [zeroWidthElements], data: words([32, 1_000_001])))
+        let impossibleStaticArray: Parameter = .array(type: .uint(bits: 256), length: UInt64.max)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [impossibleStaticArray], data: word(1)))
+    }
+
+    func testAnonymousEventDoesNotRequireSignatureTopic() throws {
+        let json = """
+        {"type":"event","name":"Note","anonymous":true,"inputs":[{"name":"n","type":"uint256","indexed":false}]}
+        """
+        guard case let .event(event) = try parseRecord(json) else { return XCTFail("Expected event") }
+        let log = try eventLog(data: word(7), topics: [])
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: log))
+        XCTAssertEqual(result["0"] as? BigUInt, BigUInt(7))
+        XCTAssertEqual(result["n"] as? BigUInt, BigUInt(7))
+        let extraTopic = try eventLog(data: word(7), topics: [word(1)])
+        XCTAssertNil(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: extraTopic))
+    }
+
+    func testIndexedSingleWordTupleRemainsOpaqueTopicHash() throws {
+        let json = """
+        {"type":"event","name":"Seen","anonymous":false,"inputs":[
+         {"name":"item","type":"tuple","indexed":true,"components":[{"name":"n","type":"uint256"}]},
+         {"name":"count","type":"uint256","indexed":false}]}
+        """
+        guard case let .event(event) = try parseRecord(json) else { return XCTFail("Expected event") }
+        XCTAssertEqual(event.signature, "Seen((uint256),uint256)")
+        let suppliedHash = Data(repeating: 0x11, count: 32)
+        let log = try eventLog(data: word(9), topics: [event.topic, suppliedHash])
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: log))
+        XCTAssertEqual(result["item"] as? Data, suppliedHash)
+        XCTAssertEqual(result["0"] as? Data, suppliedHash)
+        XCTAssertEqual(result["count"] as? BigUInt, BigUInt(9))
+        let missingTopics = try eventLog(data: word(9), topics: [])
+        XCTAssertNil(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: missingTopics))
+        let shortTopic = try eventLog(data: word(9), topics: [event.topic, Data([1])])
+        XCTAssertNil(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: shortTopic))
+    }
+}
+
+// Append in the same Tests.swift file as ABIv2RegressionTests so its private
+// word/words/rightPaddedWord helpers are available. No test has been executed.
+extension ABIv2RegressionTests {
+    func testEveryIntegerWidthHasCorrectBoundaryWordsAndRejectsOverflow() throws {
+        for byteWidth in 1...32 {
+            let bits = UInt64(byteWidth * 8)
+            let unsignedType: Parameter = .uint(bits: bits)
+            let signedType: Parameter = .int(bits: bits)
+            let unsignedMaximum = (BigUInt(1) << Int(bits)) - 1
+            let signedMaximum = (BigInt(1) << Int(bits - 1)) - 1
+            let signedMinimum = -(BigInt(1) << Int(bits - 1))
+
+            // Expected bytes describe the ABI bit pattern directly. They do
+            // not serialize the expected BigInt values or call the encoder.
+            let unsignedMaximumWord = Data(repeating: 0, count: 32 - byteWidth)
+                + Data(repeating: 0xff, count: byteWidth)
+            let signedMaximumWord = Data(repeating: 0, count: 32 - byteWidth)
+                + Data([0x7f]) + Data(repeating: 0xff, count: byteWidth - 1)
+            let signedMinimumWord = Data(repeating: 0xff, count: 32 - byteWidth)
+                + Data([0x80]) + Data(repeating: 0, count: byteWidth - 1)
+
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: BigUInt(0) as AnyObject), word(0), "uint\(bits) minimum")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: unsignedMaximum as AnyObject), unsignedMaximumWord, "uint\(bits) maximum")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: signedMinimum as AnyObject), signedMinimumWord, "int\(bits) minimum")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: signedMaximum as AnyObject), signedMaximumWord, "int\(bits) maximum")
+
+            let unsignedDecoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [unsignedType, unsignedType], data: word(0) + unsignedMaximumWord))
+            XCTAssertEqual(unsignedDecoded[0] as? BigUInt, BigUInt(0), "uint\(bits) minimum")
+            XCTAssertEqual(unsignedDecoded[1] as? BigUInt, unsignedMaximum, "uint\(bits) maximum")
+            let signedDecoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [signedType, signedType], data: signedMinimumWord + signedMaximumWord))
+            XCTAssertEqual(signedDecoded[0] as? BigInt, signedMinimum, "int\(bits) minimum")
+            XCTAssertEqual(signedDecoded[1] as? BigInt, signedMaximum, "int\(bits) maximum")
+
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: BigInt(-1) as AnyObject), "uint\(bits) negative")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsignedType, value: (unsignedMaximum + 1) as AnyObject), "uint\(bits) overflow")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: (signedMinimum - 1) as AnyObject), "int\(bits) underflow")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signedType, value: (signedMaximum + 1) as AnyObject), "int\(bits) overflow")
+
+            if byteWidth < 32 {
+                // Wider nonzero unsigned bits and inconsistent signed extension
+                // must not be silently reduced modulo the declared bit width.
+                let unsignedOverflowWord = Data(repeating: 0, count: 31 - byteWidth)
+                    + Data([1]) + Data(repeating: 0, count: byteWidth)
+                let signedOverflowWord = Data(repeating: 0, count: 32 - byteWidth)
+                    + Data([0x80]) + Data(repeating: 0, count: byteWidth - 1)
+                let signedUnderflowWord = Data(repeating: 0xff, count: 32 - byteWidth)
+                    + Data([0x7f]) + Data(repeating: 0xff, count: byteWidth - 1)
+                XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [unsignedType], data: unsignedOverflowWord), "uint\(bits) overflow word")
+                XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [signedType], data: signedOverflowWord), "int\(bits) overflow word")
+                XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [signedType], data: signedUnderflowWord), "int\(bits) underflow word")
+            }
+        }
+    }
+
+    func testEveryFixedBytesWidthUsesItsDeclaredPrefixAndOneWord() throws {
+        for length in 1...32 {
+            let type: Parameter = .bytes(length: UInt64(length))
+            let value = Data((1...length).map { UInt8($0) })
+            let expected = value + Data(repeating: 0, count: 32 - length)
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: type, value: value as AnyObject), expected, "bytes\(length)")
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [type], data: expected))
+            XCTAssertEqual(decoded[0] as? Data, value, "bytes\(length)")
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: type, value: Data(repeating: 1, count: length + 1) as AnyObject), "bytes\(length) too long")
+        }
+    }
+
+    func testMultibyteUTF8StringPreservesEmbeddedNULAndUsesByteLength() throws {
+        let value = "钱包💎\u{0}X"
+        let expectedUTF8 = Data([0xe9, 0x92, 0xb1, 0xe5, 0x8c, 0x85,
+                                 0xf0, 0x9f, 0x92, 0x8e, 0x00, 0x58])
+        let expected = words([32, 12]) + rightPaddedWord(expectedUTF8)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.string], values: [value as AnyObject]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: expected))
+        XCTAssertEqual(decoded[0] as? String, value)
+        XCTAssertEqual((decoded[0] as? String)?.utf8.count, 12)
+    }
+
+    func testDynamicBytesAtWordBoundariesUseIndependentLengthAndPadding() throws {
+        for length in [0, 31, 32, 33, 64] {
+            let value = Data(repeating: 0xa5, count: length)
+            let padding = (32 - length % 32) % 32
+            let body = word(UInt64(length)) + value + Data(repeating: 0, count: padding)
+            let expected = word(32) + body
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .dynamicBytes, value: value as AnyObject), body, "length \(length)")
+            XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.dynamicBytes], values: [value as AnyObject]), expected, "length \(length)")
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: expected))
+            XCTAssertEqual(decoded[0] as? Data, value, "length \(length)")
+        }
+    }
+
+    func testMalformedHexBytesAreRejectedWithoutChangingStringTextSemantics() throws {
+        let malformed = "0x1g"
+        XCTAssertNil(TLCore.ABIv2Encoder.convertToData(malformed as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .bytes(length: 2), value: malformed as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .dynamicBytes, value: malformed as AnyObject))
+        let expectedText = words([32, 4]) + rightPaddedWord(Data([0x30, 0x78, 0x31, 0x67]))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [.string], values: [malformed as AnyObject]), expectedText)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.string], data: expectedText))
+        XCTAssertEqual(decoded[0] as? String, malformed)
+    }
+
+    func testInvalidTypedWeb3AddressesAreNotNormalizedAsRawDataAddresses() throws {
+        let address = Data(repeating: 0x11, count: 20)
+        let expected = Data(repeating: 0, count: 12) + address
+        let invalidTRONObject = TLCore.Web3Address(Data([0x41]) + address)
+        let invalidWordObject = TLCore.Web3Address(expected)
+        XCTAssertFalse(invalidTRONObject.isValid)
+        XCTAssertFalse(invalidWordObject.isValid)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: invalidTRONObject as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: invalidWordObject as AnyObject))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: TLCore.Web3Address(address) as AnyObject), expected)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: (Data([0x41]) + address) as AnyObject), expected)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: expected as AnyObject), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.address], data: expected))
+        XCTAssertEqual((decoded[0] as? TLCore.Web3Address)?.addressData, address)
+        let wrongHighBytes = Data(repeating: 0, count: 11) + Data([0x41]) + address
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.address], data: wrongHighBytes))
+    }
+
+    func testOneDimensionalBatchResultsRetainMainAppBigUIntAndBoolCasts() throws {
+        let types: [Parameter] = [.array(type: .uint(bits: 256), length: 0), .array(type: .bool, length: 0)]
+        let expected = words([64, 160, 2, 5, 6, 2, 1, 0])
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+        XCTAssertEqual(decoded[0] as? [BigUInt], [BigUInt(5), BigUInt(6)])
+        XCTAssertEqual(decoded[1] as? [Bool], [true, false])
+        let values: [AnyObject] = [[BigUInt(5), BigUInt(6)] as AnyObject, [true, false] as AnyObject]
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: values), expected)
+    }
+}
+
+extension ABIv2RegressionTests {
+    func testFixedPointTypesCoverEveryWidthAndDecimalPrecisionExactly() throws {
+        for byteWidth in 1...32 {
+            for decimals in 1...80 {
+                let bits = UInt64(byteWidth * 8)
+                let precision = UInt64(decimals)
+                let signed: Parameter = .fixed(bits: bits, decimals: precision)
+                let unsigned: Parameter = .ufixed(bits: bits, decimals: precision)
+                XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("fixed\(bits)x\(decimals)"), signed)
+                XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("ufixed\(bits)x\(decimals)"), unsigned)
+                let positiveText = "0." + String(repeating: "0", count: decimals - 1) + "1"
+                let negativeText = "-" + positiveText
+                XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: positiveText as AnyObject), word(1))
+                XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: negativeText as AnyObject), Data(repeating: 0xff, count: 32))
+                let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [signed, unsigned], data: Data(repeating: 0xff, count: 32) + word(1)))
+                XCTAssertEqual((decoded[0] as? TLCore.ABIv2.FixedPoint)?.description, negativeText)
+                XCTAssertEqual((decoded[1] as? TLCore.ABIv2.FixedPoint)?.description, positiveText)
+                XCTAssertEqual((decoded[0] as? TLCore.ABIv2.FixedPoint)?.scaledValue, BigInt(-1))
+            }
+        }
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("fixed").abiRepresentation, "fixed128x18")
+        XCTAssertEqual(try TLCore.ABIv2TypeParser.parseTypeString("ufixed").abiRepresentation, "ufixed128x18")
+        for invalid in ["fixed8", "fixed8x0", "fixed8x81", "fixed7x2", "ufixed264x2", "fixed08x2", "fixed8x02", "fixedx2"] {
+            XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString(invalid), invalid)
+        }
+    }
+
+    func testFixedPointBoundariesDoNotRoundOrLosePrecision() throws {
+        let signed: Parameter = .fixed(bits: 8, decimals: 2)
+        let unsigned: Parameter = .ufixed(bits: 8, decimals: 2)
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "1.27" as AnyObject), signedByteWord(127))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "-1.28" as AnyObject), signedByteWord(-128))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "2.55" as AnyObject), word(255))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "1.2700" as AnyObject), word(127))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: "-0.00" as AnyObject), word(0))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "-0" as AnyObject), word(0))
+        for invalid in ["1.28", "-1.29", "0.001", "1e-2", "0x01", "NaN", "", "+", "1.", ".1", " 1"] {
+            XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: invalid as AnyObject), invalid)
+        }
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "-0.01" as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: unsigned, value: "2.56" as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: Double(0.1) as AnyObject))
+        let wrongScale = try XCTUnwrap(TLCore.ABIv2.FixedPoint(scaledValue: BigInt(1), decimals: 3))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: signed, value: wrongScale as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [signed], data: word(128)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [unsigned], data: word(256)))
+        let maximum = (BigUInt(1) << 256) - 1
+        let exact = try XCTUnwrap(TLCore.ABIv2.FixedPoint(scaledValue: BigInt(maximum), decimals: 80))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .ufixed(bits: 256, decimals: 80), value: exact as AnyObject), Data(repeating: 0xff, count: 32))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .ufixed(bits: 256, decimals: 80), value: exact.description as AnyObject), Data(repeating: 0xff, count: 32))
+    }
+
+    func testZeroLengthFixedArraysRemainDistinctFromDynamicArrays() throws {
+        let staticZero = try TLCore.ABIv2TypeParser.parseTypeString("uint256[0]")
+        let dynamicZero = try TLCore.ABIv2TypeParser.parseTypeString("string[0]")
+        let empty = [AnyObject]() as AnyObject
+        XCTAssertEqual(staticZero, Parameter.fixedArray(type: .uint(bits: 256), length: 0))
+        XCTAssertNotEqual(staticZero, Parameter.array(type: .uint(bits: 256), length: 0))
+        XCTAssertEqual(Parameter.fixedArray(type: .bool, length: 2), Parameter.array(type: .bool, length: 2))
+        XCTAssertEqual(staticZero.abiRepresentation, "uint256[0]")
+        for (zero, expected) in [(staticZero, word(7)), (dynamicZero, words([64, 7]))] {
+            let types: [Parameter] = [zero, .uint(bits: 256)]
+            XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: types, values: [empty, BigUInt(7) as AnyObject]), expected)
+            let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: types, data: expected))
+            XCTAssertTrue(try XCTUnwrap(decoded[0] as? [AnyObject]).isEmpty)
+            XCTAssertEqual(decoded[1] as? BigUInt, BigUInt(7))
+        }
+        let array = try TLCore.ABIv2TypeParser.parseTypeString("string[0][]")
+        let values = [empty, empty] as AnyObject
+        // Both zero-sized dynamic tails begin at the end of their container.
+        let expected = words([32, 2, 64, 64])
+        XCTAssertEqual(TLCore.ABIv2Encoder.encode(types: [array], values: [values]), expected)
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [array], data: expected))
+        let rows = try XCTUnwrap(decoded[0] as? [[AnyObject]])
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.allSatisfy { $0.isEmpty })
+        let json = """
+        {"type":"function","name":"f","inputs":[{"name":"zero","type":"tuple[0]","components":[{"name":"s","type":"string"}]}],"outputs":[],"stateMutability":"pure"}
+        """
+        let element = try parseRecord(json)
+        guard case let .function(function) = element else { return XCTFail("Expected function") }
+        XCTAssertEqual(function.signature, "f((string)[0])")
+        XCTAssertEqual(element.encodeParameters([empty]), function.methodEncoding + word(32))
+        XCTAssertNotNil(element.decodeInputData(function.methodEncoding + word(32)))
+    }
+
+    func testGeneralABIDecodingCanExplicitlyDisableLegacyTokenMetadata() throws {
+        let legacy = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: legacy)?.first as? String, "USDT")
+        for invalid in [legacy, word(0), word(32)] {
+            XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: invalid, allowLegacyBytes32: false))
+            XCTAssertNil(TLCore.ABIv2Decoder.decodeSignleType(type: .string, data: invalid, allowLegacyBytes32: false).value)
+        }
+        let standard = words([32, 4]) + legacy
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: standard, allowLegacyBytes32: false)?.first as? String, "USDT")
+    }
+
+    func testLegacyBytes32FallbackRejectsLeftPaddedOffsetWords() {
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: word(32)))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: word(64)))
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: word(0))?.first as? String, "")
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: rightPaddedWord(Data("USDT".utf8)))?.first as? String, "USDT")
+    }
+
+    func testDynamicStringAndBytesRejectDirtyPadding() {
+        let dirtyString = words([32, 1]) + Data("a".utf8) + Data(repeating: 0xff, count: 31)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.string], data: dirtyString))
+        let dirtyBytes = words([32, 1]) + Data([0xaa]) + Data(repeating: 0xff, count: 31)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.dynamicBytes], data: dirtyBytes))
+        let clean = words([32, 1]) + rightPaddedWord(Data("a".utf8))
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.string], data: clean)?.first as? String, "a")
+    }
+
+    func testDecodeSingleTypeUsesEnclosingHeadAsOffsetFloor() {
+        let strings: Parameter = .array(type: .string, length: 0)
+        let data = words([32, 0])
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [strings, .uint(bits: 256)], data: data))
+        let rejected = TLCore.ABIv2Decoder.decodeSignleType(type: strings, data: data, pointer: 0, allowLegacyBytes32: false, minimumTail: 64)
+        XCTAssertNil(rejected.value)
+        XCTAssertNil(rejected.bytesConsumed)
+    }
+
+    func testDecodeSingleTypeRejectsIncompleteOrInvalidEnclosingHeads() {
+        let cases: [(Parameter, Data)] = [
+            (.string, rightPaddedWord(Data("USDT".utf8))),
+            (.string, word(0)),
+            (.uint(bits: 256), word(7))
+        ]
+        for (type, data) in cases {
+            for headWidth in [UInt64(0), 31, 64, UInt64.max] {
+                for allowLegacy in [false, true] {
+                    let result = TLCore.ABIv2Decoder.decodeSignleType(
+                        type: type, data: data, allowLegacyBytes32: allowLegacy,
+                        minimumTail: headWidth
+                    )
+                    XCTAssertNil(result.value)
+                    XCTAssertNil(result.bytesConsumed)
+                }
+            }
+        }
+        let truncated = TLCore.ABIv2Decoder.decodeSignleType(
+            type: .uint(bits: 256), data: words([7, 9]), pointer: 32,
+            allowLegacyBytes32: false, minimumTail: 96
+        )
+        XCTAssertNil(truncated.value)
+        XCTAssertNil(truncated.bytesConsumed)
+    }
+
+    func testDecodeSingleTypePreservesValidLegacyAndZeroWidthHeads() throws {
+        let headWidths: [UInt64?] = [nil, 32]
+        for text in ["USDT", ""] {
+            let data = rightPaddedWord(Data(text.utf8))
+            for headWidth in headWidths {
+                let result = TLCore.ABIv2Decoder.decodeSignleType(
+                    type: .string, data: data, allowLegacyBytes32: true,
+                    minimumTail: headWidth
+                )
+                XCTAssertEqual(result.value as? String, text)
+                XCTAssertEqual(result.bytesConsumed, UInt64(32))
+            }
+        }
+        let empty = TLCore.ABIv2Decoder.decodeSignleType(
+            type: .tuple(types: []), data: Data(), allowLegacyBytes32: false,
+            minimumTail: 0
+        )
+        XCTAssertTrue(try XCTUnwrap(empty.value as? [AnyObject]).isEmpty)
+        XCTAssertEqual(empty.bytesConsumed, UInt64(0))
+    }
+
+    func testDecodeSingleTypeKeepsThreeFourAndFiveArgumentFunctionReferences() {
+        typealias Result = (value: AnyObject?, bytesConsumed: UInt64?)
+        let original: (Parameter, Data, UInt64) -> Result = TLCore.ABIv2Decoder.decodeSignleType
+        let withLegacy: (Parameter, Data, UInt64, Bool) -> Result = TLCore.ABIv2Decoder.decodeSignleType
+        let withHead: (Parameter, Data, UInt64, Bool, UInt64?) -> Result = TLCore.ABIv2Decoder.decodeSignleType
+        let data = words([7, 9])
+        let results = [
+            original(.uint(bits: 256), data, 32),
+            withLegacy(.uint(bits: 256), data, 32, false),
+            withHead(.uint(bits: 256), data, 32, false, 64)
+        ]
+        for result in results {
+            XCTAssertEqual(result.value as? BigUInt, BigUInt(9))
+            XCTAssertEqual(result.bytesConsumed, UInt64(32))
+        }
+        let metadata = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertEqual(original(.string, metadata, 0).value as? String, "USDT")
+        XCTAssertEqual(withLegacy(.string, metadata, 0, true).value as? String, "USDT")
+        XCTAssertNil(withLegacy(.string, metadata, 0, false).value)
+    }
+
+    func testABIConversionRejectsMalformedAddressAndNormalizesOddHex() {
+        let malformedAddress = "0x" + String(repeating: "1g", count: 20)
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: malformedAddress as AnyObject))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: TLCore.Web3Address(malformedAddress) as AnyObject))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToData("0x1" as AnyObject), Data([1]))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToData("0x123" as AnyObject), Data([0x01, 0x23]))
+        XCTAssertEqual(TLCore.ABIv2Encoder.convertToData("0XABCD" as AnyObject), Data([0xab, 0xcd]))
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: String(repeating: "9", count: 10000) as AnyObject))
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .uint(bits: 256), value: (String(repeating: "0", count: 10000) + "1") as AnyObject), word(1))
+    }
+}
+
+extension ABIv2RegressionTests {
+    func testStaticBytesAndFunctionRejectDirtyRightPadding() throws {
+        for length in 1...31 {
+            let type: Parameter = .bytes(length: UInt64(length))
+            let value = Data(repeating: 0x12, count: length)
+            let dirty = value + Data([1]) + Data(repeating: 0, count: 31 - length)
+            XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [type], data: dirty))
+        }
+        let function = Data(repeating: 0x11, count: 24)
+        let dirtyFunction = function + Data([1]) + Data(repeating: 0, count: 7)
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [.function], data: dirtyFunction))
+        let validFunction = function + Data(repeating: 0, count: 8)
+        XCTAssertEqual(TLCore.ABIv2Decoder.decode(types: [.function], data: validFunction)?.first as? Data, function)
+    }
+
+    func testContractDeploymentSentinelCannotBecomeAnABIAddress() {
+        var address = TLCore.Web3Address(Data(repeating: 0x11, count: 20))
+        address.type = .contractDeployment
+        XCTAssertNil(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: address as AnyObject))
+    }
+
+    func testTypeTraversalBudgetIsSharedAcrossRootParameters() {
+        var shared: Parameter = .tuple(types: [])
+        for _ in 0..<18 { shared = .tuple(types: [shared, shared]) }
+        let types = Array(repeating: shared, count: 1000)
+        let values = Array(repeating: [AnyObject]() as AnyObject, count: 1000)
+        // Indirect enum and Array COW let this tiny schema describe hundreds of
+        // millions of visits. Repeated root types must share the work budget.
+        XCTAssertNil(TLCore.ABIv2Encoder.encode(types: types, values: values))
+        XCTAssertNil(TLCore.ABIv2Decoder.decode(types: types, data: Data()))
+    }
+
+    func testJSONContractReturnCanDisableLegacyMetadataWithoutInternalMembers() throws {
+        let json = """
+        {"type":"function","name":"name","inputs":[],"outputs":[{"name":"value","type":"string"}],"stateMutability":"view"}
+        """
+        let element = try parseRecord(json)
+        let metadata = rightPaddedWord(Data("USDT".utf8))
+        XCTAssertEqual(element.decodeReturnData(metadata)?["value"] as? String, "USDT")
+        XCTAssertNil(element.decodeReturnData(metadata, allowLegacyBytes32: false))
+        XCTAssertEqual(element.decodeReturnData(words([32, 4]) + metadata, allowLegacyBytes32: false)?["value"] as? String, "USDT")
+    }
+}
+
+
+final class HexDecodingRegressionTests: XCTestCase {
+    func testHexDecoderRejectsIncompleteAndInvalidBytePairs() {
+        let malformed = ["0", "0x1", "abc", "0xabc", "1g", "g1", "01g2", "012g",
+                         " a", "a ", "+1", "-1", "0x12\n", "aé", "Ａ１"]
+        for value in malformed {
+            XCTAssertNil(Data(hexString: value), value)
+            XCTAssertNil(Data.fromHex(value), value)
+        }
+    }
+
+    func testHexDecoderPreservesCompleteBytesAndEmptyPayloads() {
+        for prefix in ["", "0x"] {
+            XCTAssertEqual(Data(hexString: prefix), Data())
+            XCTAssertEqual(Data.fromHex(prefix), Data())
+            XCTAssertEqual(Data(hexString: prefix + "00aB10fF"), Data([0x00, 0xab, 0x10, 0xff]))
+            XCTAssertEqual(Data.fromHex(prefix + "00aB10fF"), Data([0x00, 0xab, 0x10, 0xff]))
+        }
+    }
+
+    func testAddressesRejectTruncatedAndMalformedHex() {
+        let leadingBytes = String(repeating: "11", count: 19)
+        let valid = leadingBytes + "ab"
+        let expected = Data(repeating: 0x11, count: 19) + Data([0xab])
+        let malformed = [String(valid.dropLast()), leadingBytes + "ag", leadingBytes + "ga",
+                         String(valid.dropLast(2)), valid + "00"]
+        for prefix in ["", "0x"] {
+            XCTAssertEqual(TLCore.Address(string: prefix + valid)?.data, expected)
+            XCTAssertTrue(TLCore.Web3Address(prefix + valid).isValid)
+            for value in malformed {
+                XCTAssertNil(TLCore.Address(string: prefix + value), prefix + value)
+                XCTAssertFalse(TLCore.Web3Address(prefix + value).isValid, prefix + value)
+            }
+        }
+    }
+
+    func testJSONHexFieldsRejectMalformedByteStrings() throws {
+        struct Payload: Decodable {
+            let value: Data
+            enum CodingKeys: String, CodingKey { case value }
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                value = try container.decodeHexString(forKey: .value)
+            }
+        }
+        for value in ["abc", "1g", "g1"] {
+            let json = try JSONSerialization.data(withJSONObject: ["value": value])
+            XCTAssertThrowsError(try JSONDecoder().decode(Payload.self, from: json))
+        }
+        let json = try JSONSerialization.data(withJSONObject: ["value": "00ab"])
+        XCTAssertEqual(try JSONDecoder().decode(Payload.self, from: json).value, Data([0x00, 0xab]))
+    }
+}
+
+final class StringAddressValidationTests: XCTestCase {
+    func testTRONAddressValidationRejectsImpossibleByteLengths() {
+        for length in [0, 1, 33, 35, 4096, 65_536] {
+            let input = length == 0 ? "" : "T" + String(repeating: "1", count: length - 1)
+            XCTAssertFalse(input.isTRXAddress(), "Invalid length: \(length)")
+            XCTAssertFalse(input.isEIP712TronAddress(), "Invalid length: \(length)")
+        }
+        // Grapheme count must not hide an oversized UTF-8 representation.
+        XCTAssertFalse(("T" + String(repeating: "é", count: 33)).isTRXAddress())
+        XCTAssertFalse(("T" + String(repeating: "1\u{0301}", count: 33)).isTRXAddress())
+    }
+
+    func testTRONAddressValidationRetainsChecksumAndNetworkChecks() {
+        let vectors = [
+            ("T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", "41" + String(repeating: "00", count: 20)),
+            ("TNPeeaaFB7K9cmo4uQpcU32zGK8G1NYqeL", "418840e6c55b9ada326d211d818c34a994aeced808")
+        ]
+        for (address, hex) in vectors {
+            XCTAssertTrue(address.isTRXAddress())
+            XCTAssertTrue(address.isEIP712TronAddress())
+            XCTAssertEqual(address.base58CheckData?.toHexString(), hex)
+        }
+        XCTAssertFalse("T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWw1".isTRXAddress())
+        XCTAssertFalse(("T" + String(repeating: "0", count: 33)).isTRXAddress())
+        let otherNetwork = String(base58CheckEncoding: Data([0x42]) + Data(repeating: 0, count: 20))
+        XCTAssertFalse(otherNetwork.isTRXAddress())
+    }
+
+    func testAddressLengthGateDoesNotLimitGenericBase58CheckPayloads() {
+        let payload = Data(repeating: 0xab, count: 64)
+        let encoded = String(base58CheckEncoding: payload)
+        XCTAssertGreaterThan(encoded.utf8.count, 34)
+        XCTAssertEqual(Data(base58CheckDecoding: encoded), payload)
+        XCTAssertFalse(encoded.isTRXAddress())
+    }
+
+    func testAcceptsCompleteEVMHexAddresses() {
+        let addresses = [
+            "45245bc59219eeaaf6cd3f382e078a461ff9de7b",
+            "45245BC59219EEAAF6CD3F382E078A461FF9DE7B",
+            "45245bC59219eEaAf6Cd3F382e078A461ff9dE7b",
+            String(repeating: "00", count: 20),
+            String(repeating: "ff", count: 20)
+        ]
+        for prefix in ["", "0x", "0X"] {
+            for address in addresses {
+                XCTAssertTrue((prefix + address).isAddress, prefix + address)
+            }
+        }
+    }
+
+    func testRejectsTextPreviouslyAcceptedByUTF8HexLength() {
+        // Each input occupies 10 UTF-8 bytes, which the old predicate accepted.
+        for value in ["helloworld", "1234567890", "0x12345678", "😀😀ab", String(repeating: "é", count: 5)] {
+            XCTAssertFalse(value.isAddress, value)
+        }
+    }
+
+    func testRejectsMalformedHexWithoutRepairingInput() {
+        let valid = String(repeating: "ab", count: 20)
+        let malformed: [String] = [
+            "", String(valid.dropLast()), valid + "a", String(valid.dropLast(2)), valid + "ab",
+            String(repeating: "00", count: 32),
+            "g" + String(valid.dropFirst()), String(valid.dropLast()) + "g",
+            " " + valid, valid + "\n",
+            "+1" + String(valid.dropFirst(2)), "-1" + String(valid.dropFirst(2)),
+            String(repeating: "Ａ", count: 40)
+        ]
+        for prefix in ["", "0x", "0X"] {
+            for value in malformed {
+                XCTAssertFalse((prefix + value).isAddress, prefix + value)
+            }
+        }
+        for prefix in ["0x", "0X"] {
+            XCTAssertFalse((prefix + "0x" + valid).isAddress)
+            XCTAssertFalse((prefix + "0X" + valid).isAddress)
+        }
+    }
+
+    func testKeepsTRONValidationSeparateFromEVMHexValidation() {
+        let tronAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+        XCTAssertTrue(tronAddress.isTRXAddress())
+        XCTAssertFalse(tronAddress.isAddress)
+
+        let tronHex = "41" + String(repeating: "00", count: 20)
+        for prefix in ["", "0x", "0X"] {
+            XCTAssertTrue((prefix + tronHex).isEIP712TronAddress())
+            XCTAssertFalse((prefix + tronHex).isAddress)
+        }
+    }
+}
+
+final class Blake2sFinalBoundsTests: XCTestCase {
+    private let message = Array("abc".utf8)
+    private let key = Array("key".utf8)
+    private let personal = Array("TLCore01".utf8)
+
+    func testRFC7693DigestWithExactAndLargerOutputCapacities() throws {
+        // RFC 7693, Appendix B: BLAKE2s-256("abc").
+        let expected = Array(try XCTUnwrap(Data(hexString:
+            "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982")))
+        for capacity in [32, 33, 64] {
+            var state = blake2s_state()
+            XCTAssertEqual(blake2s_Init(&state, 32), 0)
+            XCTAssertEqual(message.withUnsafeBufferPointer {
+                blake2s_Update(&state, $0.baseAddress, $0.count)
+            }, 0)
+            var output = [UInt8](repeating: 0xa5, count: capacity + 2)
+            XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                blake2s_Final(&state, $0.baseAddress!.advanced(by: 1), capacity)
+            }, 0)
+            XCTAssertEqual(output, [0xa5] + expected + [UInt8](repeating: 0xa5, count: capacity - 32 + 1))
+        }
+        var output = [UInt8](repeating: 0, count: 32)
+        XCTAssertEqual(message.withUnsafeBufferPointer { input in
+            output.withUnsafeMutableBufferPointer {
+                blake2s(input.baseAddress, UInt32(input.count), $0.baseAddress, $0.count)
+            }
+        }, 0)
+        XCTAssertEqual(output, expected)
+    }
+
+    func testAllDigestLengthsAndInitializationModesWriteOnlyConfiguredBytes() {
+        for digestLength in 1...32 {
+            for mode in 0..<3 {
+                var state = blake2s_state()
+                switch mode {
+                case 0:
+                    XCTAssertEqual(blake2s_Init(&state, digestLength), 0)
+                case 1:
+                    XCTAssertEqual(key.withUnsafeBufferPointer {
+                        blake2s_InitKey(&state, digestLength, $0.baseAddress, $0.count)
+                    }, 0)
+                default:
+                    XCTAssertEqual(personal.withUnsafeBufferPointer {
+                        blake2s_InitPersonal(&state, digestLength, $0.baseAddress, $0.count)
+                    }, 0)
+                }
+                XCTAssertEqual(message.withUnsafeBufferPointer {
+                    blake2s_Update(&state, $0.baseAddress, $0.count)
+                }, 0)
+                var exactState = state
+                var expected = [UInt8](repeating: 0, count: digestLength)
+                XCTAssertEqual(expected.withUnsafeMutableBufferPointer {
+                    blake2s_Final(&exactState, $0.baseAddress, $0.count)
+                }, 0)
+                var output = [UInt8](repeating: 0xa5, count: 66)
+                XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                    blake2s_Final(&state, $0.baseAddress!.advanced(by: 1), 64)
+                }, 0)
+                XCTAssertEqual(output, [0xa5] + expected + [UInt8](repeating: 0xa5, count: 65 - digestLength),
+                               "digestLength=\(digestLength), mode=\(mode)")
+            }
+        }
+    }
+
+    func testInsufficientCapacityAndRepeatedFinalLeaveOutputUnchanged() {
+        var state = blake2s_state()
+        XCTAssertEqual(blake2s_Init(&state, 32), 0)
+        XCTAssertEqual(blake2s_Final(&state, nil, 32), -1)
+        for capacity in [0, 31] {
+            var output = [UInt8](repeating: 0xa5, count: 64)
+            XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                blake2s_Final(&state, $0.baseAddress, capacity)
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+        }
+        // Rejected arguments must not finalize the state; a valid retry still succeeds.
+        var digest = [UInt8](repeating: 0, count: 32)
+        XCTAssertEqual(digest.withUnsafeMutableBufferPointer {
+            blake2s_Final(&state, $0.baseAddress, $0.count)
+        }, 0)
+        var output = [UInt8](repeating: 0xa5, count: 64)
+        XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+            blake2s_Final(&state, $0.baseAddress, $0.count)
+        }, -1)
+        XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+    }
+
+    func testInvalidStateDigestLengthsAreRejectedWithoutWriting() {
+        for digestLength: UInt8 in [0, 33, 255] {
+            var state = blake2s_state()
+            XCTAssertEqual(blake2s_Init(&state, 32), 0)
+            state.outlen = digestLength
+            var output = [UInt8](repeating: 0xa5, count: 256)
+            XCTAssertEqual(output.withUnsafeMutableBufferPointer {
+                blake2s_Final(&state, $0.baseAddress, $0.count)
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 256))
+        }
+    }
+
+    func testInitAndOneShotContinueRejectingInvalidDigestLengths() {
+        for digestLength in [0, 33, 64] {
+            var state = blake2s_state()
+            XCTAssertEqual(blake2s_Init(&state, digestLength), -1)
+            XCTAssertEqual(key.withUnsafeBufferPointer {
+                blake2s_InitKey(&state, digestLength, $0.baseAddress, $0.count)
+            }, -1)
+            XCTAssertEqual(personal.withUnsafeBufferPointer {
+                blake2s_InitPersonal(&state, digestLength, $0.baseAddress, $0.count)
+            }, -1)
+            var output = [UInt8](repeating: 0xa5, count: 64)
+            XCTAssertEqual(message.withUnsafeBufferPointer { input in
+                output.withUnsafeMutableBufferPointer {
+                    blake2s(input.baseAddress, UInt32(input.count), $0.baseAddress, digestLength)
+                }
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+            XCTAssertEqual(message.withUnsafeBufferPointer { input in
+                key.withUnsafeBufferPointer { keyBytes in
+                    output.withUnsafeMutableBufferPointer {
+                        blake2s_Key(input.baseAddress, UInt32(input.count), keyBytes.baseAddress,
+                                    keyBytes.count, $0.baseAddress, digestLength)
+                    }
+                }
+            }, -1)
+            XCTAssertEqual(output, [UInt8](repeating: 0xa5, count: 64))
+        }
+    }
+}
+
+
+// Fixed wire-format fixtures exercise generated metadata independently of
+// encode/decode round trips, including TLCore's custom transaction class name.
+final class ProtobufUpgradeTests: XCTestCase {
+    func testRawTransactionWireBytesAndTxIDStayStable() throws {
+        let transfer = TransferContract()
+        transfer.ownerAddress = Data([0x41]) + Data(repeating: 1, count: 20)
+        transfer.toAddress = Data([0x41]) + Data(repeating: 2, count: 20)
+        transfer.amount = 7
+        let contract = Transaction_Contract()
+        contract.type = .transferContract
+        contract.parameter.typeURL = "type.googleapis.com/protocol.TransferContract"
+        contract.parameter.value = try XCTUnwrap(transfer.data())
+        let raw = Transaction_raw()
+        raw.refBlockBytes = Data([0x12, 0x34])
+        raw.refBlockHash = Data(repeating: 0x11, count: 8)
+        raw.expiration = 1234
+        raw.timestamp = 567
+        raw.contractArray = [contract]
+        let bytes = try XCTUnwrap(raw.data())
+        // Independently encoded from the protocol field numbers and varints.
+        XCTAssertEqual(bytes.hexString, "0a0212342208111111111111111140d2095a65080112610a2d747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e5472616e73666572436f6e747261637412300a154101010101010101010101010101010101010101011215410202020202020202020202020202020202020202180770b704")
+        XCTAssertEqual(bytes.sha256T().hexString, "487872e3c0f728e1bf9a178ba52eee3ff9ad45e686a1273e8194e18998ad95a2")
+    }
+
+    func testZksnarkRetainsWireFormatAndTronTransactionType() throws {
+        let request = ZksnarkRequest()
+        request.transaction = TronTransaction()
+        request.sighash = Data([1, 2])
+        request.valueBalance = 7
+        request.txId = "ab"
+        let fixture = Data([0x0a, 0x00, 0x12, 0x02, 1, 2, 0x18, 7, 0x22, 2, 0x61, 0x62])
+        XCTAssertEqual(request.data(), fixture)
+        let decoded = try ZksnarkRequest.parse(from: fixture)
+        XCTAssertTrue(decoded.hasTransaction)
+        XCTAssertTrue(decoded.transaction.isKind(of: TronTransaction.self))
+        XCTAssertEqual(decoded.sighash, Data([1, 2]))
+        XCTAssertEqual(decoded.valueBalance, 7)
+        XCTAssertEqual(decoded.txId, "ab")
+
+        let unknownEnum = Data([0x08, 0x7b])
+        XCTAssertEqual(try ZksnarkResponse.parse(from: unknownEnum).data(), unknownEnum)
+    }
+
+    func testHTTPRuleRetainsOneofAndNestedBindingWireFormat() throws {
+        let rule = GAPIHttpRule()
+        rule.get = "/v1"
+        rule.body = "*"
+        let binding = GAPIHttpRule()
+        binding.post = "/v2"
+        rule.additionalBindingsArray = [binding]
+        let fixture = Data([0x12, 3, 0x2f, 0x76, 0x31, 0x3a, 1, 0x2a,
+                            0x5a, 5, 0x22, 3, 0x2f, 0x76, 0x32])
+        XCTAssertEqual(rule.data(), fixture)
+        let decoded = try GAPIHttpRule.parse(from: fixture)
+        XCTAssertEqual(decoded.get, "/v1")
+        XCTAssertEqual(decoded.body, "*")
+        let decodedBinding = try XCTUnwrap(decoded.additionalBindingsArray.firstObject as? GAPIHttpRule)
+        XCTAssertEqual(decodedBinding.post, "/v2")
+    }
+
+    func testDescriptorLegacyWeakAccessorsRetainFieldAndPresence() throws {
+        let options = GPBFieldOptions()
+        XCTAssertFalse(options.hasWeak)
+        options.weak = true
+        XCTAssertTrue(options.hasWeak)
+        XCTAssertTrue(options.weak_p)
+        XCTAssertEqual(options.data(), Data([0x50, 1]))
+        let decoded = try GPBFieldOptions.parse(from: Data([0x50, 1]))
+        XCTAssertTrue(decoded.weak)
+        XCTAssertTrue(decoded.hasWeak)
+        decoded.hasWeak = false
+        XCTAssertFalse(decoded.hasWeak_p)
+        XCTAssertEqual(decoded.data(), Data())
+        XCTAssertEqual(GPBFieldOptions_FieldNumber.weak.rawValue, 10)
+    }
+
+    func testHTTPAnnotationRetainsExtensionNumberAndRegistry() throws {
+        let rule = GAPIHttpRule()
+        rule.get = "/v1"
+        let extensionDescriptor = GAPIAnnotationsRoot.http()
+        let options = GPBMethodOptions()
+        options.setExtension(extensionDescriptor, value: rule)
+        // Field 72295728, length-delimited HttpRule with get = "/v1".
+        let fixture = Data([0x82, 0xd3, 0xe4, 0x93, 0x02, 5, 0x12, 3, 0x2f, 0x76, 0x31])
+        XCTAssertEqual(options.data(), fixture)
+        let decoded = try GPBMethodOptions.parse(from: fixture, extensionRegistry: GAPIAnnotationsRoot.extensionRegistry())
+        let decodedRule = try XCTUnwrap(decoded.getExtension(extensionDescriptor) as? GAPIHttpRule)
+        XCTAssertEqual(decodedRule.get, "/v1")
+    }
+}
+
+
+// Opt-in loopback integration: run Tools/grpc_compression_fixture.py and set
+// TLCORE_GRPC_COMPRESSION_FIXTURE=1 in the test runner environment.
+final class GRPCCompressionUpgradeTests: XCTestCase {
+    private func requireFixture() throws {
+        guard ProcessInfo.processInfo.environment["TLCORE_GRPC_COMPRESSION_FIXTURE"] == "1" else {
+            throw XCTSkip("Requires the local compression fixture; see Protos/legacy/README.md")
+        }
+    }
+
+    func testCompressedResponseBelowLimitParses() throws {
+        try requireFixture()
+        let host = "127.0.0.1:19091"
+        GRPCCall.useInsecureConnections(forHost: host)
+        GRPCCall.setResponseSizeLimit(64 * 1024, forHost: host)
+        let done = expectation(description: "compressed valid response")
+        let wallet = TWallet(host: host)
+        wallet.getAccountWithRequest(TronAccount()) { response, error in
+            XCTAssertNil(error)
+            XCTAssertNotNil(response)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 15)
+    }
+
+    func testCompressedResponseAboveLimitReturnsResourceExhausted() throws {
+        try requireFixture()
+        let host = "127.0.0.1:19092"
+        GRPCCall.useInsecureConnections(forHost: host)
+        GRPCCall.setResponseSizeLimit(64 * 1024, forHost: host)
+        let done = expectation(description: "oversized compressed response rejected")
+        let wallet = TWallet(host: host)
+        wallet.getAccountWithRequest(TronAccount()) { response, error in
+            XCTAssertNil(response)
+            let grpcError = error as NSError?
+            XCTAssertEqual(grpcError?.domain, kGRPCErrorDomain)
+            XCTAssertEqual(grpcError?.code, Int(GRPCErrorCode.resourceExhausted.rawValue))
+            // Distinguish the bounded decompressor from a check after full inflation.
+            XCTAssertTrue(grpcError?.localizedDescription.contains("Decompressed message larger than max") == true)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 15)
+    }
+}
+
+
+final class Web3AddressChecksumSafetyTests: XCTestCase {
+    func testValidAddressesKeepChecksumBytesAndJSONRepresentation() throws {
+        let checksummed = [
+            "0x52908400098527886E0F7030069857D2E4169EE7",
+            "0xde709f2102306220921060314715629080e2fb77",
+            "0x0000000000000000000000000000000000000000"
+        ]
+        for expected in checksummed {
+            let body = String(expected.dropFirst(2))
+            for prefix in ["", "0x", "0X"] {
+                for digits in [body, body.lowercased(), body.uppercased()] {
+                    let input = prefix + digits
+                    let address = TLCore.Web3Address(input)
+                    XCTAssertTrue(address.isValid, input)
+                    XCTAssertNoThrow(try address.check())
+                    XCTAssertEqual(TLCore.Web3Address.toChecksumAddress(input), expected)
+                    XCTAssertEqual(address.address, expected)
+                    XCTAssertEqual(address.addressData, try XCTUnwrap(Data(hexString: body)))
+                    let encoded = try JSONEncoder().encode(address)
+                    XCTAssertEqual(try JSONDecoder().decode(String.self, from: encoded), expected.lowercased())
+                    let source = try JSONEncoder().encode(input)
+                    XCTAssertEqual(try JSONDecoder().decode(TLCore.Web3Address.self, from: source), address)
+                    XCTAssertEqual(Set([address, TLCore.Web3Address(expected)]).count, 1)
+                }
+            }
+        }
+    }
+
+    func testInvalidChecksumInputAndJSONDecodingReturnFailure() throws {
+        let malformed = ["", "0X", "0x0x" + String(repeating: "a", count: 40),
+                         String(repeating: "g", count: 40), String(repeating: "é", count: 20),
+                         String(repeating: "Ａ", count: 40), "41" + String(repeating: "00", count: 20),
+                         " " + String(repeating: "a", count: 39)]
+            + [1, 39, 41, 64, 65, 4096].map { "0x" + String(repeating: "a", count: $0) }
+        for input in malformed {
+            XCTAssertNil(TLCore.Web3Address.toChecksumAddress(input), input)
+            let json = try JSONEncoder().encode(input)
+            XCTAssertThrowsError(try JSONDecoder().decode(TLCore.Web3Address.self, from: json), input)
+        }
+    }
+
+    func testInvalidObjectsCanBeDisplayedAndComparedButCannotBeEncoded() throws {
+        for input in ["0x" + String(repeating: "a", count: 65),
+                      "0x" + String(repeating: "é", count: 20),
+                      "0x" + String(repeating: "g", count: 40)] {
+            let address = TLCore.Web3Address(input)
+            XCTAssertFalse(address.isValid)
+            XCTAssertThrowsError(try address.check())
+            XCTAssertEqual(address.address, input)
+            XCTAssertEqual(String(describing: address), input)
+            XCTAssertEqual(address, TLCore.Web3Address(input))
+            XCTAssertNotEqual(address, TLCore.Web3Address(input + "a"))
+            XCTAssertEqual(Set([address, TLCore.Web3Address(input + "a")]).count, 2)
+            XCTAssertThrowsError(try JSONEncoder().encode(address))
+        }
+        let oversizedData = Data(repeating: 0xab, count: 33)
+        let address = TLCore.Web3Address(oversizedData)
+        XCTAssertEqual(address.address, "0x" + oversizedData.hexString)
+        XCTAssertThrowsError(try JSONEncoder().encode(address))
+    }
+
+    func testLegacyEmptyAndDeploymentWireValuesRemainCompatible() throws {
+        for address in [TLCore.Web3Address("0x"), TLCore.Web3Address.contractDeployment] {
+            XCTAssertEqual(address.address, "0x")
+            XCTAssertEqual(address.addressData, Data())
+            let json = try JSONEncoder().encode(address)
+            XCTAssertEqual(try JSONDecoder().decode(String.self, from: json), "0x")
+            let decoded = try JSONDecoder().decode(TLCore.Web3Address.self, from: json)
+            XCTAssertEqual(decoded.address, "0x")
+            // The legacy decoder did not infer deployment type from the wire value.
+            XCTAssertEqual(decoded.type, .normal)
+            XCTAssertFalse(decoded.isValid)
+            XCTAssertThrowsError(try decoded.check())
+        }
+        XCTAssertTrue(TLCore.Web3Address.contractDeployment.isValid)
+        XCTAssertNil(TLCore.Web3Address.toChecksumAddress("0x"))
+    }
+
+    func testABIAddressDecodingKeepsTheMainAppAddressBytes() throws {
+        let raw = try XCTUnwrap(Data(hexString: "52908400098527886e0f7030069857d2e4169ee7"))
+        let word = Data(repeating: 0, count: 12) + raw
+        let decoded = try XCTUnwrap(TLCore.ABIv2Decoder.decode(types: [.address], data: word))
+        let address = try XCTUnwrap(decoded.first as? TLCore.Web3Address)
+        XCTAssertEqual(address.addressData, raw)
+        XCTAssertEqual(address.address, "0x52908400098527886E0F7030069857D2E4169EE7")
+        XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(type: .address, value: address as AnyObject), word)
+        XCTAssertEqual("41" + address.addressData.hexString, "4152908400098527886e0f7030069857d2e4169ee7")
+    }
+}
+
+
+final class SignedIntegerABIEncodingRegressionTests: XCTestCase {
+    func testEightBitEncodingRejectsSignOverflowAndByteOverflow() throws {
+        for (value, byte) in [(-128, UInt8(0x80)), (-1, 0xff), (0, 0x00), (127, 0x7f)] {
+            let encoded: Data? = BigInt(value).abiEncode(bits: 8)
+            XCTAssertEqual(try XCTUnwrap(encoded), Data([byte]))
+        }
+        for value in [128, -129, 255, -255, 256, -256] {
+            let encoded: Data? = BigInt(value).abiEncode(bits: 8)
+            XCTAssertNil(encoded, String(value))
+        }
+    }
+
+    func testEverySignedWidthPreservesBoundaryValues() throws {
+        for byteCount in 1...32 {
+            let bits = UInt64(byteCount * 8)
+            let limit = BigInt(1) << (byteCount * 8 - 1)
+            let cases: [(BigInt, Data)] = [
+                (-limit, Data([0x80]) + Data(repeating: 0, count: byteCount - 1)),
+                (limit - 1, Data([0x7f]) + Data(repeating: 0xff, count: byteCount - 1)),
+                (-1, Data(repeating: 0xff, count: byteCount)),
+                (0, Data(repeating: 0, count: byteCount))
+            ]
+            for (value, expected) in cases {
+                let encoded: Data? = value.abiEncode(bits: bits)
+                let bytes = try XCTUnwrap(encoded)
+                XCTAssertEqual(bytes, expected)
+                XCTAssertEqual(BigInt.fromTwosComplement(data: bytes), value)
+            }
+            for value in [limit, -limit - 1] {
+                let encoded: Data? = value.abiEncode(bits: bits)
+                XCTAssertNil(encoded)
+            }
+        }
+    }
+
+    func testInvalidWidthsAndHugeValuesReturnNil() {
+        let invalidWidths: [UInt64] = [0, 1, 7, 9, 255, 257, 264, UInt64.max]
+        for bits in invalidWidths {
+            for value in [BigInt(-1), BigInt(0), BigInt(1)] {
+                let encoded: Data? = value.abiEncode(bits: bits)
+                XCTAssertNil(encoded)
+            }
+        }
+        let huge = BigInt(1) << 4096
+        for value in [huge, -huge] {
+            let encoded: Data? = value.abiEncode(bits: 256)
+            XCTAssertNil(encoded)
+        }
+    }
+
+    func testNegativeByteBoundariesKeepZerosInTheirComplement() throws {
+        // -65535 must be ff0001 in int24, not ffff01 (-255).
+        // Repeat at each byte boundary to cover the previous minimal-width loss.
+        for magnitudeBytes in 2...31 {
+            let value = -(BigInt(1) << (magnitudeBytes * 8)) + 1
+            let bits = UInt64((magnitudeBytes + 1) * 8)
+            let tail = Data(repeating: 0, count: magnitudeBytes - 1) + Data([1])
+            let encoded: Data? = value.abiEncode(bits: bits)
+            XCTAssertEqual(try XCTUnwrap(encoded), Data([0xff]) + tail)
+
+            let expectedWord = Data(repeating: 0xff, count: 32 - magnitudeBytes) + tail
+            let encoder = ABIEncoder()
+            try encoder.encode(value)
+            XCTAssertEqual(encoder.data, expectedWord)
+
+            let typedEncoder = ABIEncoder()
+            try typedEncoder.encode(ABIValue(value, type: .int(bits: Int(bits))))
+            XCTAssertEqual(typedEncoder.data, expectedWord)
+            XCTAssertEqual(TLCore.ABIv2Encoder.encodeSingleType(
+                type: .int(bits: bits), value: value as AnyObject
+            ), expectedWord)
+        }
+    }
+
+    func testNegativeZeroAndEncoderFailureRemainCompatible() throws {
+        var negativeZero = BigInt(0)
+        negativeZero.sign = .minus
+        for bits: UInt64 in [8, 256] {
+            let encoded: Data? = negativeZero.abiEncode(bits: bits)
+            XCTAssertEqual(encoded, Data(repeating: 0, count: Int(bits / 8)))
+        }
+        let encoder = ABIEncoder()
+        try encoder.encode(negativeZero)
+        XCTAssertEqual(encoder.data, Data(repeating: 0, count: 32))
+
+        let prefix = Data([0xde, 0xad])
+        let limit = BigInt(1) << 255
+        for value in [limit, -limit - 1] {
+            encoder.data = prefix
+            XCTAssertThrowsError(try encoder.encode(value)) {
+                XCTAssertEqual($0 as? ABIError, .integerOverflow)
+            }
+            XCTAssertEqual(encoder.data, prefix)
+        }
+    }
+}
+
+
+final class DataSliceInputRegressionTests: XCTestCase {
+    private func slice(_ bytes: Data, offset: Int = 17) -> Data {
+        let buffer = Data(repeating: 0xa5, count: offset) + bytes + Data([0x5a])
+        let result = buffer[offset ..< offset + bytes.count]
+        if !bytes.isEmpty {
+            XCTAssertEqual(result.startIndex, offset)
+        }
+        XCTAssertEqual(result, bytes)
+        return result
+    }
+
+    func testBitRangesUseTheSliceOriginAndPreserveMSBFirstValues() {
+        let bytes = Data([0xd6, 0x39, 0xa5])
+        let cases: [(Int, Int, UInt64)] = [
+            (0, 1, 1), (1, 1, 1), (2, 1, 0),
+            (0, 8, 0xd6), (8, 8, 0x39), (16, 8, 0xa5),
+            (0, 16, 0xd639), (0, 24, 0xd639a5),
+            (4, 8, 0x63), (6, 5, 0x11), (23, 1, 1),
+            (0, 0, 0), (7, 0, 0), (24, 0, 0),
+        ]
+        for input in [bytes, slice(bytes, offset: 1), slice(bytes), slice(bytes, offset: 80)] {
+            for (start, length, expected) in cases {
+                XCTAssertEqual(input.bitsInRange(start, length), expected)
+                XCTAssertEqual(input.bitsInRangeIfValid(start, length), expected)
+            }
+        }
+        XCTAssertEqual(Data().bitsInRange(0, 0), 0)
+        XCTAssertEqual(slice(Data()).bitsInRangeIfValid(0, 0), 0)
+    }
+
+    func testUnaligned64BitRangesCanSpanNineSourceBytes() {
+        let bytes = Data([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x81])
+        let cases: [(Int, UInt64)] = [
+            (0, 0x123456789abcdef0),
+            (1, 0x2468acf13579bde1),
+            (4, 0x23456789abcdef08),
+            (8, 0x3456789abcdef081),
+        ]
+        for input in [bytes, slice(bytes, offset: 1), slice(bytes)] {
+            for (start, expected) in cases {
+                XCTAssertEqual(input.bitsInRange(start, 64), expected)
+                XCTAssertEqual(input.bitsInRangeIfValid(start, 64), expected)
+            }
+        }
+        let allOnes = slice(Data(repeating: 0xff, count: 9))
+        for start in 0...7 {
+            XCTAssertEqual(allOnes.bitsInRange(start, 64), UInt64.max)
+        }
+    }
+
+    func testCheckedBitRangesRejectInvalidBoundsWithoutOverflow() {
+        let bytes = Data([0xd6, 0x39, 0xa5])
+        let invalidRanges = [
+            (-1, 1), (0, -1), (0, 65),
+            (24, 1), (23, 2), (25, 0),
+            (Int.min, 1), (Int.max, 1), (Int.max, 64), (0, Int.max),
+        ]
+        for input in [bytes, slice(bytes)] {
+            for (start, length) in invalidRanges {
+                XCTAssertNil(input.bitsInRangeIfValid(start, length))
+            }
+        }
+        XCTAssertNil(Data().bitsInRangeIfValid(0, 1))
+        XCTAssertNil(Data().bitsInRangeIfValid(1, 0))
+    }
+
+
+    func testRLPEncodesSlicesUsingTheSameBytesAndHeaders() throws {
+        let cases: [(Data, Data)] = [
+            (Data(), Data([0x80])),
+            (Data([0x00]), Data([0x00])),
+            (Data([0x7f]), Data([0x7f])),
+            (Data([0x80]), Data([0x81, 0x80])),
+            (Data([0xff]), Data([0x81, 0xff])),
+            (Data(repeating: 1, count: 55), Data([0xb7]) + Data(repeating: 1, count: 55)),
+            (Data(repeating: 1, count: 56), Data([0xb8, 0x38]) + Data(repeating: 1, count: 56))
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(try XCTUnwrap(RLP.encode(input)), expected)
+            XCTAssertEqual(try XCTUnwrap(RLP.encode(slice(input))), expected)
+        }
+        XCTAssertEqual(RLP.encode([slice(Data([0x01])), slice(Data([0x80]))] as [Any]),
+                       Data([0xc3, 0x01, 0x81, 0x80]))
+    }
+
+    func testByteComparisonHandlesDifferentSliceOrigins() {
+        let bytes = Data((0 ..< 32).map { UInt8($0) })
+        let left = slice(bytes)
+        XCTAssertTrue(left.constantTimeComparisonTo(bytes))
+        XCTAssertTrue(bytes.constantTimeComparisonTo(left))
+        XCTAssertTrue(left.constantTimeComparisonTo(slice(bytes, offset: 80)))
+        XCTAssertFalse(left.constantTimeComparisonTo(nil))
+        XCTAssertFalse(left.constantTimeComparisonTo(slice(Data(bytes.dropLast()))))
+        XCTAssertTrue(slice(Data()).constantTimeComparisonTo(Data()))
+
+        for index in bytes.indices {
+            var changed = bytes
+            changed[index] ^= 0xff
+            XCTAssertFalse(left.constantTimeComparisonTo(slice(changed, offset: 80)))
+        }
+    }
+
+    func testPublicKeySlicesPreserveAllSupportedAddressForms() throws {
+        let uncompressed = try XCTUnwrap(Data.fromHex(
+            "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                + "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        ))
+        let compressed = Data([0x02]) + uncompressed.dropFirst().prefix(32)
+        let expected = try XCTUnwrap(Data.fromHex("7e5f4552091a69125d5dfcb7b8c2659029395bdf"))
+        for publicKey in [compressed, Data(uncompressed.dropFirst()), uncompressed] {
+            for input in [publicKey, slice(publicKey)] {
+                XCTAssertEqual(try Web3Utils.publicToAddressData(input), expected)
+                XCTAssertEqual(try Web3Utils.publicToAddress(input).addressData, expected)
+                XCTAssertEqual(try Web3Utils.publicToAddressString(input), "0x" + expected.hex)
+            }
+        }
+    }
+
+    func testPublicKeySlicesKeepExistingValidationErrors() {
+        let wrongPrefix = Data([0x03]) + Data(repeating: 0, count: 64)
+        for input in [wrongPrefix, slice(wrongPrefix)] {
+            XCTAssertThrowsError(try Web3Utils.publicToAddressData(input)) {
+                guard case PublicKeyToAddressError.shouldStartWith4 = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+        }
+        for count in [0, 32, 63, 66] {
+            XCTAssertThrowsError(try Web3Utils.publicToAddressData(slice(Data(repeating: 0, count: count)))) {
+                guard case PublicKeyToAddressError.invalidPublicKeySize = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+        }
+    }
+
+    func testRecoveryAcceptsSignatureAndDigestSlicesWithLegacyRecoveryIDs() throws {
+        let hash = Data(repeating: 0x11, count: 32)
+        let signature = try XCTUnwrap(Data.fromHex(
+            "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626"
+                + "aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
+        ))
+        let key = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        for recoveryID: UInt8 in [1, 28] {
+            let input = Data(signature.prefix(64)) + Data([recoveryID])
+            for offset in [0, 1, 17, 80] {
+                let signatureSlice = slice(input, offset: offset)
+                let hashSlice = slice(hash, offset: offset)
+                XCTAssertEqual(try Web3Utils.hashECRecover(hash: hashSlice, signature: signatureSlice).address,
+                               "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
+                XCTAssertEqual(try Web3Utils.getAddressFromSignature(hashSlice, signature: input.hex), key.address)
+                for compressed in [false, true] {
+                    XCTAssertEqual(try SECP256K1.recoverPublicKey(
+                        hash: hashSlice, signature: signatureSlice, compressed: compressed
+                    ), try Web3Utils.privateToPublic(key.privateKey, compressed: compressed))
+                }
+            }
+        }
+    }
+
+    func testPersonalRecoveryAcceptsMessageAndSignatureSlices() throws {
+        let key = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let message = Data("core-203".utf8)
+        let signature = try key.sign(hash: Web3Utils.hashPersonalMessage(message)).data
+        XCTAssertEqual(try Web3Utils.personalECRecover(message, signature: signature), key.address)
+        XCTAssertEqual(try Web3Utils.personalECRecover(slice(message), signature: slice(signature)), key.address)
+    }
+
+    func testRecoverySlicesKeepLengthAndInvalidSignatureErrors() {
+        let hash = slice(Data(repeating: 0x11, count: 32))
+        for count in [0, 64, 66] {
+            let signature = slice(Data(repeating: 0, count: count))
+            XCTAssertThrowsError(try Web3Utils.hashECRecover(hash: hash, signature: signature)) {
+                guard case SECP256K1Error.invalidSignatureSize = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+            XCTAssertThrowsError(try Web3Utils.personalECRecover(Data(), signature: signature)) {
+                guard case Web3UtilsError.invalidSignatureLength = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+        }
+        let invalid = slice(Data(repeating: 0, count: 65))
+        XCTAssertThrowsError(try Web3Utils.hashECRecover(hash: hash, signature: invalid)) {
+            guard case SECP256DataError.cannotRecoverPublicKey = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+        XCTAssertThrowsError(try Web3Utils.hashECRecover(hash: slice(Data(repeating: 0, count: 31)),
+                                                       signature: invalid)) {
+            guard case SECP256K1Error.invalidHashSize = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+    }
+}
+
+
+final class PrivateKeyIdentityRegressionTests: XCTestCase {
+    private let firstKey = Data(repeating: 0, count: 31) + Data([1])
+    private let secondKey = Data(repeating: 0, count: 31) + Data([2])
+    // Not named `hash`: XCTestCase inherits NSObject.hash (Int), and a stored
+    // property of that name would be an invalid override.
+    private let messageHash = Data(repeating: 0x11, count: 32)
+    private let firstAddress = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+    private let firstSignature = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
+
+    func testChangingInputDataCannotChangeAnExistingSigningIdentity() throws {
+        var input = firstKey
+        let key = PrivateKey(input)
+        input[input.index(before: input.endIndex)] = 2
+
+        XCTAssertEqual(input, secondKey)
+        XCTAssertEqual(key.privateKey, firstKey)
+        XCTAssertEqual(key.address.address, firstAddress)
+        XCTAssertEqual(try key.sign(hash: messageHash).data.hex, firstSignature)
+    }
+
+    func testSwitchingAccountsUsesIndependentObjectsWithConsistentIdentities() throws {
+        var selected = PrivateKey(firstKey)
+        let previous = selected
+        let previousPublicKey = previous.publicKey
+        let previousAddress = previous.address
+
+        // CORE-204: changing privateKey/publicKey/address directly is no longer
+        // permitted by the public API. Replace the selected object instead.
+        selected = PrivateKey(secondKey)
+        let expectedPublicKey = try Web3Utils.privateToPublic(secondKey)
+        let expectedAddress = try Web3Utils.publicToAddress(expectedPublicKey)
+        XCTAssertNotEqual(previousAddress, expectedAddress)
+
+        let selectedSignature = try selected.sign(hash: messageHash).data
+        XCTAssertEqual(selected.publicKey, expectedPublicKey)
+        XCTAssertEqual(selected.address, expectedAddress)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: messageHash, signature: selectedSignature), selected.address)
+
+        XCTAssertEqual(previous.publicKey, previousPublicKey)
+        XCTAssertEqual(previous.address, previousAddress)
+        XCTAssertEqual(previous.address.address, firstAddress)
+        let previousSignature = try previous.sign(hash: messageHash).data
+        XCTAssertEqual(previousSignature.hex, firstSignature)
+        XCTAssertEqual(try Web3Utils.hashECRecover(hash: messageHash, signature: previousSignature), previous.address)
+    }
+
+    func testMutatingReturnedValuesCannotOverwriteCachedIdentity() throws {
+        let key = PrivateKey(firstKey)
+        let expectedPublicKey = key.publicKey
+        var publicKeyCopy = key.publicKey
+        publicKeyCopy[publicKeyCopy.startIndex] = 0
+        var addressCopy = key.address
+        addressCopy.type = .contractDeployment
+        var privateKeyCopy = key.privateKey
+        privateKeyCopy[privateKeyCopy.index(before: privateKeyCopy.endIndex)] = 2
+
+        XCTAssertNotEqual(publicKeyCopy, key.publicKey)
+        XCTAssertNotEqual(addressCopy, key.address)
+        XCTAssertNotEqual(privateKeyCopy, key.privateKey)
+        XCTAssertEqual(key.publicKey, expectedPublicKey)
+        XCTAssertEqual(key.address.address, firstAddress)
+        XCTAssertEqual(key.privateKey, firstKey)
+        XCTAssertEqual(try key.sign(hash: messageHash).data.hex, firstSignature)
+    }
+}
+
+
+final class HDNodeDeserializationBoundsTests: XCTestCase {
+    private let publicVersion: UInt32 = 0x0488b21e
+    private let privateVersion: UInt32 = 0x0488ade4
+    private let chainCode = (0..<32).map { UInt8($0) }
+    private let generator = Array(Data(hex:
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
+
+    private func encodedKey(_ key: [UInt8], version: UInt32 = 0x0488b21e) -> String {
+        let versionBytes = [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: version >> $0) }
+        // depth = 1, fingerprint = a1b2c3d4, child number = 01020304.
+        let metadata = Array(Data(hex: "01a1b2c3d401020304"))
+        return String(base58CheckEncoding: Data(versionBytes + metadata + chainCode + key))
+    }
+
+    private func makeNode(curve: String = "secp256k1") throws -> HDNode {
+        let seed = (0..<16).map { UInt8($0) }
+        var node = HDNode()
+        let status = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), curve, &node)
+        }
+        return try XCTUnwrap(status == 1 ? node : nil)
+    }
+
+    private func decode(_ encoded: String, curve: String = "secp256k1") throws -> HDNode {
+        var node = HDNode()
+        let status = hdnode_deserialize(encoded, publicVersion, privateVersion, curve, &node, nil)
+        return try XCTUnwrap(status == 0 ? node : nil)
+    }
+
+    private func publicKey(_ node: HDNode) -> [UInt8] {
+        var key = node.public_key
+        return withUnsafeBytes(of: &key) { Array($0) }
+    }
+
+    private func serializedPublic(_ node: HDNode) throws -> String {
+        var node = node
+        hdnode_fill_public_key(&node)
+        var output = [CChar](repeating: 0, count: 128)
+        let status = output.withUnsafeMutableBufferPointer {
+            hdnode_serialize_public(&node, 0xa1b2c3d4, publicVersion, $0.baseAddress, Int32($0.count))
+        }
+        _ = try XCTUnwrap(status > 0 ? status : nil)
+        let end = try XCTUnwrap(output.firstIndex(of: 0))
+        return try XCTUnwrap(String(bytes: output[..<end].map { UInt8(bitPattern: $0) }, encoding: .utf8))
+    }
+
+    private func assertRejected(_ encoded: String, curve: String = "secp256k1",
+                                error: Int32 = -2) throws {
+        // Start with a live node to check that failure cannot leave stale key material.
+        var node = try makeNode()
+        var fingerprint: UInt32 = 0xa5a5a5a5
+        XCTAssertEqual(hdnode_deserialize(encoded, publicVersion, privateVersion, curve, &node, &fingerprint), error)
+        XCTAssertTrue(withUnsafeBytes(of: &node) { $0.allSatisfy { $0 == 0 } })
+        XCTAssertEqual(fingerprint, 0xa5a5a5a5)
+    }
+
+    func testValidChecksumDoesNotAllowAnInvalidCompressedKeyPrefix() throws {
+        for value in 0...255 where value != 2 && value != 3 {
+            var key = generator
+            key[0] = UInt8(value)
+            // The 0x04 case used to import successfully, then read 65 bytes from 33.
+            try assertRejected(encodedKey(key))
+        }
+    }
+
+    func testCompressedPrefixDoesNotBypassCurvePointValidation() throws {
+        for prefix: UInt8 in [2, 3] {
+            // x = 2^256 - 1 is outside the secp256k1 field.
+            try assertRejected(encodedKey([prefix] + [UInt8](repeating: 0xff, count: 32)))
+        }
+    }
+
+    func testBothValidCompressedPrefixesPreserveMetadataAndEncoding() throws {
+        for prefix: UInt8 in [2, 3] {
+            var key = generator
+            key[0] = prefix
+            let encoded = encodedKey(key)
+            var node = try decode(encoded)
+            var fingerprint: UInt32 = 0
+            XCTAssertEqual(hdnode_deserialize(encoded, publicVersion, privateVersion,
+                                              "secp256k1", &node, &fingerprint), 0)
+            XCTAssertEqual(node.depth, 1)
+            XCTAssertEqual(node.child_num, 0x01020304)
+            XCTAssertEqual(fingerprint, 0xa1b2c3d4)
+            XCTAssertEqual(publicKey(node), key)
+            XCTAssertEqual(withUnsafeBytes(of: &node.chain_code) { Array($0) }, chainCode)
+            XCTAssertTrue(withUnsafeBytes(of: &node.private_key) { $0.allSatisfy { $0 == 0 } })
+            XCTAssertEqual(try serializedPublic(node), encoded)
+        }
+    }
+
+    func testImportedPublicKeyRetainsItsAddressAndChildDerivation() throws {
+        var publicNode = try decode(encodedKey(generator))
+        var address = [UInt8](repeating: 0xa5, count: 22)
+        address.withUnsafeMutableBufferPointer { hdnode_get_address_raw(&publicNode, 0, $0.baseAddress) }
+        XCTAssertEqual(Array(address.prefix(21)), Array(Data(hex: "00751e76e8199196d454941c45d1b3a323f1433bd6")))
+        XCTAssertEqual(address.last, 0xa5)
+
+        // The same chain code and private scalar 1 must produce the same public child.
+        let privateData = [UInt8](repeating: 0, count: 32) + [1]
+        var privateNode = try decode(encodedKey(privateData, version: privateVersion))
+        XCTAssertEqual(hdnode_public_ckd(&publicNode, 7), 1)
+        XCTAssertEqual(hdnode_private_ckd(&privateNode, 7), 1)
+        hdnode_fill_public_key(&privateNode)
+        XCTAssertEqual(publicKey(publicNode), publicKey(privateNode))
+        XCTAssertEqual(withUnsafeBytes(of: &publicNode.chain_code) { Array($0) },
+                       withUnsafeBytes(of: &privateNode.chain_code) { Array($0) })
+    }
+
+    func testPrivateExtendedKeyImportKeepsItsExistingValidResult() throws {
+        let privateData = [UInt8](repeating: 0, count: 32) + [1]
+        var node = try decode(encodedKey(privateData, version: privateVersion))
+        XCTAssertEqual(withUnsafeBytes(of: &node.private_key) { Array($0) }, Array(privateData.dropFirst()))
+        XCTAssertTrue(publicKey(node).allSatisfy { $0 == 0 })
+        hdnode_fill_public_key(&node)
+        XCTAssertEqual(publicKey(node), generator)
+    }
+
+    func testNISTAnd25519PublicExportImportRemainCompatible() throws {
+        for curve in ["nist256p1", "ed25519", "ed25519-sha3", "ed25519-keccak", "curve25519"] {
+            var original = try makeNode(curve: curve)
+            hdnode_fill_public_key(&original)
+            let encoded = try serializedPublic(original)
+            let imported = try decode(encoded, curve: curve)
+            XCTAssertEqual(publicKey(imported), publicKey(original), curve)
+            XCTAssertEqual(try serializedPublic(imported), encoded, curve)
+            if curve != "nist256p1" {
+                XCTAssertEqual(publicKey(imported).first, 1)
+                var badKey = publicKey(original)
+                badKey[0] = 4
+                try assertRejected(encodedKey(badKey), curve: curve)
+            }
+        }
+    }
+
+    func testDecodeFailuresClearTheNodeAndPreserveTheFingerprint() throws {
+        try assertRejected("!", error: -1)
+        try assertRejected(encodedKey(generator, version: 0x0488b21f), error: -3)
+        try assertRejected(encodedKey(generator, version: privateVersion), error: -2)
+        try assertRejected(encodedKey(generator), curve: "unknown-curve", error: -4)
+    }
+}
+
+
+final class PublicChildAddressDerivationRegressionTests: XCTestCase {
+    private func makeParent() throws -> (node: HDNode, point: curve_point, chainCode: [UInt8]) {
+        let seed = (0 ..< 16).map { UInt8($0) } // BIP-32 public test vector seed.
+        var node = HDNode()
+        let created = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), "secp256k1", &node)
+        }
+        node = try XCTUnwrap(created == 1 ? node : nil)
+        hdnode_fill_public_key(&node)
+        let publicKey = withUnsafeBytes(of: &node.public_key) { Array($0) }
+        let chainCode = withUnsafeBytes(of: &node.chain_code) { Array($0) }
+        var point = curve_point()
+        var curve = secp256k1
+        let parsed = publicKey.withUnsafeBufferPointer {
+            ecdsa_read_pubkey(&curve, $0.baseAddress, &point)
+        }
+        return (node, try XCTUnwrap(parsed == 1 ? point : nil), chainCode)
+    }
+
+    private func derive(point: curve_point, chainCode: [UInt8], index: UInt32,
+                        version: UInt32 = 0, format: Int32 = 0, capacity: Int32 = 64)
+        -> (status: Int32, output: [CChar]) {
+        var point = point
+        // The final byte is a canary outside the advertised output capacity.
+        var output = [CChar](repeating: 0x58, count: 65)
+        let status = output.withUnsafeMutableBufferPointer { address in
+            chainCode.withUnsafeBufferPointer { chain in
+                hdnode_public_ckd_address_optimized(&point, chain.baseAddress, index, version,
+                    HASHER_SHA2_RIPEMD, HASHER_SHA2D, address.baseAddress, capacity, format)
+            }
+        }
+        return (status, output)
+    }
+
+    private func addressString(_ bytes: [CChar]) throws -> String {
+        let end = try XCTUnwrap(bytes.firstIndex(of: 0))
+        return try XCTUnwrap(String(bytes: bytes[..<end].map { UInt8(bitPattern: $0) }, encoding: .utf8))
+    }
+
+    func testHardenedPublicDerivationFailsWithAnEmptyAddress() throws {
+        let parent = try makeParent()
+        for index: UInt32 in [0x80000000, 0x80000001, 0xffffffff] {
+            for format: Int32 in [0, 1, 2] {
+                let result = derive(point: parent.point, chainCode: parent.chainCode,
+                                    index: index, format: format)
+                XCTAssertEqual(result.status, 0)
+                XCTAssertEqual(try addressString(result.output), "")
+                XCTAssertEqual(Array(result.output.dropFirst()), [CChar](repeating: 0x58, count: 64))
+            }
+        }
+    }
+
+    func testNonHardenedAddressesMatchOrdinaryPublicAndPrivateDerivation() throws {
+        let parent = try makeParent()
+        for index: UInt32 in [0, 1, 0x7fffffff] {
+            var publicChild = parent.node
+            let publicResult = hdnode_public_ckd(&publicChild, index)
+            publicChild = try XCTUnwrap(publicResult == 1 ? publicChild : nil)
+            let childPublicKey = withUnsafeBytes(of: &publicChild.public_key) { Array($0) }
+
+            var privateChild = parent.node
+            let privateResult = hdnode_private_ckd(&privateChild, index)
+            privateChild = try XCTUnwrap(privateResult == 1 ? privateChild : nil)
+            hdnode_fill_public_key(&privateChild)
+            XCTAssertEqual(withUnsafeBytes(of: &privateChild.public_key) { Array($0) }, childPublicKey)
+
+            for version: UInt32 in [0, 5, 0x12345678] {
+                for format: Int32 in [0, 1, 2] {
+                    var expected = [CChar](repeating: 0, count: 64)
+                    expected.withUnsafeMutableBufferPointer { address in
+                        childPublicKey.withUnsafeBufferPointer { key in
+                            if format == 1 {
+                                ecdsa_get_address_segwit_p2sh(key.baseAddress, version,
+                                    HASHER_SHA2_RIPEMD, HASHER_SHA2D, address.baseAddress, 64)
+                            } else {
+                                ecdsa_get_address(key.baseAddress, version,
+                                    HASHER_SHA2_RIPEMD, HASHER_SHA2D, address.baseAddress, 64)
+                            }
+                        }
+                    }
+                    let result = derive(point: parent.point, chainCode: parent.chainCode,
+                                        index: index, version: version, format: format)
+                    XCTAssertEqual(result.status, 1)
+                    let actual = try addressString(result.output)
+                    XCTAssertFalse(actual.isEmpty)
+                    XCTAssertEqual(actual, try addressString(expected))
+                    XCTAssertEqual(result.output.last, CChar(0x58))
+                }
+            }
+        }
+    }
+
+    func testOutputCapacityFailuresDoNotLeaveAnAddressOrOverwriteTheBuffer() throws {
+        let parent = try makeParent()
+        for format: Int32 in [0, 1] {
+            let success = derive(point: parent.point, chainCode: parent.chainCode, index: 1, format: format)
+            XCTAssertEqual(success.status, 1)
+            let length = try addressString(success.output).utf8.count
+            for capacity in [Int32(1), Int32(length)] {
+                let result = derive(point: parent.point, chainCode: parent.chainCode,
+                                    index: 1, format: format, capacity: capacity)
+                XCTAssertEqual(result.status, 0)
+                XCTAssertEqual(result.output.first, 0)
+                XCTAssertEqual(Array(result.output.dropFirst()), [CChar](repeating: 0x58, count: 64))
+            }
+            let exact = derive(point: parent.point, chainCode: parent.chainCode,
+                               index: 1, format: format, capacity: Int32(length + 1))
+            XCTAssertEqual(exact.status, 1)
+            XCTAssertEqual(try addressString(exact.output), try addressString(success.output))
+            XCTAssertEqual(Array(exact.output.dropFirst(length + 1)),
+                           [CChar](repeating: 0x58, count: 65 - length - 1))
+        }
+        for capacity: Int32 in [0, -1] {
+            let result = derive(point: parent.point, chainCode: parent.chainCode, index: 1, capacity: capacity)
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(result.output, [CChar](repeating: 0x58, count: 65))
+        }
+        var point = parent.point
+        let noOutput = parent.chainCode.withUnsafeBufferPointer { chain in
+            hdnode_public_ckd_address_optimized(&point, chain.baseAddress, 1, 0,
+                HASHER_SHA2_RIPEMD, HASHER_SHA2D, nil, 64, 0)
+        }
+        XCTAssertEqual(noOutput, 0)
+    }
+}
+
+
+final class HDNodeSigningSupportRegressionTests: XCTestCase {
+    private let seed = (0 ..< 16).map { UInt8($0) }
+    private let input = [UInt8](repeating: 0x11, count: 32)
+
+    private func makeNode(curve: String) throws -> HDNode {
+        var node = HDNode()
+        let result = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), curve, &node)
+        }
+        return try XCTUnwrap(result == 1 ? node : nil)
+    }
+
+    private func sign(node: inout HDNode, digest: Bool) -> (status: Int32, bytes: [UInt8], recoveryID: UInt8) {
+        // Only the first 64 bytes are writable; the last byte is a canary.
+        var bytes = [UInt8](repeating: 0xa5, count: 65)
+        var recoveryID: UInt8 = 0xa5
+        let status = bytes.withUnsafeMutableBufferPointer { signature in
+            input.withUnsafeBufferPointer { message in
+                if digest {
+                    return hdnode_sign_digest(&node, message.baseAddress, signature.baseAddress, &recoveryID, nil)
+                }
+                return hdnode_sign(&node, message.baseAddress, UInt32(message.count), HASHER_SHA2,
+                                   signature.baseAddress, &recoveryID, nil)
+            }
+        }
+        return (status, bytes, recoveryID)
+    }
+
+    private func assertUnsupported(node: inout HDNode) {
+        let originalPublicKey = withUnsafeBytes(of: &node.public_key) { Array($0) }
+        for digest in [false, true] {
+            let result = sign(node: &node, digest: digest)
+            XCTAssertEqual(result.status, 1)
+            XCTAssertEqual(Array(result.bytes.prefix(64)), [UInt8](repeating: 0, count: 64))
+            XCTAssertEqual(result.bytes.last, 0xa5)
+            XCTAssertEqual(result.recoveryID, 0)
+            XCTAssertEqual(withUnsafeBytes(of: &node.public_key) { Array($0) }, originalPublicKey)
+        }
+    }
+
+    func testPodBuildRejectsDisabledCardanoCurveInAllNodeConstructors() throws {
+        let curve = "ed25519 cardano seed"
+        XCTAssertNil(get_curve_by_name(curve))
+        var node = HDNode()
+        let fromSeed = seed.withUnsafeBufferPointer {
+            hdnode_from_seed($0.baseAddress, Int32($0.count), curve, &node)
+        }
+        XCTAssertEqual(fromSeed, 0)
+        XCTAssertNil(node.curve)
+
+        var supported = try makeNode(curve: "secp256k1")
+        hdnode_fill_public_key(&supported)
+        let chainCode = withUnsafeBytes(of: &supported.chain_code) { Array($0) }
+        let privateKey = withUnsafeBytes(of: &supported.private_key) { Array($0) }
+        let publicKey = withUnsafeBytes(of: &supported.public_key) { Array($0) }
+        let fromPrivate = chainCode.withUnsafeBufferPointer { chain in
+            privateKey.withUnsafeBufferPointer { key in
+                hdnode_from_xprv(0, 0, chain.baseAddress, key.baseAddress, curve, &node)
+            }
+        }
+        XCTAssertEqual(fromPrivate, 0)
+        XCTAssertNil(node.curve)
+        let fromPublic = chainCode.withUnsafeBufferPointer { chain in
+            publicKey.withUnsafeBufferPointer { key in
+                hdnode_from_xpub(0, 0, chain.baseAddress, key.baseAddress, curve, &node)
+            }
+        }
+        XCTAssertEqual(fromPublic, 0)
+        XCTAssertNil(node.curve)
+    }
+
+    func testUnknownSigningImplementationFailsWithoutFillingACachedPublicKey() {
+        // A manually supplied, non-ECDSA curve used to fall through as success.
+        var unsupported = curve_info()
+        withUnsafePointer(to: &unsupported) { curve in
+            var node = HDNode()
+            node.curve = curve
+            assertUnsupported(node: &node)
+            var signature = [UInt8](repeating: 0xa5, count: 64)
+            let result = signature.withUnsafeMutableBufferPointer { output in
+                input.withUnsafeBufferPointer { message in
+                    hdnode_sign(&node, message.baseAddress, UInt32(message.count), HASHER_SHA2,
+                                output.baseAddress, nil, nil)
+                }
+            }
+            XCTAssertEqual(result, 1)
+            XCTAssertEqual(signature, [UInt8](repeating: 0, count: 64))
+        }
+    }
+
+    func testCurve25519StillRejectsSigningAndClearsPreviousOutput() throws {
+        var node = try makeNode(curve: "curve25519")
+        assertUnsupported(node: &node)
+    }
+
+    func testSupportedCurvesProduceVerifiableMessageAndDigestSignatures() throws {
+        for curve in ["secp256k1", "nist256p1", "ed25519"] {
+            for digest in [false, true] {
+                var node = try makeNode(curve: curve)
+                let result = sign(node: &node, digest: digest)
+                XCTAssertEqual(result.status, 0, curve)
+                XCTAssertEqual(result.bytes.last, 0xa5)
+                hdnode_fill_public_key(&node)
+                let publicKey = withUnsafeBytes(of: &node.public_key) { Array($0) }
+                let verified = result.bytes.withUnsafeBufferPointer { signature in
+                    publicKey.withUnsafeBufferPointer { key in
+                        input.withUnsafeBufferPointer { message -> Int32 in
+                            if let parameters = node.curve?.pointee.params {
+                                if digest {
+                                    return ecdsa_verify_digest(parameters, key.baseAddress,
+                                                               signature.baseAddress, message.baseAddress)
+                                }
+                                return ecdsa_verify(parameters, HASHER_SHA2, key.baseAddress,
+                                                    signature.baseAddress, message.baseAddress, UInt32(message.count))
+                            }
+                            let edPublicKey = key.baseAddress?.advanced(by: 1)
+                            return ed25519_sign_open(message.baseAddress, message.count,
+                                                     edPublicKey, signature.baseAddress)
+                        }
+                    }
+                }
+                XCTAssertEqual(verified, 0, curve)
+                if curve == "secp256k1" && digest {
+                    let privateKey = withUnsafeBytes(of: &node.private_key) { Data($0) }
+                    let appSignature = EthereumCrypto.sign(hash: Data(input), privateKey: privateKey)
+                    XCTAssertEqual(Data(result.bytes.prefix(64)) + Data([result.recoveryID]), appSignature)
+                }
+            }
+        }
+    }
+}
+
+
+final class BigNumberFormattingRegressionTests: XCTestCase {
+    private func withCString<Result>(_ string: String?, _ body: (UnsafePointer<CChar>?) -> Result) -> Result {
+        guard let string = string else { return body(nil) }
+        return string.withCString { body($0) }
+    }
+
+    private func assertCapacityBounds(expected: String,
+                                      format: (UnsafeMutablePointer<CChar>?, Int) -> Int) {
+        let expectedBytes = expected.utf8.map { CChar(bitPattern: $0) }
+        // Exercise every short capacity, the exact fit, and spare capacity.
+        for capacity in 0 ... expectedBytes.count + 4 {
+            // Both surrounding bytes are outside the advertised output buffer.
+            var buffer = [CChar](repeating: 0x58, count: capacity + 2)
+            let length = buffer.withUnsafeMutableBufferPointer {
+                format($0.baseAddress?.advanced(by: 1), capacity)
+            }
+            XCTAssertEqual(buffer.first, CChar(0x58), "Leading canary, capacity \(capacity)")
+            XCTAssertEqual(buffer.last, CChar(0x58), "Trailing canary, capacity \(capacity)")
+            if capacity <= expectedBytes.count {
+                XCTAssertEqual(length, 0, "Capacity \(capacity)")
+                if capacity > 0 {
+                    XCTAssertEqual(buffer[1], 0, "Failed formatting must return an empty string")
+                }
+            } else {
+                XCTAssertEqual(length, expectedBytes.count)
+                XCTAssertEqual(Array(buffer.dropFirst().prefix(expectedBytes.count + 1)), expectedBytes + [0])
+            }
+        }
+    }
+
+    private func assertFormatting(_ value: UInt64, prefix: String? = nil, suffix: String? = nil,
+                                  decimals: UInt32 = 0, exponent: Int32 = 0, trailing: Bool = false,
+                                  expected: String) {
+        for useWrapper in [false, true] {
+            var amount = bignum256()
+            bn_read_uint64(value, &amount)
+            withCString(prefix) { prefixPointer in
+                withCString(suffix) { suffixPointer in
+                    assertCapacityBounds(expected: expected) { output, capacity in
+                        if useWrapper {
+                            return bn_format_uint64(value, prefixPointer, suffixPointer, decimals,
+                                                    exponent, trailing, output, capacity)
+                        }
+                        return bn_format(&amount, prefixPointer, suffixPointer, decimals,
+                                         exponent, trailing, output, capacity)
+                    }
+                }
+            }
+        }
+    }
+
+    func testNullOutputIsRejectedByBothEntryPoints() {
+        var amount = bignum256()
+        bn_read_uint64(1, &amount)
+        for capacity in [0, 1, 32] {
+            XCTAssertEqual(bn_format(&amount, "prefix", "suffix", 0, 0, false, nil, capacity), 0)
+            XCTAssertEqual(bn_format_uint64(1, "prefix", "suffix", 0, 0, false, nil, capacity), 0)
+        }
+    }
+
+    func testZeroAndShortCapacitiesRespectPrefixAndSuffixBoundaries() {
+        let cases: [(String?, String?, String)] = [
+            (nil, nil, "1"),
+            ("", "", "1"),
+            ("prefix", nil, "prefix1"),
+            (nil, "suffix", "1suffix"),
+            ("prefix", "suffix", "prefix1suffix"),
+            ("金额 ", " TRX", "金额 1 TRX")
+        ]
+        for (prefix, suffix, expected) in cases {
+            assertFormatting(1, prefix: prefix, suffix: suffix, expected: expected)
+        }
+    }
+
+    func testDigitDecimalAndExponentBoundariesPreserveNormalOutput() {
+        let cases: [(UInt64, UInt32, Int32, Bool, String)] = [
+            (0, 0, 0, false, "0"),
+            (123456789, 0, 0, false, "123456789"),
+            (12345678, 6, 0, false, "12.345678"),
+            (12340000, 6, 0, false, "12.34"),
+            (12340000, 6, 0, true, "12.340000"),
+            (1, 6, 0, false, "0.000001"),
+            (0, 6, 0, true, "0.000000"),
+            (123, 0, 2, false, "12300"),
+            (12345, 0, -2, false, "123")
+        ]
+        for (value, decimals, exponent, trailing, expected) in cases {
+            assertFormatting(value, decimals: decimals, exponent: exponent,
+                             trailing: trailing, expected: expected)
+        }
+        assertFormatting(1, prefix: "[", suffix: "]", decimals: 8, trailing: true, expected: "[0.00000001]")
+    }
+
+    func testFullWidth256BitValueRespectsCapacityAndPreservesEveryDigit() {
+        var amount = bignum256()
+        let bytes = [UInt8](repeating: 0xff, count: 32)
+        bytes.withUnsafeBufferPointer { bn_read_be($0.baseAddress, &amount) }
+        let expected = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        assertCapacityBounds(expected: expected) { output, capacity in
+            bn_format(&amount, nil, nil, 0, 0, false, output, capacity)
+        }
+    }
+
+    func testExistingInternalCallersRetainTheirFormattingAndCapacity() {
+        // address.c uses 16 bytes for a uint32 chain ID followed by "0x".
+        assertFormatting(UInt64(UInt32.max), suffix: "0x", expected: "42949672950x")
+        // nem.c uses 21 bytes for the decimal representation of a uint64.
+        assertFormatting(UInt64.max, expected: "18446744073709551615")
+    }
+}
+
+
+final class Base58EncodingBoundsRegressionTests: XCTestCase {
+    private func encode(_ payload: [UInt8], length: Int32, capacity: Int32)
+        -> (length: Int32, bytes: [CChar]) {
+        // Keep a valid input pointer for empty payloads; length remains zero.
+        let input = payload.isEmpty ? [UInt8(0)] : payload
+        var output = [CChar](repeating: 0x5a, count: 258)
+        let result = input.withUnsafeBufferPointer { data in
+            output.withUnsafeMutableBufferPointer { buffer in
+                base58_encode_check(data.baseAddress, length, HASHER_SHA2D,
+                                    buffer.baseAddress?.advanced(by: 1), capacity)
+            }
+        }
+        XCTAssertEqual(output.first, 0x5a)
+        XCTAssertEqual(output.last, 0x5a)
+        return (result, Array(output.dropFirst().prefix(256)))
+    }
+
+    func testInvalidInputLengthsFailWithoutWritingOutput() {
+        let invalidLengths: [Int32] = [Int32.min, -33, -32, -1, 129, Int32.max]
+        for length in invalidLengths {
+            let result = encode([0], length: length, capacity: 256)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [CChar](repeating: 0x5a, count: 256))
+        }
+    }
+
+    func testNonPositiveOutputCapacitiesFailWithoutWritingOutput() {
+        let payload = [UInt8(0x41)] + [UInt8](repeating: 0, count: 20)
+        let invalidCapacities: [Int32] = [Int32.min, -1, 0]
+        for capacity in invalidCapacities {
+            let result = encode(payload, length: Int32(payload.count), capacity: capacity)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [CChar](repeating: 0x5a, count: 256))
+        }
+    }
+
+    func testValidPayloadsMatchTheAppsSwiftEncoderAndPreserveCapacityBoundaries() {
+        let tronPayload = [UInt8(0x41)] + [UInt8](repeating: 0, count: 20)
+        let payloads: [[UInt8]] = [[], [0], [0, 0, 0, 1], tronPayload,
+                                  [UInt8](repeating: 0, count: 21),
+                                  (0 ..< 78).map { UInt8($0) },
+                                  (0 ..< 128).map { UInt8($0) }]
+        XCTAssertEqual(String(base58CheckEncoding: Data(tronPayload)),
+                       "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
+        for payload in payloads {
+            // Independent Swift implementation used by the app, including the empty payload.
+            let expected = String(base58CheckEncoding: Data(payload))
+            let bytes = expected.utf8.map { CChar(bitPattern: $0) } + [CChar(0)]
+            let required = Int32(bytes.count)
+            for capacity in [required, Int32(256)] {
+                let result = encode(payload, length: Int32(payload.count), capacity: capacity)
+                XCTAssertEqual(result.length, required)
+                XCTAssertEqual(Array(result.bytes.prefix(bytes.count)), bytes)
+                XCTAssertEqual(Array(result.bytes.dropFirst(bytes.count)),
+                               [CChar](repeating: 0x5a, count: 256 - bytes.count))
+            }
+            let tooSmall = encode(payload, length: Int32(payload.count), capacity: required - 1)
+            XCTAssertEqual(tooSmall.length, 0)
+            XCTAssertEqual(tooSmall.bytes, [CChar](repeating: 0x5a, count: 256))
+        }
+    }
+}
+
+
+final class Base58DecodingBoundsRegressionTests: XCTestCase {
+    private func decodeRaw(_ string: String, capacity: Int) -> (success: Bool, length: Int, bytes: [UInt8]) {
+        var length = capacity
+        var buffer = [UInt8](repeating: 0xa5, count: capacity + 2)
+        let success = buffer.withUnsafeMutableBufferPointer {
+            b58tobin($0.baseAddress?.advanced(by: 1), &length, string)
+        }
+        XCTAssertEqual(buffer.first, 0xa5)
+        XCTAssertEqual(buffer.last, 0xa5)
+        return (success, length, Array(buffer.dropFirst().prefix(capacity)))
+    }
+
+    private func decodeChecked(_ string: String, capacity: Int32) -> (length: Int32, bytes: [UInt8]) {
+        let storageSize = max(0, Int(capacity))
+        var buffer = [UInt8](repeating: 0xa5, count: storageSize + 2)
+        let length = buffer.withUnsafeMutableBufferPointer {
+            base58_decode_check(string, HASHER_SHA2D, $0.baseAddress?.advanced(by: 1), capacity)
+        }
+        XCTAssertEqual(buffer.first, 0xa5)
+        XCTAssertEqual(buffer.last, 0xa5)
+        return (length, Array(buffer.dropFirst().prefix(storageSize)))
+    }
+
+    func testAllLeadingZerosRespectTheRawOutputCapacity() {
+        for capacity in [0, 1, 2, 3, 4, 5, 25, 82, 132] {
+            for count in [0, max(0, capacity - 1), capacity, capacity + 1, capacity + 64] {
+                let result = decodeRaw(String(repeating: "1", count: count), capacity: capacity)
+                let fits = capacity > 0 && count <= capacity
+                XCTAssertEqual(result.success, fits, "Capacity \(capacity), zero count \(count)")
+                if fits {
+                    XCTAssertEqual(result.length, count)
+                    XCTAssertLessThanOrEqual(result.length, capacity)
+                    XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: capacity))
+                } else {
+                    XCTAssertEqual(result.length, capacity, "Failure must preserve the capacity")
+                }
+            }
+        }
+    }
+
+    func testMixedLeadingZerosAndNumbersPreserveRightAlignedBytes() {
+        let vectors: [(String, [UInt8])] = [
+            ("", []), ("1", [0]), ("2", [1]), ("12", [0, 1]),
+            ("1112", [0, 0, 0, 1]), ("z", [57]), ("21", [58]), ("zz", [13, 35])
+        ]
+        for (string, expected) in vectors {
+            for capacity in 0 ... expected.count + 4 {
+                let result = decodeRaw(string, capacity: capacity)
+                let fits = capacity > 0 && capacity >= expected.count
+                XCTAssertEqual(result.success, fits)
+                if fits {
+                    XCTAssertEqual(result.length, expected.count)
+                    XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: capacity - expected.count) + expected)
+                } else {
+                    XCTAssertEqual(result.length, capacity)
+                }
+            }
+        }
+        for input in ["0", "O", "I", "l", "é", "12 3", String(repeating: "z", count: 200)] {
+            let result = decodeRaw(input, capacity: 25)
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.length, 25)
+        }
+    }
+
+    func testCheckedDecodingRejectsOverlongZerosWithoutChangingOutput() {
+        for capacity: Int32 in [0, 1, 21, 78, 128] {
+            for extra in [0, 1, 64, 1024] {
+                // The internal buffer includes four checksum bytes.
+                let string = String(repeating: "1", count: Int(capacity) + 4 + extra)
+                let result = decodeChecked(string, capacity: capacity)
+                XCTAssertEqual(result.length, 0)
+                XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: Int(capacity)))
+            }
+        }
+        for string in ["", "1", "111"] {
+            let result = decodeChecked(string, capacity: 21)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: 21))
+        }
+    }
+
+    func testInvalidCheckedCapacitiesFailBeforeUsingTheBuffer() {
+        for capacity: Int32 in [-4, -1, 129] {
+            let result = decodeChecked("T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", capacity: capacity)
+            XCTAssertEqual(result.length, 0)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: max(0, Int(capacity))))
+        }
+    }
+
+    func testCheckedDecodingMatchesTheAppsSwiftAddressFormat() {
+        let tronPayload = Data([0x41]) + Data(repeating: 0, count: 20)
+        let tronAddress = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+        XCTAssertEqual(String(base58CheckEncoding: tronPayload), tronAddress)
+        XCTAssertEqual(tronAddress.base58CheckData, tronPayload)
+        XCTAssertTrue(tronAddress.isTRXAddress())
+
+        let payloads = [Data([0]), tronPayload, Data(repeating: 0, count: 21),
+                        Data([0, 0, 0, 1]), Data((0 ..< 78).map { UInt8($0) }),
+                        Data((0 ..< 128).map { UInt8($0) })]
+        for payload in payloads {
+            let string = String(base58CheckEncoding: payload)
+            XCTAssertEqual(Data(base58CheckDecoding: string), payload)
+            for capacity in [payload.count - 1, payload.count, min(128, payload.count + 7)] {
+                let result = decodeChecked(string, capacity: Int32(capacity))
+                if capacity < payload.count {
+                    XCTAssertEqual(result.length, 0)
+                    XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: capacity))
+                } else {
+                    XCTAssertEqual(result.length, Int32(payload.count))
+                    XCTAssertEqual(Data(result.bytes.prefix(payload.count)), payload)
+                    XCTAssertEqual(Array(result.bytes.dropFirst(payload.count)),
+                                   [UInt8](repeating: 0xa5, count: capacity - payload.count))
+                }
+            }
+        }
+        let invalid = String(repeating: "1", count: 26)
+        XCTAssertNil(invalid.base58CheckData)
+        XCTAssertFalse(invalid.isTRXAddress())
+    }
+
+    func testHigherLevelCDecodersRejectOverlongZeroInput() {
+        let invalid = String(repeating: "1", count: 256)
+        var address = [UInt8](repeating: 0xa5, count: 21)
+        let decoded = address.withUnsafeMutableBufferPointer {
+            ecdsa_address_decode(invalid, 0x41, HASHER_SHA2D, $0.baseAddress)
+        }
+        XCTAssertEqual(decoded, 0)
+        XCTAssertEqual(address, [UInt8](repeating: 0xa5, count: 21))
+
+        var node = HDNode()
+        var fingerprint: UInt32 = 0xa5a5a5a5
+        XCTAssertEqual(hdnode_deserialize(invalid, 0x0488b21e, 0x0488ade4, "secp256k1", &node, &fingerprint), -1)
+        XCTAssertEqual(fingerprint, 0xa5a5a5a5)
+    }
+}
+
+
+final class CashAddressDecodingBoundsRegressionTests: XCTestCase {
+    private func encode(_ data: [UInt8], hrp: String, base32: Bool = false) -> String {
+        let capacity = hrp.utf8.count + (base32 ? data.count + 10 : 114)
+        var output = [CChar](repeating: 0x58, count: capacity + 2)
+        let result = output.withUnsafeMutableBufferPointer { buffer in
+            data.withUnsafeBufferPointer { input in
+                if base32 {
+                    return cash_encode(buffer.baseAddress?.advanced(by: 1), hrp, input.baseAddress, input.count)
+                }
+                return cash_addr_encode(buffer.baseAddress?.advanced(by: 1), hrp, input.baseAddress, input.count)
+            }
+        }
+        XCTAssertEqual(result, 1)
+        XCTAssertEqual(output.first, CChar(0x58))
+        XCTAssertEqual(output.last, CChar(0x58))
+        let encoded = output.dropFirst().prefix(capacity)
+        XCTAssertTrue(encoded.contains(0))
+        return String(decoding: encoded.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    private func assertRawDecode(_ address: String, expected: [UInt8], status: Int32 = 1) {
+        // Leave two canaries after the 104-byte output to detect both extra writes.
+        var data = [UInt8](repeating: 0xa5, count: 107)
+        var hrp = [CChar](repeating: 0x58, count: 23)
+        var length = 0
+        let result = data.withUnsafeMutableBufferPointer { output in
+            hrp.withUnsafeMutableBufferPointer { prefix in
+                cash_decode(prefix.baseAddress?.advanced(by: 1), output.baseAddress?.advanced(by: 1), &length, address)
+            }
+        }
+        XCTAssertEqual(result, status)
+        XCTAssertEqual(data.first, 0xa5)
+        XCTAssertEqual(hrp.first, CChar(0x58))
+        XCTAssertEqual(hrp.last, CChar(0x58))
+        XCTAssertEqual(Array(data.dropFirst().prefix(expected.count)), expected)
+        XCTAssertEqual(Array(data.dropFirst(expected.count + 1)),
+                       [UInt8](repeating: 0xa5, count: 106 - expected.count))
+        if status == 1 {
+            XCTAssertEqual(length, expected.count)
+            let decodedPrefix = hrp.dropFirst().prefix(21).prefix(while: { $0 != 0 })
+            XCTAssertEqual(String(decoding: decodedPrefix.map { UInt8(bitPattern: $0) }, as: UTF8.self),
+                           String(address.prefix(while: { $0 != ":" })).lowercased())
+        }
+    }
+
+    private func decodeAddress(_ address: String, hrp: String) -> (status: Int32, length: Int, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: 68)
+        var length = 0
+        let status = output.withUnsafeMutableBufferPointer {
+            cash_addr_decode($0.baseAddress?.advanced(by: 1), &length, hrp, address)
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(Array(output.suffix(2)), [0xa5, 0xa5])
+        return (status, length, Array(output.dropFirst().prefix(65)))
+    }
+
+    func testRawDecoderWritesOnlyDataIncludingAtTheMaximumLength() {
+        for count in [0, 1, 34, 102, 103, 104] {
+            let expected = (0 ..< count).map { UInt8($0 % 32) }
+            let address = encode(expected, hrp: "bitcoincash", base32: true)
+            assertRawDecode(address, expected: expected)
+        }
+        let maximum = (0 ..< 104).map { UInt8($0 % 32) }
+        let longestAddress = encode(maximum, hrp: "abcdefghijklmnop", base32: true)
+        XCTAssertEqual(longestAddress.utf8.count, 129)
+        assertRawDecode(longestAddress, expected: maximum)
+
+        // Checksum-only vectors from the specification contain no payload data.
+        assertRawDecode("prefix:x64nx6hz", expected: [])
+        assertRawDecode("p:gpf8m4h7", expected: [])
+    }
+
+    func testInvalidChecksumCannotWritePastTheMaximumDataBuffer() {
+        let data = (0 ..< 104).map { UInt8($0 % 32) }
+        let valid = encode(data, hrp: "bitcoincash", base32: true)
+        let invalid = String(valid.dropLast()) + (valid.last == "q" ? "p" : "q")
+        assertRawDecode(invalid, expected: data, status: 0)
+        let result = decodeAddress(invalid, hrp: "bitcoincash")
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: 65))
+    }
+
+    func testPublishedVectorsPreserveEncodingDecodingAndCaseRules() {
+        // Fixed vectors: https://github.com/bitcoincashorg/bitcoincash.org/blob/master/spec/cashaddr.md
+        let smallHash = "F5BF48B397DAE70BE82B3CCA4793F8EB2B6CDAC9"
+        let largeHash = "D0F346310D5513D9E01E299978624BA883E6BDA8F4C60883C10F28C2967E67EC77ECC7EEEAEAFC6DA89FAD72D11AC961E164678B868AEEEC5F2C1DA08884175B"
+        let vectors: [(hrp: String, version: UInt8, hash: String, address: String)] = [
+            ("bitcoincash", 0, smallHash, "bitcoincash:qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"),
+            ("bchtest", 8, smallHash, "bchtest:pr6m7j9njldwwzlg9v7v53unlr4jkmx6eyvwc0uz5t"),
+            ("bitcoincash", 7, largeHash, "bitcoincash:qlg0x333p4238k0qrc5ej7rzfw5g8e4a4r6vvzyrcy8j3s5k0en7calvclhw46hudk5flttj6ydvjc0pv3nchp52amk97tqa5zygg96mtky5sv5w")
+        ]
+        for vector in vectors {
+            let expected = [vector.version] + Array(Data(hex: vector.hash))
+            XCTAssertEqual(encode(expected, hrp: vector.hrp), vector.address)
+            for address in [vector.address, vector.address.uppercased()] {
+                let result = decodeAddress(address, hrp: vector.hrp)
+                XCTAssertEqual(result.status, 1)
+                XCTAssertEqual(result.length, expected.count)
+                XCTAssertEqual(Array(result.bytes.prefix(expected.count)), expected)
+                XCTAssertEqual(Array(result.bytes.dropFirst(expected.count)),
+                               [UInt8](repeating: 0xa5, count: 65 - expected.count))
+            }
+            let mixedCase = String(vector.address.prefix(1)).uppercased() + String(vector.address.dropFirst())
+            XCTAssertEqual(decodeAddress(mixedCase, hrp: vector.hrp).status, 0)
+            XCTAssertEqual(decodeAddress(vector.address, hrp: "wrong").status, 0)
+        }
+    }
+
+    func testOversizedInputIsRejectedBeforeWritingData() {
+        // Fits the total string limit, but exceeds the 104-value data limit.
+        let oversizedData = encode([UInt8](repeating: 0, count: 105), hrp: "bitcoincash", base32: true)
+        // Fits the prefix/data limits, but exceeds the 129-character string limit.
+        let oversizedString = String(repeating: "a", count: 17) + ":" + String(repeating: "q", count: 112)
+        for address in [oversizedData, oversizedString] {
+            assertRawDecode(address, expected: [], status: 0)
+            let result = decodeAddress(address, hrp: "bitcoincash")
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0xa5, count: 65))
+        }
+    }
+}
+
+
+final class RFC7539InitializationRegressionTests: XCTestCase {
+    // RFC 7539 section 2.8.2: https://www.rfc-editor.org/rfc/rfc7539.html#section-2.8.2
+    private let key = (0x80 ..< 0xa0).map { UInt8($0) }
+    private let nonce = Array(Data(hex: "070000004041424344454647"))
+    private let aad = Array(Data(hex: "50515253c0c1c2c3c4c5c6c7"))
+    private let plaintext = Array(Data(hex:
+        "4c616469657320616e642047656e746c" + "656d656e206f662074686520636c6173" +
+        "73206f66202739393a20496620492063" + "6f756c64206f6666657220796f75206f" +
+        "6e6c79206f6e652074697020666f7220" + "746865206675747572652c2073756e73" +
+        "637265656e20776f756c642062652069" + "742e"))
+    private let ciphertext = Array(Data(hex:
+        "d31a8d34648e60db7b86afbc53ef7ec2" + "a4aded51296e08fea9e2b5a736ee62d6" +
+        "3dbea45e8ca9671282fafb69da92728b" + "1a71de0a9e060b2905d6a5b67ecd3b36" +
+        "92ddbd7f2d778b8c9803aee328091b58" + "fab324e4fad675945585808b4831d7bc" +
+        "3ff4def08e4b7a9de576d26586cec64b" + "6116"))
+    private let expectedTag = Array(Data(hex: "1ae10b594f09e26a7e902ecbd0600691"))
+
+    private func context(filledWith value: UInt8) -> chacha20poly1305_ctx {
+        var context = chacha20poly1305_ctx()
+        withUnsafeMutableBytes(of: &context) { bytes in
+            for index in bytes.indices { bytes[index] = value }
+        }
+        return context
+    }
+
+    private func initialize(_ context: inout chacha20poly1305_ctx, nonce: [UInt8]) {
+        var key = self.key
+        var nonce = nonce
+        key.withUnsafeMutableBufferPointer { keyBuffer in
+            nonce.withUnsafeMutableBufferPointer { nonceBuffer in
+                rfc7539_init(&context, keyBuffer.baseAddress, nonceBuffer.baseAddress)
+            }
+        }
+        // Initialization consumes block 0, leaving block 1 for the message.
+        XCTAssertEqual(context.chacha20.input.12, 1)
+    }
+
+    private func crypt(_ context: inout chacha20poly1305_ctx, input: [UInt8],
+                       decrypt: Bool = false, splitBlocks: Bool = false) -> (bytes: [UInt8], tag: [UInt8]) {
+        var aad = self.aad
+        aad.withUnsafeMutableBufferPointer { rfc7539_auth(&context, $0.baseAddress, $0.count) }
+        var input = input
+        var output = [UInt8](repeating: 0xa5, count: input.count + 2)
+        let chunks = splitBlocks && input.count > 64 ? [64, input.count - 64] : [input.count]
+        input.withUnsafeMutableBufferPointer { source in
+            output.withUnsafeMutableBufferPointer { destination in
+                var offset = 0
+                for count in chunks {
+                    let read = source.baseAddress?.advanced(by: offset)
+                    let write = destination.baseAddress?.advanced(by: offset + 1)
+                    if decrypt {
+                        chacha20poly1305_decrypt(&context, read, write, count)
+                    } else {
+                        chacha20poly1305_encrypt(&context, read, write, count)
+                    }
+                    offset += count
+                }
+            }
+        }
+        var tag = [UInt8](repeating: 0, count: 16)
+        tag.withUnsafeMutableBufferPointer {
+            rfc7539_finish(&context, Int64(aad.count), Int64(input.count), $0.baseAddress)
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (Array(output.dropFirst().prefix(input.count)), tag)
+    }
+
+    func testRFCVectorIsIndependentOfPreviousContextMemory() {
+        for value: UInt8 in [0, 0xa5, 0xff] {
+            for splitBlocks in [false, true] {
+                var state = context(filledWith: value)
+                initialize(&state, nonce: nonce)
+                let result = crypt(&state, input: plaintext, splitBlocks: splitBlocks)
+                XCTAssertEqual(result.bytes, ciphertext)
+                XCTAssertEqual(result.tag, expectedTag)
+            }
+        }
+    }
+
+    func testReinitializationAfterEncryptionStartsANewMessage() {
+        var state = chacha20poly1305_ctx()
+        var previousNonce = nonce
+        previousNonce[0] = 8
+        initialize(&state, nonce: previousNonce)
+        _ = crypt(&state, input: plaintext)
+
+        initialize(&state, nonce: nonce)
+        let result = crypt(&state, input: plaintext)
+        XCTAssertEqual(result.bytes, ciphertext)
+        XCTAssertEqual(result.tag, expectedTag)
+    }
+
+    func testReinitializationDiscardsAnUnfinishedMessage() {
+        var state = chacha20poly1305_ctx()
+        var previousNonce = nonce
+        previousNonce[0] = 8
+        initialize(&state, nonce: previousNonce)
+        var oldAAD = [UInt8](repeating: 0x11, count: 3)
+        oldAAD.withUnsafeMutableBufferPointer { rfc7539_auth(&state, $0.baseAddress, $0.count) }
+        // Leave both an advanced ChaCha counter and a partial Poly1305 block.
+        var oldPlaintext = [UInt8](repeating: 0x22, count: 17)
+        var oldCiphertext = [UInt8](repeating: 0, count: 17)
+        oldPlaintext.withUnsafeMutableBufferPointer { input in
+            oldCiphertext.withUnsafeMutableBufferPointer { output in
+                chacha20poly1305_encrypt(&state, input.baseAddress, output.baseAddress, input.count)
+            }
+        }
+
+        initialize(&state, nonce: nonce)
+        let result = crypt(&state, input: plaintext)
+        XCTAssertEqual(result.bytes, ciphertext)
+        XCTAssertEqual(result.tag, expectedTag)
+    }
+
+    func testDecryptionAndTagMatchTheRFCVectorWithAReusedContext() {
+        var state = context(filledWith: 0xa5)
+        for splitBlocks in [false, true] {
+            initialize(&state, nonce: nonce)
+            let result = crypt(&state, input: ciphertext, decrypt: true, splitBlocks: splitBlocks)
+            XCTAssertEqual(result.bytes, plaintext)
+            XCTAssertEqual(result.tag, expectedTag)
+        }
+    }
+}
+
+
+final class Blake256EmptyUpdateRegressionTests: XCTestCase {
+    private func oneShot(_ input: [UInt8], type: HasherType? = nil) -> [UInt8] {
+        var output = [UInt8](repeating: 0, count: 32)
+        input.withUnsafeBufferPointer { source in
+            output.withUnsafeMutableBufferPointer { destination in
+                if let type = type {
+                    hasher_Raw(type, source.baseAddress, source.count, destination.baseAddress)
+                } else {
+                    blake256(source.baseAddress, source.count, destination.baseAddress)
+                }
+            }
+        }
+        return output
+    }
+
+    private func streamed(_ chunks: [[UInt8]]) -> [UInt8] {
+        var context = BLAKE256_CTX()
+        blake256_Init(&context)
+        for chunk in chunks {
+            if chunk.isEmpty {
+                // Both NULL and a valid pointer must be ignored when length is zero.
+                blake256_Update(&context, nil, 0)
+                var marker: UInt8 = 0xa5
+                blake256_Update(&context, &marker, 0)
+            } else {
+                chunk.withUnsafeBufferPointer {
+                    blake256_Update(&context, $0.baseAddress, $0.count)
+                }
+            }
+        }
+        var output = [UInt8](repeating: 0, count: 32)
+        output.withUnsafeMutableBufferPointer { blake256_Final(&context, $0.baseAddress) }
+        return output
+    }
+
+    private func streamedHasher(_ chunks: [[UInt8]], type: HasherType) -> [UInt8] {
+        var hasher = TLCore.Hasher()
+        hasher_Init(&hasher, type)
+        for chunk in chunks {
+            if chunk.isEmpty {
+                hasher_Update(&hasher, nil, 0)
+                var marker: UInt8 = 0xa5
+                hasher_Update(&hasher, &marker, 0)
+            } else {
+                chunk.withUnsafeBufferPointer {
+                    hasher_Update(&hasher, $0.baseAddress, $0.count)
+                }
+            }
+        }
+        var output = [UInt8](repeating: 0, count: 32)
+        output.withUnsafeMutableBufferPointer { hasher_Final(&hasher, $0.baseAddress) }
+        return output
+    }
+
+    func testPublishedVectorsWithEmptyChunksAtEverySplit() {
+        // BLAKE author's reference vectors: https://github.com/veorq/BLAKE/blob/master/blake256.c
+        let vectors: [(count: Int, digest: String)] = [
+            (1, "0ce8d4ef4dd7cd8d62dfded9d4edb0a774ae6a41929a74da23109e8f11139c87"),
+            (72, "d419bad32d504fb7d44d460c42c5593fe544fa4c135dec31e21bd9abdcc22d41")
+        ]
+        for vector in vectors {
+            let input = [UInt8](repeating: 0, count: vector.count)
+            let expected = Array(Data(hex: vector.digest))
+            XCTAssertEqual(oneShot(input), expected)
+            XCTAssertEqual(streamed([input]), expected)
+            for split in 0 ... input.count {
+                let chunks: [[UInt8]] = [[], Array(input.prefix(split)), [],
+                                        Array(input.dropFirst(split)), [], []]
+                XCTAssertEqual(streamed(chunks), expected, "Length \(input.count), split \(split)")
+            }
+        }
+    }
+
+    func testEmptyUpdatesPreserveEveryPartialBlockLength() {
+        // Cover all 64 buffer lengths after zero, one, and two complete blocks.
+        for count in 0 ..< 192 {
+            let input = (0 ..< count).map { UInt8($0) }
+            XCTAssertEqual(streamed([[], input, [], []]), oneShot(input), "Length \(count)")
+        }
+    }
+
+    func testHashingContinuesAfterEmptyUpdatesAcrossBlockBoundaries() {
+        let input = (0 ..< 193).map { UInt8($0) }
+        let expected = oneShot(input)
+        for split in 0 ... input.count {
+            let prefix = Array(input.prefix(split))
+            let suffix = Array(input.dropFirst(split))
+            XCTAssertEqual(streamed([prefix, [], [], suffix, []]), expected, "Split \(split)")
+            let nonemptyChunks = [prefix, suffix].filter { !$0.isEmpty }
+            XCTAssertEqual(streamed(nonemptyChunks), expected, "Split \(split) without empty chunks")
+        }
+    }
+
+    func testAllBlakeHasherVariantsIgnoreEmptyChunks() {
+        let variants: [(type: HasherType, digestLength: Int)] = [
+            (HASHER_BLAKE, 32), (HASHER_BLAKED, 32), (HASHER_BLAKE_RIPEMD, 20)
+        ]
+        for variant in variants {
+            for count in [0, 1, 55, 56, 63, 64, 65, 127, 128, 129] {
+                let input = (0 ..< count).map { UInt8($0) }
+                let expected = Array(oneShot(input, type: variant.type).prefix(variant.digestLength))
+                for split in [0, count / 2, count] {
+                    let chunks: [[UInt8]] = [[], Array(input.prefix(split)), [],
+                                            Array(input.dropFirst(split)), [], []]
+                    let actual = streamedHasher(chunks, type: variant.type)
+                    XCTAssertEqual(Array(actual.prefix(variant.digestLength)), expected,
+                                   "Length \(count), split \(split), hasher \(variant.type)")
+                }
+            }
+        }
+    }
+}
+
+
+final class ScriptOutputAddressRegressionTests: XCTestCase {
+    // Public vectors: BIP 173 (v0 witness) and Bitcoin Core (legacy scripts).
+    // https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki#examples
+    // https://github.com/bitcoin/bitcoin/blob/master/src/test/data/key_io_valid.json
+    private let vectors: [(script: String, address: String)] = [
+        ("0014751e76e8199196d454941c45d1b3a323f1433bd6",
+         "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+        ("00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262",
+         "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3"),
+        ("76a914a31c06bd463e3923bc1aadbde48b16976c08071788ac",
+         "1FsSia9rv4NeEwvJ2GvXrX7LyxYspbN2mo"),
+        ("a914373b819a068f32b7a6b38b6b38729647cfde01c287",
+         "36j4NfKv6Akva9amjWrLG6MuSQym1GuEmm")
+    ]
+
+    private func convert(_ script: [UInt8], capacity: Int32) -> (status: Int32, address: String) {
+        let writableCount = max(0, Int(capacity))
+        var output = [CChar](repeating: 0x5a, count: writableCount + 2)
+        let status = output.withUnsafeMutableBufferPointer { buffer in
+            script.withUnsafeBufferPointer { bytes in
+                script_output_to_address(bytes.baseAddress, Int32(bytes.count),
+                                         buffer.baseAddress?.advanced(by: 1), capacity)
+            }
+        }
+        XCTAssertEqual(output.first, 0x5a)
+        XCTAssertEqual(output.last, 0x5a)
+        guard status > 0 else {
+            XCTAssertTrue(output.allSatisfy { $0 == 0x5a })
+            return (status, "")
+        }
+        XCTAssertLessThanOrEqual(status, capacity)
+        let contents = output.dropFirst().prefix(writableCount)
+        XCTAssertTrue(contents.contains(0))
+        let bytes = contents.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        XCTAssertEqual(Int(status), bytes.count + 1)
+        return (status, String(decoding: bytes, as: UTF8.self))
+    }
+
+    func testMainnetWitnessAndLegacyAddressesMatchPublishedVectors() {
+        for vector in vectors {
+            let required = Int32(vector.address.utf8.count + 1)
+            for capacity in [required, required + 8] {
+                let result = convert(Array(Data(hex: vector.script)), capacity: capacity)
+                XCTAssertEqual(result.status, required)
+                XCTAssertEqual(result.address, vector.address)
+            }
+        }
+    }
+
+    func testInsufficientAndNonpositiveCapacitiesLeaveOutputUntouched() {
+        for vector in vectors {
+            let required = Int32(vector.address.utf8.count + 1)
+            for capacity in [Int32.min, -1] + Array(Int32(0)..<required) {
+                XCTAssertEqual(convert(Array(Data(hex: vector.script)), capacity: capacity).status, 0)
+            }
+        }
+    }
+
+    func testMalformedAndUnsupportedScriptsAreRejectedWithoutWriting() {
+        var scripts: [[UInt8]] = [[], [0x00], [0x6a],
+                                 [0x51, 0x20] + [UInt8](repeating: 0, count: 32),
+                                 [0x00, 0x14] + [UInt8](repeating: 0, count: 32)]
+        for length in [19, 21, 31, 33] {
+            scripts.append([0x00, UInt8(length)] + [UInt8](repeating: 0, count: length))
+        }
+        for script in scripts {
+            XCTAssertEqual(convert(script, capacity: 75).status, 0)
+        }
+    }
+
+    func testNullPointersAndNegativeScriptLengthAreRejected() {
+        let script = Array(Data(hex: vectors[0].script))
+        var output = [CChar](repeating: 0x5a, count: 75)
+        output.withUnsafeMutableBufferPointer { buffer in
+            XCTAssertEqual(script_output_to_address(nil, 22, buffer.baseAddress, 75), 0)
+            script.withUnsafeBufferPointer { bytes in
+                XCTAssertEqual(script_output_to_address(bytes.baseAddress, -1, buffer.baseAddress, 75), 0)
+                XCTAssertEqual(script_output_to_address(bytes.baseAddress, Int32(bytes.count), nil, 75), 0)
+            }
+        }
+        XCTAssertTrue(output.allSatisfy { $0 == 0x5a })
+    }
+}
+
+
+final class Bech32SeparatorRegressionTests: XCTestCase {
+    private func decode(_ address: String, expectUntouched: Bool = false)
+        -> (status: Int32, hrp: String, data: [UInt8]) {
+        let hrpCapacity = max(0, address.utf8.count - 6)
+        let dataCapacity = max(0, address.utf8.count - 8)
+        // Guard bytes follow the documented capacities and catch the original overwrite.
+        var hrp = [CChar](repeating: 0x5a, count: hrpCapacity + 1 + 8)
+        var data = [UInt8](repeating: 0xa5, count: dataCapacity + 2)
+        var length = 0
+        let status = hrp.withUnsafeMutableBufferPointer { prefix in
+            data.withUnsafeMutableBufferPointer { payload in
+                bech32_decode(prefix.baseAddress?.advanced(by: 1),
+                              payload.baseAddress?.advanced(by: 1), &length, address)
+            }
+        }
+        XCTAssertEqual(hrp.first, 0x5a, address)
+        XCTAssertEqual(Array(hrp.suffix(8)), [CChar](repeating: 0x5a, count: 8), address)
+        XCTAssertEqual(data.first, 0xa5, address)
+        XCTAssertEqual(data.last, 0xa5, address)
+        if expectUntouched {
+            XCTAssertTrue(hrp.allSatisfy { $0 == 0x5a }, address)
+            XCTAssertTrue(data.allSatisfy { $0 == 0xa5 }, address)
+        }
+        guard status == 1 else { return (status, "", []) }
+        XCTAssertLessThanOrEqual(length, dataCapacity, address)
+        let prefix = hrp.dropFirst().prefix(hrpCapacity)
+        XCTAssertTrue(prefix.contains(0), address)
+        let bytes = prefix.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        return (status, String(decoding: bytes, as: UTF8.self),
+                Array(data.dropFirst().prefix(min(length, dataCapacity))))
+    }
+
+    private func decodeSegwit(_ address: String, hrp: String)
+        -> (status: Int32, version: Int32, length: Int, program: [UInt8]) {
+        var version: Int32 = -1
+        var length = 99
+        var program = [UInt8](repeating: 0xa5, count: 42)
+        let status = program.withUnsafeMutableBufferPointer {
+            segwit_addr_decode(&version, $0.baseAddress?.advanced(by: 1), &length, hrp, address)
+        }
+        XCTAssertEqual(program.first, 0xa5, address)
+        XCTAssertEqual(program.last, 0xa5, address)
+        return (status, version, length, Array(program.dropFirst().prefix(40)))
+    }
+
+    private func encodeSegwit(version: Int32, program: [UInt8], hrp: String)
+        -> (status: Int32, address: String) {
+        let capacity = 73 + hrp.utf8.count
+        var output = [CChar](repeating: 0x5a, count: capacity + 2)
+        let status = output.withUnsafeMutableBufferPointer { buffer in
+            program.withUnsafeBufferPointer { bytes in
+                segwit_addr_encode(buffer.baseAddress?.advanced(by: 1), hrp, version,
+                                   bytes.baseAddress, bytes.count)
+            }
+        }
+        XCTAssertEqual(output.first, 0x5a)
+        XCTAssertEqual(output.last, 0x5a)
+        guard status == 1 else { return (status, "") }
+        let contents = output.dropFirst().prefix(capacity)
+        XCTAssertTrue(contents.contains(0))
+        let bytes = contents.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        return (status, String(decoding: bytes, as: UTF8.self))
+    }
+
+    func testBIP350PublishedAddressesEncodeAndDecodeWithTheRequiredChecksum() {
+        // Public address/program vectors from BIP 350; no wallet secrets are used.
+        // https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki#test-vectors-for-v0-v16-native-segregated-witness-addresses
+        let vectors: [(address: String, hrp: String, version: Int32, program: String)] = [
+            ("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4", "bc", 0,
+             "751e76e8199196d454941c45d1b3a323f1433bd6"),
+            ("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7", "tb", 0,
+             "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"),
+            ("bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7kt5nd6y", "bc", 1,
+             "751e76e8199196d454941c45d1b3a323f1433bd6751e76e8199196d454941c45d1b3a323f1433bd6"),
+            ("BC1SW50QGDZ25J", "bc", 16, "751e"),
+            ("bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs", "bc", 2,
+             "751e76e8199196d454941c45d1b3a323"),
+            ("tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy", "tb", 0,
+             "000000c4a5cad46221b2a187905e5266362b99d5e91c6ce24d165dab93e86433"),
+            ("tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c", "tb", 1,
+             "000000c4a5cad46221b2a187905e5266362b99d5e91c6ce24d165dab93e86433"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0", "bc", 1,
+             "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        ]
+        for vector in vectors {
+            let expected = Array(Data(hex: vector.program))
+            let encoded = encodeSegwit(version: vector.version, program: expected, hrp: vector.hrp)
+            XCTAssertEqual(encoded.status, 1, vector.address)
+            XCTAssertEqual(encoded.address, vector.address.lowercased())
+            for address in [vector.address.lowercased(), vector.address.uppercased()] {
+                let decoded = decodeSegwit(address, hrp: vector.hrp)
+                XCTAssertEqual(decoded.status, 1, address)
+                XCTAssertEqual(decoded.version, vector.version, address)
+                XCTAssertEqual(decoded.length, expected.count, address)
+                XCTAssertEqual(Array(decoded.program.prefix(expected.count)), expected, address)
+                XCTAssertEqual(Array(decoded.program.dropFirst(expected.count)),
+                               [UInt8](repeating: 0xa5, count: 40 - expected.count), address)
+            }
+        }
+    }
+
+    func testBIP350PublishedInvalidAddressesAreRejected() {
+        let vectors: [(address: String, hrp: String)] = [
+            ("tc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq5zuyut", "bc"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd", "bc"),
+            ("tb1z0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqglt7rf", "tb"),
+            ("BC1S0XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQ54WELL", "bc"),
+            ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kemeawh", "bc"),
+            ("tb1q0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq24jc47", "tb"),
+            ("bc1p38j9r5y49hruaue7wxjce0updqjuyyx0kh56v8s25huc6995vvpql3jow4", "bc"),
+            ("BC130XLXVLHEMJA6C4DQV22UAPCTQUPFHLXM9H8Z3K2E72Q4K9HCZ7VQ7ZWS8R", "bc"),
+            ("bc1pw5dgrnzv", "bc"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v8n0nx0muaewav253zgeav", "bc"),
+            ("BC1QR508D6QEJXTDG4Y5R3ZARVARYV98GJ9P", "bc"),
+            ("tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vq47Zagq", "tb"),
+            ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7v07qwwzcrf", "bc"),
+            ("tb1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vpggkg4j", "tb"),
+            ("bc1gmk9yu", "bc")
+        ]
+        for vector in vectors {
+            XCTAssertEqual(decodeSegwit(vector.address, hrp: vector.hrp).status, 0, vector.address)
+        }
+    }
+
+    func testGenericBech32APIsRetainTheirOriginalChecksumContract() {
+        var output = [CChar](repeating: 0, count: 9)
+        let status = output.withUnsafeMutableBufferPointer {
+            bech32_encode($0.baseAddress, "a", nil, 0)
+        }
+        XCTAssertEqual(status, 1)
+        XCTAssertEqual(String(cString: output), "a12uel5l")
+        XCTAssertEqual(decode("a12uel5l").status, 1)
+        XCTAssertEqual(decode("a1lqfn3a").status, 0) // Bech32m must remain rejected here.
+        // Generic Bech32 does not enforce SegWit version rules.
+        let legacyV1 = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqh2y7hd"
+        XCTAssertEqual(decode(legacyV1).status, 1)
+        XCTAssertEqual(decodeSegwit(legacyV1, hrp: "bc").status, 0)
+    }
+
+    func testSegwitEncodingRejectsVersionsOutsideTheDocumentedRange() {
+        let program = [UInt8](repeating: 0, count: 32)
+        let invalidVersions: [Int32] = [-256, -1, 17, 256]
+        for version in invalidVersions {
+            XCTAssertEqual(encodeSegwit(version: version, program: program, hrp: "bc").status, 0)
+        }
+    }
+
+    func testMissingSeparatorsAreRejectedBeforeWritingOutputs() {
+        for length in 8 ... 90 {
+            for character in ["q", "Q", "~"] {
+                let address = String(repeating: character, count: length)
+                XCTAssertEqual(decode(address, expectUntouched: true).status, 0, address)
+            }
+        }
+        // The missing-separator vector from BIP 173.
+        XCTAssertEqual(decode("pzry9x0s0muk", expectUntouched: true).status, 0)
+    }
+
+    func testMalformedSeparatorsAndLengthsAreRejectedBeforeWritingOutputs() {
+        let inputs = ["", "a12uel5", "1qzzfhee", "bc1qqqqq", "bcqqqqq1",
+                      String(repeating: "q", count: 91)]
+        for address in inputs {
+            XCTAssertEqual(decode(address, expectUntouched: true).status, 0, address)
+        }
+    }
+
+    func testPublishedBech32VectorsPreservePrefixesPayloadsAndCaseRules() {
+        // BIP 173: https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki#test-vectors
+        let longestHRP = "an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio"
+        let vectors: [(address: String, hrp: String, data: [UInt8])] = [
+            ("a12uel5l", "a", []),
+            (longestHRP + "1tt5tgs", longestHRP, []),
+            ("abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw", "abcdef", (0 ..< 32).map { UInt8($0) }),
+            ("11" + String(repeating: "q", count: 82) + "c8247j", "1", [UInt8](repeating: 0, count: 82)),
+            ("?1ezyfcl", "?", [])
+        ]
+        for vector in vectors {
+            for address in [vector.address, vector.address.uppercased()] {
+                let result = decode(address)
+                XCTAssertEqual(result.status, 1, address)
+                XCTAssertEqual(result.hrp, vector.hrp, address)
+                XCTAssertEqual(result.data, vector.data, address)
+            }
+        }
+        XCTAssertEqual(decode("a12UEL5L").status, 0)
+        XCTAssertEqual(decode("a12uel5q").status, 0)
+    }
+
+    func testSegwitWrapperRejectsMissingSeparatorsWithoutChangingProgram() {
+        // 85...90 characters exceeded the wrapper's old 84-byte local HRP buffer.
+        for length in [0, 7, 8, 83, 84, 85, 86, 87, 88, 89, 90, 91] {
+            let result = decodeSegwit(String(repeating: "q", count: length), hrp: "bc")
+            XCTAssertEqual(result.status, 0, "Length \(length)")
+            XCTAssertEqual(result.version, -1)
+            XCTAssertEqual(result.length, 99)
+            XCTAssertEqual(result.program, [UInt8](repeating: 0xa5, count: 40))
+        }
+    }
+
+    func testPublishedSegwitV0VectorsPreserveProgramsAndNetworkChecks() {
+        let vectors: [(address: String, hrp: String, program: String)] = [
+            ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "bc",
+             "751e76e8199196d454941c45d1b3a323f1433bd6"),
+            ("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7", "tb",
+             "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262")
+        ]
+        for vector in vectors {
+            let expected = Array(Data(hex: vector.program))
+            for address in [vector.address, vector.address.uppercased()] {
+                let result = decodeSegwit(address, hrp: vector.hrp)
+                XCTAssertEqual(result.status, 1, address)
+                XCTAssertEqual(result.version, 0)
+                XCTAssertEqual(result.length, expected.count)
+                XCTAssertEqual(Array(result.program.prefix(expected.count)), expected)
+                XCTAssertEqual(Array(result.program.dropFirst(expected.count)),
+                               [UInt8](repeating: 0xa5, count: 40 - expected.count))
+            }
+            let wrongNetwork = vector.hrp == "bc" ? "tb" : "bc"
+            XCTAssertEqual(decodeSegwit(vector.address, hrp: wrongNetwork).status, 0)
+            let mixedCase = String(vector.address.prefix(1)).uppercased() + String(vector.address.dropFirst())
+            XCTAssertEqual(decodeSegwit(mixedCase, hrp: vector.hrp).status, 0)
+            let badChecksum = String(vector.address.dropLast()) + "q"
+            XCTAssertEqual(decodeSegwit(badChecksum, hrp: vector.hrp).status, 0)
+        }
+    }
+}
+
+
+final class CosiEmptyInputRegressionTests: XCTestCase {
+    // RFC 8032, section 7.1, test 1 (empty message).
+    // https://www.rfc-editor.org/rfc/rfc8032.html#section-7.1
+    private let referenceKey = Array(Data(hex:
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"))
+    private let referenceSignature = Array(Data(hex:
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155" +
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"))
+
+    private func withBlocks<T>(_ blocks: [[UInt8]],
+                               _ body: (UnsafeMutablePointer<ed25519_public_key>?) -> T) -> T {
+        guard blocks.allSatisfy({ $0.count == 32 }) else {
+            XCTFail("CoSi fixtures must contain 32-byte blocks")
+            return body(nil)
+        }
+        guard !blocks.isEmpty else { return body(nil) }
+        var bytes = blocks.flatMap { $0 }
+        return bytes.withUnsafeMutableBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return body(nil) }
+            // Public keys and signature shares are both C arrays of 32 bytes.
+            return base.withMemoryRebound(to: ed25519_public_key.self, capacity: blocks.count) {
+                body($0)
+            }
+        }
+    }
+
+    private func combineKeys(_ keys: [[UInt8]], count: Int? = nil) -> (status: Int32, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: 34)
+        let status = withBlocks(keys) { input in
+            output.withUnsafeMutableBufferPointer {
+                ed25519_cosi_combine_publickeys($0.baseAddress?.advanced(by: 1), input, count ?? keys.count)
+            }
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (status, Array(output.dropFirst().prefix(32)))
+    }
+
+    private func combineShares(_ shares: [[UInt8]], commitment: [UInt8]?, count: Int? = nil,
+                               legacy: Bool = false) -> (status: Int32?, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: 66)
+        let status: Int32? = withBlocks(shares) { input in
+            output.withUnsafeMutableBufferPointer { destination -> Int32? in
+                // Read the base address before building the closure: `destination` is an
+                // inout parameter and cannot be captured by an escaping closure.
+                let target = destination.baseAddress?.advanced(by: 1)
+                let combine: (UnsafePointer<UInt8>?) -> Int32? = { nonce in
+                    if legacy {
+                        ed25519_cosi_combine_signatures(target,
+                                                       nonce, input, count ?? shares.count)
+                        return nil
+                    }
+                    return ed25519_cosi_combine_signatures_checked(target,
+                                                                   nonce, input, count ?? shares.count)
+                }
+                if let commitment = commitment {
+                    return commitment.withUnsafeBufferPointer { combine($0.baseAddress) }
+                }
+                return combine(nil)
+            }
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (status, Array(output.dropFirst().prefix(64)))
+    }
+
+    private func publicKey(_ secret: [UInt8]) -> [UInt8] {
+        var output = [UInt8](repeating: 0, count: 32)
+        secret.withUnsafeBufferPointer { key in
+            output.withUnsafeMutableBufferPointer { ed25519_publickey(key.baseAddress, $0.baseAddress) }
+        }
+        return output
+    }
+
+    private func verify(_ signature: [UInt8], key: [UInt8], message: [UInt8]) -> Int32 {
+        return signature.withUnsafeBufferPointer { sig in
+            key.withUnsafeBufferPointer { pk in
+                message.withUnsafeBufferPointer {
+                    ed25519_sign_open($0.baseAddress, $0.count, pk.baseAddress, sig.baseAddress)
+                }
+            }
+        }
+    }
+
+    func testEmptyPublicKeySetsAndNullArgumentsFailAndClearOutput() {
+        for (keys, count): ([[UInt8]], Int) in [([], 0), ([referenceKey], 0), ([], 1)] {
+            let result = combineKeys(keys, count: count)
+            XCTAssertEqual(result.status, -1)
+            XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: 32))
+        }
+        XCTAssertEqual(ed25519_cosi_combine_publickeys(nil, nil, 0), -1)
+        withBlocks([referenceKey]) {
+            XCTAssertEqual(ed25519_cosi_combine_publickeys(nil, $0, 1), -1)
+        }
+    }
+
+    func testEmptySignatureSetsAndNullArgumentsFailInBothAPIs() {
+        let share = Array(referenceSignature.suffix(32))
+        let commitment = Array(referenceSignature.prefix(32))
+        let cases: [(shares: [[UInt8]], commitment: [UInt8]?, count: Int)] = [
+            ([], nil, 0), ([share], commitment, 0), ([], commitment, 1), ([share], nil, 1)
+        ]
+        for input in cases {
+            let checked = combineShares(input.shares, commitment: input.commitment, count: input.count)
+            XCTAssertEqual(checked.status, -1)
+            XCTAssertEqual(checked.bytes, [UInt8](repeating: 0, count: 64))
+            let legacy = combineShares(input.shares, commitment: input.commitment,
+                                       count: input.count, legacy: true)
+            XCTAssertEqual(legacy.bytes, checked.bytes)
+        }
+        XCTAssertEqual(ed25519_cosi_combine_signatures_checked(nil, nil, nil, 0), -1)
+        ed25519_cosi_combine_signatures(nil, nil, nil, 0)
+        withBlocks([share]) { shares in
+            commitment.withUnsafeBufferPointer {
+                XCTAssertEqual(ed25519_cosi_combine_signatures_checked(nil, $0.baseAddress, shares, 1), -1)
+                ed25519_cosi_combine_signatures(nil, $0.baseAddress, shares, 1)
+            }
+        }
+    }
+
+    func testSingleMemberPreservesThePublishedSignature() {
+        let key = combineKeys([referenceKey])
+        XCTAssertEqual(key.status, 0)
+        XCTAssertEqual(key.bytes, referenceKey)
+        for legacy in [false, true] {
+            let result = combineShares([Array(referenceSignature.suffix(32))],
+                                       commitment: Array(referenceSignature.prefix(32)), legacy: legacy)
+            if !legacy { XCTAssertEqual(result.status, 0) }
+            XCTAssertEqual(result.bytes, referenceSignature)
+            XCTAssertEqual(verify(result.bytes, key: key.bytes, message: []), 0)
+        }
+    }
+
+    func testMultipleSharesPreserveScalarAddition() {
+        let commitment = Array(referenceSignature.prefix(32))
+        let shares = [1, 2, 3].map { [UInt8($0)] + [UInt8](repeating: 0, count: 31) }
+        let expected = commitment + [6] + [UInt8](repeating: 0, count: 31)
+        let result = combineShares(shares, commitment: commitment)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.bytes, expected)
+        XCTAssertEqual(combineShares(shares, commitment: commitment, legacy: true).bytes, expected)
+    }
+
+    func testMultipleMembersProduceVerifiableCombinedSignatures() {
+        let message = Array("CoSi combination regression".utf8)
+        for count in [2, 3] {
+            // Deterministic keys and nonces are test fixtures only.
+            let secrets = (0 ..< count).map { [UInt8](repeating: UInt8(0x11 + $0), count: 32) }
+            let nonces = (0 ..< count).map { [UInt8](repeating: UInt8(0x91 + $0), count: 32) }
+            let keys = secrets.map { publicKey($0) }
+            let key = combineKeys(keys)
+            let commitment = combineKeys(nonces.map { publicKey($0) })
+            XCTAssertEqual(key.status, 0)
+            XCTAssertEqual(commitment.status, 0)
+            XCTAssertEqual(combineKeys(Array(keys.reversed())).bytes, key.bytes)
+            var shares = [[UInt8]]()
+            for index in 0 ..< count {
+                var share = [UInt8](repeating: 0, count: 32)
+                message.withUnsafeBufferPointer { msg in
+                    secrets[index].withUnsafeBufferPointer { secret in
+                        nonces[index].withUnsafeBufferPointer { nonce in
+                            commitment.bytes.withUnsafeBufferPointer { r in
+                                key.bytes.withUnsafeBufferPointer { pk in
+                                    share.withUnsafeMutableBufferPointer {
+                                        ed25519_cosi_sign(msg.baseAddress, msg.count, secret.baseAddress,
+                                                          nonce.baseAddress, r.baseAddress, pk.baseAddress, $0.baseAddress)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                shares.append(share)
+            }
+            let result = combineShares(shares, commitment: commitment.bytes)
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(combineShares(shares, commitment: commitment.bytes, legacy: true).bytes, result.bytes)
+            XCTAssertEqual(verify(result.bytes, key: key.bytes, message: message), 0)
+            XCTAssertEqual(verify(result.bytes, key: key.bytes, message: message + [0]), -1)
+        }
+    }
+}
+
+
+final class MessageSigningVersionRegressionTests: XCTestCase {
+    private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+    private let password = "message-signing-regression"
+
+    private func withAccount(_ body: (KeyStore, String) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try KeyStore(keyDirectory: directory)
+        let key = try KeystoreKey(password: password, key: privateKey)
+        let account = Account(address: key.address, type: key.type, url: directory.appendingPathComponent("key.json"))
+        try store.addKey(key: key)
+        try store.addAccount(account: account)
+        try body(store, String(base58CheckEncoding: account.address.data))
+    }
+
+    private func expectedDigest(_ payload: Data, version: TLMessageSignType) -> Data {
+        let length = version == .signMessage ? "32" : String(payload.count)
+        let prefix = Data("\u{19}TRON Signed Message:\n\(length)".utf8)
+        return EthereumCrypto.hash(prefix + payload)
+    }
+
+    private func assertSignature(_ result: Result<String, KeystoreError>, digest: Data,
+                                 file: StaticString = #file, line: UInt = #line) {
+        guard case .success(let encoded) = result else {
+            return XCTFail("Expected message signing to succeed", file: file, line: line)
+        }
+        let signature = Data(hex: encoded)
+        XCTAssertEqual(signature.count, 65, file: file, line: line)
+        XCTAssertEqual(encoded, "0x" + EthereumCrypto.sign(hash: digest, privateKey: privateKey).toHexString(),
+                       file: file, line: line)
+        XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: digest,
+                                            publicKey: EthereumCrypto.getPublicKey(from: privateKey)),
+                      file: file, line: line)
+    }
+
+    func testV2SignsHexPrefixedTextWithoutLegacyParsing() throws {
+        try withAccount { store, address in
+            for message in ["0xhello", "0x123", "0x", "0x你好🔐"] {
+                let digest = expectedDigest(Data(message.utf8), version: .signMessageV2)
+                assertSignature(TLWalletCore.signStringV2(keyStore: store, unSignedString: message,
+                                                         password: password, address: address), digest: digest)
+                assertSignature(TLWalletCore.signTypeString(keyStore: store, unSignedString: message,
+                                                           password: password, address: address,
+                                                           signType: .signMessageV2, .string), digest: digest)
+            }
+        }
+    }
+
+    func testExistingSuccessfulInputsKeepTheirPayloadAndSignature() throws {
+        let cases: [(message: String, version: TLMessageSignType, type: TLMessageSignV2Type, bytes: Data)] = [
+            ("hello world", .signMessage, .string, Data("hello world".utf8)),
+            ("3132", .signMessage, .string, Data([0x31, 0x32])),
+            ("0x3132", .signMessage, .string, Data([0x31, 0x32])),
+            ("hello world", .signMessageV2, .string, Data("hello world".utf8)),
+            ("0x1234", .signMessageV2, .string, Data("0x1234".utf8)),
+            ("3132", .signMessageV2, .string, Data("3132".utf8)),
+            ("你好🔐", .signMessageV2, .string, Data("你好🔐".utf8)),
+            ("0x3132", .signMessageV2, .hashString, Data([0x31, 0x32])),
+            ("3132", .signMessageV2, .hashString, Data([0x31, 0x32])),
+            ("49,50", .signMessageV2, .array, Data([0x31, 0x32]))
+        ]
+        try withAccount { store, address in
+            for input in cases {
+                let result: Result<String, KeystoreError>
+                switch input.version {
+                case .signMessage:
+                    result = TLWalletCore.signString(keyStore: store, unSignedString: input.message,
+                                                    password: password, address: address)
+                case .signMessageV2:
+                    result = TLWalletCore.signStringV2(keyStore: store, unSignedString: input.message,
+                                                      password: password, address: address, input.type)
+                }
+                assertSignature(result, digest: expectedDigest(input.bytes, version: input.version))
+            }
+        }
+    }
+
+    func testInvalidLegacyHexAndV2ByteInputsRemainRejected() throws {
+        let cases: [(message: String, version: TLMessageSignType, type: TLMessageSignV2Type)] = [
+            ("", .signMessage, .string), ("0x", .signMessage, .string),
+            ("0xhello", .signMessage, .string), ("0x123", .signMessage, .string),
+            ("", .signMessageV2, .string), ("", .signMessageV2, .hashString),
+            ("0x", .signMessageV2, .hashString), ("0xhello", .signMessageV2, .hashString),
+            ("0x123", .signMessageV2, .hashString), ("123", .signMessageV2, .hashString),
+            ("", .signMessageV2, .array), ("1,,2", .signMessageV2, .array),
+            ("256", .signMessageV2, .array), ("-1", .signMessageV2, .array)
+        ]
+        try withAccount { store, address in
+            for input in cases {
+                let result = TLWalletCore.signTypeString(keyStore: store, unSignedString: input.message,
+                                                        password: password, address: address,
+                                                        signType: input.version, input.type)
+                guard case .failure(.invalidSignInput) = result else {
+                    XCTFail("Malformed input must remain invalid: \(input.message)")
+                    continue
+                }
+            }
+        }
+    }
+
+    func testV2TextStillRequiresAMatchingAccountAndCorrectPassword() throws {
+        try withAccount { store, address in
+            let missingAccount = TLWalletCore.signStringV2(keyStore: store, unSignedString: "0xhello",
+                                                          password: password, address: "missing-account")
+            guard case .failure(.accountNotFound) = missingAccount else {
+                return XCTFail("Missing account must be rejected")
+            }
+            let wrongPassword = TLWalletCore.signStringV2(keyStore: store, unSignedString: "0xhello",
+                                                         password: "wrong-password", address: address)
+            guard case .failure(.failedToSignMessage) = wrongPassword else {
+                return XCTFail("Wrong password must not produce a signature")
+            }
+        }
+    }
+}
+
+
+final class HDNodeSharedKeyRegressionTests: XCTestCase {
+    // Public test vectors from RFC 7748, section 6.1; not wallet key material.
+    private let alicePrivate = Array(Data(hex:
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"))
+    private let bobPrivate = Array(Data(hex:
+        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"))
+
+    private func makeNode(_ privateKey: [UInt8], curve: String = "curve25519") throws -> HDNode {
+        let chainCode = [UInt8](repeating: 0, count: 32)
+        var node = HDNode()
+        let status = chainCode.withUnsafeBufferPointer { chain in
+            privateKey.withUnsafeBufferPointer { key in
+                hdnode_from_xprv(0, 0, chain.baseAddress, key.baseAddress, curve, &node)
+            }
+        }
+        return try XCTUnwrap(status == 1 ? node : nil)
+    }
+
+    private func sharedKey(node: inout HDNode, peer: [UInt8], capacity: Int)
+        -> (status: Int32, size: Int32, bytes: [UInt8]) {
+        var output = [UInt8](repeating: 0xa5, count: capacity + 2)
+        var size: Int32 = 123
+        let status = peer.withUnsafeBufferPointer { publicKey in
+            output.withUnsafeMutableBufferPointer { buffer in
+                hdnode_get_shared_key(&node, publicKey.baseAddress,
+                                      buffer.baseAddress?.advanced(by: 1), &size)
+            }
+        }
+        XCTAssertEqual(output.first, 0xa5)
+        XCTAssertEqual(output.last, 0xa5)
+        return (status, size, Array(output.dropFirst().prefix(capacity)))
+    }
+
+    func testRFC7748SharedSecretPreservesEncodingForBothPeers() throws {
+        let alicePublic = Array(Data(hex:
+            "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"))
+        let bobPublic = Array(Data(hex:
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"))
+        let expected = [UInt8(0x04)] + Array(Data(hex:
+            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"))
+        for (privateKey, peer) in [(alicePrivate, bobPublic), (bobPrivate, alicePublic)] {
+            var node = try makeNode(privateKey)
+            let result = sharedKey(node: &node, peer: [0x40] + peer, capacity: 33)
+            XCTAssertEqual(result.status, 0)
+            XCTAssertEqual(result.size, 33)
+            XCTAssertEqual(result.bytes, expected)
+        }
+    }
+
+    func testSmallOrderCurve25519PeersFailAndClearOutput() throws {
+        // u = 0 and u = 1 both yield an all-zero secret. The latter ensures the
+        // check covers the result rather than merely rejecting an all-zero input.
+        let peers = [[UInt8](repeating: 0, count: 32),
+                     [UInt8(1)] + [UInt8](repeating: 0, count: 31)]
+        for privateKey in [alicePrivate, bobPrivate] {
+            var node = try makeNode(privateKey)
+            for peer in peers {
+                let result = sharedKey(node: &node, peer: [0x40] + peer, capacity: 33)
+                XCTAssertEqual(result.status, 1)
+                XCTAssertEqual(result.size, 0)
+                XCTAssertEqual(result.bytes, [UInt8](repeating: 0, count: 33))
+            }
+        }
+    }
+
+    func testSecp256k1SharedSecretPreservesUncompressedPointEncoding() throws {
+        // Scalar 1 multiplied by the public generator is the generator itself.
+        let privateKey = [UInt8](repeating: 0, count: 31) + [UInt8(1)]
+        let x = Array(Data(hex:
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
+        let y = Array(Data(hex:
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"))
+        var node = try makeNode(privateKey, curve: "secp256k1")
+        let result = sharedKey(node: &node, peer: [0x02] + x, capacity: 65)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.size, 65)
+        XCTAssertEqual(result.bytes, [0x04] + x + y)
+    }
+}
+
+
+final class RecoveryIDTransactionRegressionTests: XCTestCase {
+    func testInvalidExistingSignatureFailsWithoutChangingTheTransaction() throws {
+        // Public fixture scalar d=1; no user wallet or network is involved.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let password = "recovery-id-regression"
+        let store = try KeyStore(keyDirectory: directory)
+        let key = try KeystoreKey(password: password, key: Data(repeating: 0, count: 31) + Data([1]))
+        let account = Account(address: key.address, type: key.type, url: directory.appendingPathComponent("key.json"))
+        try store.addKey(key: key)
+        try store.addAccount(account: account)
+        let address = String(base58CheckEncoding: account.address.data)
+        let raw = Transaction_raw()
+        raw.contractArray = [Transaction_Contract()]
+        let rawBytes = try XCTUnwrap(raw.data())
+        guard case .success(let valid) = TLWalletCore.signTranscation(
+            keyStore: store, transaction: rawBytes, password: password, address: address
+        ) else {
+            return XCTFail("The raw-data signing path must remain usable")
+        }
+        let recoveryID = try XCTUnwrap(valid.last)
+        let invalidID: UInt8 = recoveryID == 0 ? 255 : 26
+        let malformed = Data(valid.prefix(64)) + Data([invalidID])
+
+        for signatures in [[malformed], [valid, malformed], [malformed, valid]] {
+            let transaction = TronTransaction()
+            transaction.rawData = raw
+            transaction.signatureArray = NSMutableArray(array: signatures)
+            guard case .failure(.failedToSignTransaction) = TLWalletCore.signTranscation(
+                keyStore: store, transaction: transaction, password: password, address: address
+            ) else {
+                return XCTFail("An invalid existing signature must not produce a successful transaction")
+            }
+            XCTAssertEqual(transaction.signatureArray as? [Data], signatures)
+            XCTAssertEqual(transaction.rawData.data(), rawBytes)
+        }
+
+        // Preserve the already-signed fast path and both supported encodings.
+        for value in [recoveryID, recoveryID + 27] {
+            let signature = Data(valid.prefix(64)) + Data([value])
+            let transaction = TronTransaction()
+            transaction.rawData = raw
+            transaction.signatureArray = [signature, signature]
+            guard case .success = TLWalletCore.signTranscation(
+                keyStore: store, transaction: transaction, password: "not-needed-for-existing-signature", address: address
+            ) else {
+                return XCTFail("An existing valid signature must remain valid")
+            }
+            XCTAssertEqual(transaction.signatureArray as? [Data], [signature])
+            XCTAssertEqual(transaction.rawData.data(), rawBytes)
+        }
+    }
+}
+
+
+final class DataArrayCopyRegressionTests: XCTestCase {
+    func testEmptyArraysProduceEmptyData() {
+        XCTAssertEqual(Data(fromArray: [UInt8]()), Data())
+        XCTAssertEqual(Data(fromArray: [UInt64]()), Data())
+    }
+
+    func testMultiByteElementsPreserveAllBytes() {
+        let words = [UInt32(0x11223344).littleEndian, UInt32(0xaabbccdd).littleEndian]
+        XCTAssertEqual(Data(fromArray: words), Data([0x44, 0x33, 0x22, 0x11, 0xdd, 0xcc, 0xbb, 0xaa]))
+    }
+
+    func testDataOwnsItsBytesAfterSourceChangesAndIsReleased() {
+        var bytes = (0..<256).map { UInt8($0) }
+        let data = Data(fromArray: bytes)
+        bytes[0] = 0xff
+        bytes.removeAll(keepingCapacity: false)
+        XCTAssertEqual(data, Data((0..<256).map { UInt8($0) }))
     }
 }

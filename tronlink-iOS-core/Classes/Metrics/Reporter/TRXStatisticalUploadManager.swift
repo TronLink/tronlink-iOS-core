@@ -31,7 +31,7 @@ public class TRXStatisticalUploadManager: NSObject {
         \TRXTransactionSyncModel.A9
     ]
     
-    /// Dedicated serial background queue for all DB and upload operations.
+    /// Serial background queue for migration, upload and acknowledgement.
     private let metricsQueue = DispatchQueue(label: "com.tronlink.metrics", qos: .utility)
     
     private override init() {}
@@ -45,9 +45,11 @@ public class TRXStatisticalUploadManager: NSObject {
             config.isTokenCloudSyncClose || config.environmentKey.isEmpty || config.walletAddress.isEmpty
     }
 
-    func isCurrentCollectionConfig(_ config: TRXMetricsDataSource, chain: String, walletAddress: String) -> Bool {
+    func isCurrentUploadConfig(_ config: TRXMetricsDataSource, chain: String, walletAddress: String) -> Bool {
         guard let currentConfig = dataConfig, currentConfig === config else { return false }
-        return !isCollectionDisabled(config) && config.environmentKey == chain && config.walletAddress == walletAddress
+        // Apply the same reporting policy in Debug and Release, including the final network check.
+        return !isCollectionDisabled(config) && (config.isOnlineEnvironment || config.isPreReleaseEnvironment) &&
+            config.environmentKey == chain && config.walletAddress == walletAddress
     }
     
     
@@ -93,45 +95,52 @@ public class TRXStatisticalUploadManager: NSObject {
     public func upsertTransactionsData(actionType:Int, tokenAddress:String, tokenAmount:String, energy:String,
                                 bandwidth:String, burn:String) {
         guard let config = dataConfig, !isCollectionDisabled(config) else { return }
-        let chain = config.environmentKey
-        let address = config.walletAddress
-        let uId = TRXAddressMapManager.shared.id(for: address)
-        let date = Date().tronCore_getCurrentYMD_UTC()
-        let m = TRXMetricsDBManager.shared.getTransactionSyncModel(chain: chain, uId: uId, actionType: actionType,
-                                                                   tokenAddress: tokenAddress, date: date)
-        if let tm = m {
-            let totalCount = (tm.count ?? 0) + 1
-            let totalTokenAmount = (tm.tokenAmount ?? "").tronCore_decimalNumberByAdding(numberString: tokenAmount).stringValue
-            let totalEnergy = (tm.energy ?? "").tronCore_decimalNumberByAdding(numberString: energy).stringValue
-            let totalBandwidth = (tm.bandwidth ?? "").tronCore_decimalNumberByAdding(numberString: bandwidth).stringValue
-            let totalburn = (tm.burn ?? "").tronCore_decimalNumberByAdding(numberString: burn).stringValue
-            let model = self.makeTransactionSyncModel(actionType: actionType,
-                                                      count: totalCount,
-                                                      tokenAddress: tokenAddress,
-                                                      tokenAmount: tokenAmount,
-                                                      totalTokenAmount: totalTokenAmount,
-                                                      energy: totalEnergy,
-                                                      bandwidth: totalBandwidth,
-                                                      burn: totalburn,
-                                                      updated: true,
-                                                      localModel: tm,
-                                                      config: config)
-            TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
-        }else{
-            let model = self.makeTransactionSyncModel(actionType: actionType,
-                                                      count: 1,
-                                                      tokenAddress: tokenAddress,
-                                                      tokenAmount: tokenAmount,
-                                                      totalTokenAmount: tokenAmount,
-                                                      energy: energy,
-                                                      bandwidth: bandwidth,
-                                                      burn: burn,
-                                                      updated: true,
-                                                      localModel: TRXTransactionSyncModel(),
-                                                      config: config)
-            TRXMetricsDBManager.shared.upsertTransactionSync(model: model)
+        guard [tokenAmount, energy, bandwidth, burn].allSatisfy({ $0.tronCore_metricsDecimalNumber() != nil }) else {
+            #if DEBUG
+            NSLog("[Metrics] skipped transaction statistics with invalid numeric input")
+            #endif
+            return
         }
-        
+
+        // Resolve identity and the event's bucket before entering the DB queue:
+        // address mapping can itself access the database. Keep this call synchronous
+        // so an immediate upload still sees the completed write.
+        var model = makeTransactionSyncModel(actionType: actionType, count: 1,
+                                            tokenAddress: tokenAddress, tokenAmount: tokenAmount,
+                                            totalTokenAmount: tokenAmount, energy: energy,
+                                            bandwidth: bandwidth, burn: burn, updated: true,
+                                            localModel: TRXTransactionSyncModel(), config: config)
+        let saved = TRXMetricsDBManager.shared.mutateTransactionSync(
+            chain: model.chain ?? "", uId: model.uId ?? "", actionType: actionType,
+            tokenAddress: tokenAddress, date: model.date ?? ""
+        ) { current in
+            guard let current = current else { return model }
+            let count = (current.count ?? 0).addingReportingOverflow(1)
+            guard (current.count ?? 0) >= 0, !count.overflow,
+                  let totalAmount = (current.tokenAmount ?? "").tronCore_decimalNumberByAdding(numberString: tokenAmount),
+                  let totalEnergy = (current.energy ?? "").tronCore_decimalNumberByAdding(numberString: energy),
+                  let totalBandwidth = (current.bandwidth ?? "").tronCore_decimalNumberByAdding(numberString: bandwidth),
+                  let totalBurn = (current.burn ?? "").tronCore_decimalNumberByAdding(numberString: burn) else { return nil }
+
+            for keyPath in Self.bucketKeyPaths {
+                guard let increment = model[keyPath: keyPath] else { continue }
+                let previous = current[keyPath: keyPath] ?? 0
+                let bucket = previous.addingReportingOverflow(increment)
+                guard previous >= 0, !bucket.overflow else { return nil }
+                model[keyPath: keyPath] = bucket.partialValue
+            }
+            model.count = count.partialValue
+            model.tokenAmount = totalAmount.stringValue
+            model.energy = totalEnergy.stringValue
+            model.bandwidth = totalBandwidth.stringValue
+            model.burn = totalBurn.stringValue
+            return model
+        }
+        if !saved {
+            #if DEBUG
+            NSLog("[Metrics] transaction statistics were not saved; previous totals preserved")
+            #endif
+        }
     }
     
     
@@ -199,19 +208,13 @@ public class TRXStatisticalUploadManager: NSObject {
             let chain = config.environmentKey
             let walletAddress = config.walletAddress
             TRXMetricsDBManager.shared.migrateFromLegacyIfNeeded(dataSource: config)
-#if DEBUG
             self.uploadStatisticalDataToServer(config: config, chain: chain, walletAddress: walletAddress)
-#else
-            if config.isOnlineEnvironment || config.isPreReleaseEnvironment {
-                self.uploadStatisticalDataToServer(config: config, chain: chain, walletAddress: walletAddress)
-            }
-#endif
         }
     }
     
     /// Must be called from metricsQueue.
     func uploadStatisticalDataToServer(config: TRXMetricsDataSource, chain: String, walletAddress: String) {
-        guard isCurrentCollectionConfig(config, chain: chain, walletAddress: walletAddress) else { return }
+        guard isCurrentUploadConfig(config, chain: chain, walletAddress: walletAddress) else { return }
         let uId = TRXAddressMapManager.shared.id(for: walletAddress)
         let assets = self.getCurrentChainUpdatedIsTrueAllAssetSyncModels(forChain: chain, uId: uId)
         let transactions = self.getCurrentChainUpdatedIsTrueAllTransactionSyncModels(forChain: chain, uId: uId)
@@ -237,10 +240,14 @@ public class TRXStatisticalUploadManager: NSObject {
                         self.deletedBeforeTodayTransactionsData(forChain: chain, uId: uId)
                     }
                 } else {
+                    #if DEBUG
                     NSLog("[Metrics] server returned isUploadSuccess=false, will retry next cycle")
+                    #endif
                 }
             } failure: {
+                #if DEBUG
                 NSLog("upload failure")
+                #endif
             }
         }
     }
@@ -259,11 +266,15 @@ public class TRXStatisticalUploadManager: NSObject {
               let ts = headers["ts"],
               !ts.isEmpty,
               ts.rangeOfCharacter(from: decimalCharacters.inverted) == nil else {
+            #if DEBUG
             NSLog("[Metrics] skip request due to invalid encryption inputs")
+            #endif
             return [:]
         }
         if (signature.count != 28 && signature.count != 40) || ts.count != 13 {
+            #if DEBUG
             NSLog("[Metrics] unexpected encryption input lengths: signature=\(signature.count), ts=\(ts.count)")
+            #endif
         }
         var newParams: [String: String] = [:]
         for (key, value) in parameters {
@@ -279,7 +290,9 @@ public class TRXStatisticalUploadManager: NSObject {
             }()
             let encryptedP = TRXMetricsEncryptTool.encryptActionData(secretKey: signature, ts: ts, plaintext: plain)
             if encryptedP.isEmpty {
+                #if DEBUG
                 NSLog("[Metrics] skip request due to AES encrypt failure: %@", key)
+                #endif
                 return [:]
             }
             newParams[key] = encryptedP

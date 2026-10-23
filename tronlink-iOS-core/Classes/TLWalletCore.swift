@@ -1,7 +1,4 @@
 
-import TronKeystore
-import TronCore
-import web3swift
 import CryptoSwift
 
 public enum TLMessageSignV2Type {
@@ -41,10 +38,11 @@ public class TLWalletCore: NSObject {
 
         var newHash: Data = transaction.sha256T()
         if !dappChainId.isEmpty {
-            if let mainGateData = Data(hexString: dappChainId) {
-                newHash.append(mainGateData)
-                newHash = newHash.sha256T()
+            guard let mainGateData = Data(hexString: dappChainId), !mainGateData.isEmpty else {
+                return .failure(KeystoreError.failedToSignTransaction)
             }
+            newHash.append(mainGateData)
+            newHash = newHash.sha256T()
         }
         do {
             var data = try keyStore.signHash(newHash, account: account, password: password)
@@ -58,7 +56,9 @@ public class TLWalletCore: NSObject {
         } catch let err as KeystoreError {
             return .failure(err)
         } catch {
+            #if DEBUG
             NSLog("[Sign] unknown error: %@", String(describing: error))
+            #endif
             return .failure(.failedToSignTransaction)
         }
     }
@@ -89,7 +89,10 @@ public class TLWalletCore: NSObject {
         }
 
         var newHash: Data = hash
-        if !dappChainId.isEmpty, let mainGateData = Data(hexString: dappChainId) {
+        if !dappChainId.isEmpty {
+            guard let mainGateData = Data(hexString: dappChainId), !mainGateData.isEmpty else {
+                return .failure(KeystoreError.failedToSignTransaction)
+            }
             newHash.append(mainGateData)
             newHash = newHash.sha256T()
         }
@@ -100,8 +103,10 @@ public class TLWalletCore: NSObject {
         let accountSigner = Data(account.address.data.suffix(20))
         for (index, value) in transaction.signatureArray.enumerated() {
             guard let signature = value as? Data,
-                  let signer = try? Web3.Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
-                continue
+                  let signer = try? Web3Utils.hashECRecover(hash: newHash, signature: signature).addressData else {
+                // Do not report success or append a signature to a transaction
+                // whose existing signatures cannot be validated. Leave it unchanged.
+                return .failure(.failedToSignTransaction)
             }
             alreadySigned = alreadySigned || signer == accountSigner
             if !seenSigners.insert(signer).inserted {
@@ -131,7 +136,9 @@ public class TLWalletCore: NSObject {
         } catch let err as KeystoreError {
             return .failure(err)
         } catch {
+            #if DEBUG
             NSLog("[Sign] unknown error: %@", String(describing: error))
+            #endif
             return .failure(.failedToSignTransaction)
         }
     }
@@ -140,7 +147,7 @@ public class TLWalletCore: NSObject {
 
 //MARK: - Create
 extension TLWalletCore {
-    public static func createWalletAccount(keyStore: KeyStore, password: String, completion: @escaping (Result<TronKeystore.Account, KeystoreError>) -> Void) {
+    public static func createWalletAccount(keyStore: KeyStore, password: String, completion: @escaping (Result<Account, KeystoreError>) -> Void) {
         do {
             let account = try keyStore.createAccount(password: password, type: .hierarchicalDeterministicWallet)
             completion(.success(account))
@@ -160,7 +167,7 @@ extension TLWalletCore {
         do {
             var privateKey = try keyStore.exportPrivateKey(account: account, password: password)
             defer {
-                privateKey = Data()
+                privateKey.resetBytes(in: 0..<privateKey.count)
             }
             guard !privateKey.isEmpty else {
                 return .failure(.failedToExportPrivateKey)
@@ -211,7 +218,7 @@ extension TLWalletCore {
      * @param unSignedString The string to be signed
      * @param password Password to unlock the KeyStore
      * @param address Account address associated with the string to be signed
-     * @param messageType Message type, defaults to string
+     * @param messageType Message type, defaults to UTF-8 string (including any 0x prefix)
      * @return Result containing the signed string or a signing error
      */
     public static func signStringV2(keyStore: KeyStore, unSignedString: String, password: String, address: String,_ messageType:TLMessageSignV2Type = .string) -> Result<String, KeystoreError> {
@@ -236,8 +243,11 @@ extension TLWalletCore {
         }
 
         do {
-            var sha3Data = try TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
-            if signType == .signMessageV2 {
+            let sha3Data: Data
+            switch signType {
+            case .signMessage:
+                sha3Data = try TLWalletCore.convertSignStringToSha3Data(unSignedString: unSignedString)
+            case .signMessageV2:
                 sha3Data = try TLWalletCore.convertSignStringV2ToSha3Data(unSignedString: unSignedString, messageType: messageType)
             }
             guard sha3Data.count == 32 else {

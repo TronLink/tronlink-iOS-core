@@ -79,7 +79,10 @@ public extension Data {
         }
 
         let bytes = answer.serialize()
-        self = byteString.prefix(while: { i in i == alphabet[0]}) + bytes
+        let leadingZeroCount = byteString.prefix(while: { $0 == alphabet[0] }).count
+        var decoded = Data(repeating: 0, count: leadingZeroCount)
+        decoded.append(bytes)
+        self = decoded
     }
     
     init?(base58CheckDecoding string: String, alphabet: [UInt8] = Base58String.btcAlphabet) {

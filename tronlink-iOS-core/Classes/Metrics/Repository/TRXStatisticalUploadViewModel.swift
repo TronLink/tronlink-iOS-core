@@ -17,9 +17,9 @@ class TRXStatisticalUploadViewModel: NSObject {
             visible = v
         }
         
-        guard TRXStatisticalUploadManager.shared.isCurrentCollectionConfig(dataConfig,
-                                                                            chain: chain,
-                                                                            walletAddress: walletAddress) else {
+        guard TRXStatisticalUploadManager.shared.isCurrentUploadConfig(dataConfig,
+                                                                       chain: chain,
+                                                                       walletAddress: walletAddress) else {
             failure()
             return
         }

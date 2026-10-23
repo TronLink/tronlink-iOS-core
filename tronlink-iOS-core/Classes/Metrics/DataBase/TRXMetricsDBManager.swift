@@ -57,7 +57,9 @@ public class TRXMetricsDBManager: NSObject {
             if let fileQueue = FMDatabaseQueue(path: dbURL.path) {
                 queue = fileQueue
             } else {
+                #if DEBUG
                 NSLog("[MetricsDB] file queue failed at %@, fallback to in-memory", dbURL.path)
+                #endif
                 queue = FMDatabaseQueue(path: ":memory:")
             }
             dbURLForBackupExclusion = dbURL
@@ -80,7 +82,9 @@ public class TRXMetricsDBManager: NSObject {
         createAssetSyncTable()
         createTransactionSyncTable()
         if !isDBHealthy {
+            #if DEBUG
             NSLog("[MetricsDB] init: one or more tables failed to create, DB marked unhealthy")
+            #endif
         }
     }
 
@@ -90,7 +94,9 @@ public class TRXMetricsDBManager: NSObject {
     private func runUpdate(_ db: FMDatabase, _ sql: String, _ args: [Any] = []) -> Bool {
         let ok = db.executeUpdate(sql, withArgumentsIn: args)
         if !ok {
+            #if DEBUG
             NSLog("[MetricsDB] update failed: %@\nSQL: %@", db.lastErrorMessage(), sql)
+            #endif
         }
         return ok
     }
@@ -98,7 +104,7 @@ public class TRXMetricsDBManager: NSObject {
     // MARK: - Legacy Data Migration
 
     /// Migrates data from the old database to the new one (one-time per chain).
-    /// Only marks migration as complete and clears legacy data when every record is written successfully.
+    /// Only marks migration as complete when every record has been committed successfully; legacy data is preserved.
     /// If any write fails, migration is NOT marked done and will be retried on the next upload cycle.
     public func migrateFromLegacyIfNeeded(dataSource: TRXMetricsDataSource) {
         let chain = dataSource.environmentKey
@@ -167,7 +173,9 @@ public class TRXMetricsDBManager: NSObject {
                     ok = self.runUpdate(db, createSql)
                 }
             } else {
+                #if DEBUG
                 NSLog("[MetricsDB] table check failed: %@", db.lastErrorMessage())
+                #endif
                 ok = false
             }
         }
@@ -336,7 +344,7 @@ public class TRXMetricsDBManager: NSObject {
         let idType = model.idType ?? 0
 
         self.dataBaseQueue?.inDatabase { db in
-            db.beginTransaction()
+            guard db.beginTransaction() else { return }
             var success = false
             do {
                 let sql = "SELECT trxBalance, usdtBalance, usdBalance FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ? LIMIT 1"
@@ -366,7 +374,7 @@ public class TRXMetricsDBManager: NSObject {
                     success = self.insertAssetSyncTable_internal(db: db, model: m)
                 }
 
-                if success { db.commit() } else { db.rollback() }
+                if !success || !db.commit() { db.rollback() }
             } catch {
                 db.rollback()
             }
@@ -382,7 +390,7 @@ public class TRXMetricsDBManager: NSObject {
         var result = false
 
         self.dataBaseQueue?.inDatabase { db in
-            db.beginTransaction()
+            guard db.beginTransaction() else { return }
             do {
                 let checkSql = "SELECT COUNT(1) AS cnt FROM AssetSyncTable WHERE chain = ? AND uId = ? AND date = ?"
                 let rs = try db.executeQuery(checkSql, values: [chain, uId, date])
@@ -390,8 +398,9 @@ public class TRXMetricsDBManager: NSObject {
                 if rs.next() { exists = rs.int(forColumn: "cnt") > 0 }
                 rs.close()
 
+                let statementsSucceeded: Bool
                 if exists {
-                    let ok = self.updateAssetSync_internal(db: db,
+                    statementsSucceeded = self.updateAssetSync_internal(db: db,
                                                            chain: chain,
                                                            uId: uId,
                                                            idType: idType,
@@ -400,11 +409,12 @@ public class TRXMetricsDBManager: NSObject {
                                                            usdtBalance: model.usdtBalance,
                                                            usdBalance: model.usdBalance,
                                                            updated: model.updated)
-                    if ok { db.commit(); result = true } else { db.rollback() }
                 } else {
-                    let ok = self.insertAssetSyncTable_internal(db: db, model: model)
-                    if ok { db.commit(); result = true } else { db.rollback() }
+                    statementsSucceeded = self.insertAssetSyncTable_internal(db: db, model: model)
                 }
+                // Migration must only count records whose transaction actually committed.
+                result = statementsSucceeded && db.commit()
+                if !result { db.rollback() }
             } catch {
                 db.rollback()
             }
@@ -455,7 +465,9 @@ public class TRXMetricsDBManager: NSObject {
                     ok = self.runUpdate(db, createSql)
                 }
             } else {
+                #if DEBUG
                 NSLog("[MetricsDB] table check failed: %@", db.lastErrorMessage())
+                #endif
                 ok = false
             }
         }
@@ -719,29 +731,40 @@ public class TRXMetricsDBManager: NSObject {
 
     @discardableResult
     public func upsertTransactionSync(model: TRXTransactionSyncModel) -> Bool {
-        let uId = model.uId ?? ""
-        let chain = model.chain ?? ""
-        let actionTypeVal = model.actionType ?? -1
-        let tokenAddressVal = model.tokenAddress ?? ""
-        let dateVal = model.date ?? ""
+        return mutateTransactionSync(chain: model.chain ?? "", uId: model.uId ?? "",
+                                     actionType: model.actionType ?? -1,
+                                     tokenAddress: model.tokenAddress ?? "", date: model.date ?? "") { _ in model }
+    }
 
+    /// Reads, transforms and writes one group in the same database transaction.
+    /// Returning nil aborts the entire update. The transform must not re-enter the DB queue.
+    @nonobjc
+    @discardableResult
+    func mutateTransactionSync(chain: String, uId: String, actionType: Int, tokenAddress: String, date: String,
+                               transform: (TRXTransactionSyncModel?) -> TRXTransactionSyncModel?) -> Bool {
         var result = false
         self.dataBaseQueue?.inDatabase { db in
-            db.beginTransaction()
+            guard db.beginTransaction() else { return }
             do {
-                let checkSql = "SELECT COUNT(1) AS cnt FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ?"
-                let rs = try db.executeQuery(checkSql, values: [chain, uId, actionTypeVal, tokenAddressVal, dateVal])
-                var exists = false
-                if rs.next() { exists = rs.int(forColumn: "cnt") > 0 }
+                let sql = "SELECT uId, idType, actionType, count, tokenAddress, tokenAmount, energy, bandwidth, burn, date, chain, updated, A1, A2, A3, A4, A5, A6, A7, A8, A9 FROM TransactionSyncTable WHERE chain = ? AND uId = ? AND actionType = ? AND tokenAddress = ? AND date = ? LIMIT 1"
+                let rs = try db.executeQuery(sql, values: [chain, uId, actionType, tokenAddress, date])
+                let hasRow = rs.next()
+                let readFailed = db.hadError()
+                let current = hasRow ? self.makeTransactionSync(from: rs) : nil
                 rs.close()
-
-                if exists {
-                    let ok = self.updateTransactionSync_internal(db: db, chain: chain, uId: uId, actionType: actionTypeVal, tokenAddress: tokenAddressVal, date: dateVal, idType: model.idType, count: model.count, tokenAmount: model.tokenAmount, energy: model.energy, bandwidth: model.bandwidth, burn: model.burn, updated: model.updated, A1: model.A1, A2: model.A2, A3: model.A3, A4: model.A4, A5: model.A5, A6: model.A6, A7: model.A7, A8: model.A8, A9: model.A9)
-                    if ok { db.commit(); result = true } else { db.rollback(); result = false }
-                } else {
-                    let ok = self.insertTransactionSync_internal(db: db, model: model)
-                    if ok { db.commit(); result = true } else { db.rollback(); result = false }
+                guard !readFailed, let model = transform(current) else {
+                    db.rollback()
+                    return
                 }
+
+                let statementsSucceeded: Bool
+                if current != nil {
+                    statementsSucceeded = self.updateTransactionSync_internal(db: db, chain: chain, uId: uId, actionType: actionType, tokenAddress: tokenAddress, date: date, idType: model.idType, count: model.count, tokenAmount: model.tokenAmount, energy: model.energy, bandwidth: model.bandwidth, burn: model.burn, updated: model.updated, A1: model.A1, A2: model.A2, A3: model.A3, A4: model.A4, A5: model.A5, A6: model.A6, A7: model.A7, A8: model.A8, A9: model.A9)
+                } else {
+                    statementsSucceeded = self.insertTransactionSync_internal(db: db, model: model)
+                }
+                result = statementsSucceeded && db.commit()
+                if !result { db.rollback() }
             } catch {
                 db.rollback()
                 result = false

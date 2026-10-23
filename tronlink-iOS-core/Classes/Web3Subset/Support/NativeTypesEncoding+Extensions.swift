@@ -1,0 +1,116 @@
+
+import BigInt
+import Foundation
+
+public extension Data {
+    /// Sets data.count to toBytes and fills missing bytes at the start of the data
+    /// - Parameter toBytes: Desired data size
+    /// - Parameter isNegative: Fills with ff if negative. default: false
+    /// - Returns: Data with desired size, or nil if it is too small or exceeds Int.max.
+    func setLengthLeft(_ toBytes: UInt64, isNegative: Bool = false) -> Data? {
+        let existingLength = count
+        guard let targetLength = Int(exactly: toBytes), targetLength >= existingLength else {
+            return nil
+        }
+        if existingLength == targetLength {
+            return Data(self)
+        }
+        let paddingLength = targetLength - existingLength
+        var data: Data
+        if isNegative {
+            data = Data(repeating: UInt8(255), count: paddingLength)
+        } else {
+            data = Data(repeating: UInt8(0), count: paddingLength)
+        }
+        data.append(self)
+        return data
+    }
+
+    /// Sets data.count to toBytes and fills missing bytes at the end of the data
+    /// - Parameter toBytes: Desired data size
+    /// - Parameter isNegative: Fills with ff if negative. default: false
+    /// - Returns: Data with desired size, or nil if it is too small or exceeds Int.max.
+    func setLengthRight(_ toBytes: UInt64, isNegative: Bool = false) -> Data? {
+        let existingLength = count
+        guard let targetLength = Int(exactly: toBytes), targetLength >= existingLength else {
+            return nil
+        }
+        if existingLength == targetLength {
+            return Data(self)
+        }
+        let paddingLength = targetLength - existingLength
+        var data: Data = Data()
+        data.append(self)
+        if isNegative {
+            data.append(Data(repeating: UInt8(255), count: paddingLength))
+        } else {
+            data.append(Data(repeating: UInt8(0), count: paddingLength))
+        }
+        return data
+    }
+}
+
+public extension BigInt {
+    /// Encodes nonzero values using the fewest big-endian signed bytes.
+    /// Zero preserves the historical empty-data encoding.
+    /// Use abiEncode(bits:) when a fixed width is required.
+    func toTwosComplement() -> Data {
+        let serialized = magnitude.serialize()
+        guard let firstByte = serialized.first else { return serialized }
+        if sign == .plus {
+            return (firstByte & 0x80) == 0 ? serialized : Data([0]) + serialized
+        }
+
+        // The most negative value fits at this width; larger magnitudes need
+        // one more byte so the complement retains a negative sign bit.
+        let magnitudeBits = serialized.count * 8
+        let signedLimit = BigUInt(1) << (magnitudeBits - 1)
+        let bitCount = magnitude > signedLimit ? magnitudeBits + 8 : magnitudeBits
+        return ((BigUInt(1) << bitCount) - magnitude).serialize()
+    }
+
+    /// Encodes a signed ABI integer using exactly bits / 8 bytes.
+    /// The width must be a multiple of 8 in 8...256.
+    /// - Returns: nil for an invalid width or a value outside the signed range.
+    ///   Callers must handle the optional result.
+    func abiEncode(bits: UInt64) -> Data! {
+        guard bits <= 256 else { return nil }
+        do {
+            try ABIValue.validateSignedInteger(self, bits: Int(bits))
+        } catch {
+            return nil
+        }
+        // Compute the complement at the requested width. A minimal complement
+        // can lose leading zero bytes before sign extension (e.g. -65535).
+        let encoded = sign == .minus && !isZero
+            ? (BigUInt(1) << Int(bits)) - magnitude
+            : magnitude
+        return encoded.serialize().setLengthLeft(bits / 8)
+    }
+
+    /// Decodes big-endian two's complement bytes, including Data slices.
+    /// Empty data represents zero, matching zero's toTwosComplement() output.
+    static func fromTwosComplement(data: Data) -> BigInt {
+        guard let firstByte = data.first else { return BigInt(0) }
+        let isPositive = ((firstByte & 128) >> 7) == 0
+        if isPositive {
+            let magnitude = BigUInt(data)
+            return BigInt(magnitude)
+        } else {
+            let MAX = (BigUInt(1) << (data.count * 8))
+            let magnitude = MAX - BigUInt(data)
+            let bigint = BigInt(0) - BigInt(magnitude)
+            return bigint
+        }
+    }
+}
+
+public extension BigUInt {
+    /// - Returns: Fixed size data of number
+    func abiEncode(bits: UInt64) -> Data? {
+        let data = serialize()
+        let paddedLength = UInt64(ceil((Double(bits) / 8.0)))
+        let padded = data.setLengthLeft(paddedLength)
+        return padded
+    }
+}

@@ -39,7 +39,9 @@ public final class TRXAddressMapManager {
                 mapping = legacy
                 usedIds = Set(legacy.values)
             } else {
+                #if DEBUG
                 NSLog("[AddressMap] legacy migration failed, mappings will be regenerated")
+                #endif
             }
             clearLegacySnapshot()
         } else if let stored = store.loadAllAddressMappings() {
@@ -53,7 +55,9 @@ public final class TRXAddressMapManager {
             // but never write back: a full save from an empty map would delete the mappings
             // that are still on disk and orphan their metrics permanently.
             persistenceDisabled = true
+            #if DEBUG
             NSLog("[AddressMap] mapping load failed, persistence disabled for this session")
+            #endif
         }
     }
 
@@ -144,7 +148,9 @@ public final class TRXAddressMapManager {
         guard !persistenceDisabled else { return }
         for (address, uuid) in added {
             if !store.upsertAddressMapping(address: address, uuid: uuid) {
+                #if DEBUG
                 NSLog("[AddressMap] database save failed for an address mapping")
+                #endif
             }
         }
     }
@@ -155,7 +161,9 @@ public final class TRXAddressMapManager {
     private func persistMapping(_ snapshot: [String: String], removedIds: Set<String> = []) {
         guard !persistenceDisabled else { return }
         guard store.saveAddressMappings(snapshot, deletingMetricsFor: removedIds) else {
+            #if DEBUG
             NSLog("[AddressMap] database save failed, %d entries remain in memory", snapshot.count)
+            #endif
             return
         }
     }

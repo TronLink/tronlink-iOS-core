@@ -1,0 +1,129 @@
+/**
+ * Copyright (c) 2013-2014 Tomas Dzetkulic
+ * Copyright (c) 2013-2014 Pavol Rusnak
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+ * OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#ifndef __BIP32_H__
+#define __BIP32_H__
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include "ecdsa.h"
+#include "ed25519.h"
+#include "options.h"
+
+typedef struct {
+	const char *bip32_name;    // string for generating BIP32 xprv from seed
+	const ecdsa_curve *params; // ecdsa curve parameters, null for ed25519
+
+	HasherType hasher_base58;
+	HasherType hasher_sign;
+	HasherType hasher_pubkey;
+	HasherType hasher_script;
+} curve_info;
+
+typedef struct {
+	uint32_t depth;
+	uint32_t child_num;
+	uint8_t chain_code[32];
+
+	uint8_t private_key[32];
+	uint8_t private_key_extension[32];
+
+	uint8_t public_key[33];
+	const curve_info *curve;
+} HDNode;
+
+int hdnode_from_xpub(uint32_t depth, uint32_t child_num, const uint8_t *chain_code, const uint8_t *public_key, const char *curve, HDNode *out);
+
+int hdnode_from_xprv(uint32_t depth, uint32_t child_num, const uint8_t *chain_code, const uint8_t *private_key, const char *curve, HDNode *out);
+
+int hdnode_from_seed(const uint8_t *seed, int seed_len, const char *curve, HDNode *out);
+
+#define hdnode_private_ckd_prime(X, I) hdnode_private_ckd((X), ((I) | 0x80000000))
+
+int hdnode_private_ckd(HDNode *inout, uint32_t i);
+
+#if USE_CARDANO
+int hdnode_private_ckd_cardano(HDNode *inout, uint32_t i);
+int hdnode_from_seed_cardano(const uint8_t *pass, int pass_len, const uint8_t *seed, int seed_len, HDNode *out);
+#endif
+
+int hdnode_public_ckd_cp(const ecdsa_curve *curve, const curve_point *parent, const uint8_t *parent_chain_code, uint32_t i, curve_point *child, uint8_t *child_chain_code);
+
+int hdnode_public_ckd(HDNode *inout, uint32_t i);
+
+// Derives an address from a valid secp256k1 parent point and 32-byte chain code.
+// Only non-hardened indices are supported. Returns 1 on success, 0 on failure
+// (including insufficient output space). On failure, addr is an empty C string
+// when addr != NULL and addrsize > 0. addrsize includes the terminating NUL.
+int hdnode_public_ckd_address_optimized(const curve_point *pub, const uint8_t *chain_code, uint32_t i, uint32_t version, HasherType hasher_pubkey, HasherType hasher_base58, char *addr, int addrsize, int addrformat);
+
+int hdnode_private_ckd_cached(HDNode *inout, const uint32_t *i, size_t i_count, uint32_t *fingerprint);
+
+uint32_t hdnode_fingerprint(HDNode *node);
+
+void hdnode_fill_public_key(HDNode *node);
+
+#if USE_ETHEREUM
+int hdnode_get_ethereum_pubkeyhash(const HDNode *node, uint8_t *pubkeyhash);
+#endif
+
+#if USE_NEM
+int hdnode_get_nem_address(HDNode *node, uint8_t version, char *address);
+int hdnode_get_nem_shared_key(const HDNode *node, const ed25519_public_key peer_public_key, const uint8_t *salt, ed25519_public_key mul, uint8_t *shared_key);
+int hdnode_nem_encrypt(const HDNode *node, const ed25519_public_key public_key, const uint8_t *iv, const uint8_t *salt, const uint8_t *payload, size_t size, uint8_t *buffer);
+int hdnode_nem_decrypt(const HDNode *node, const ed25519_public_key public_key, uint8_t *iv, const uint8_t *salt, const uint8_t *payload, size_t size, uint8_t *buffer);
+#endif
+
+// Signing returns 0 on success and nonzero on failure. Unsupported signing
+// curves (including Cardano and Curve25519) return 1 and clear the 64-byte
+// signature buffer and optional recovery byte. These entry points do not
+// implement Cardano signing, even when USE_CARDANO is enabled.
+int hdnode_sign(HDNode *node, const uint8_t *msg, uint32_t msg_len, HasherType hasher_sign, uint8_t *sig, uint8_t *pby, int (*is_canonical)(uint8_t by, uint8_t sig[64]));
+int hdnode_sign_digest(HDNode *node, const uint8_t *digest, uint8_t *sig, uint8_t *pby, int (*is_canonical)(uint8_t by, uint8_t sig[64]));
+
+// Computes raw ECDH material; returns 0 on success and 1 on failure.
+// Curve25519 takes a 0x40-prefixed 32-byte peer key and returns 0x04 + 32 bytes.
+// An all-zero Curve25519 secret is rejected: the 33-byte output is cleared and
+// result_size is set to 0. ECDSA curves retain their 65-byte uncompressed output.
+// Only use the output on success; protocol-specific KDF/authentication is still required.
+int hdnode_get_shared_key(const HDNode *node, const uint8_t *peer_public_key, uint8_t *session_key, int *result_size);
+
+int hdnode_serialize_public(const HDNode *node, uint32_t fingerprint, uint32_t version, char *str, int strsize);
+
+int hdnode_serialize_private(const HDNode *node, uint32_t fingerprint, uint32_t version, char *str, int strsize);
+
+// Public nodes require a valid compressed ECDSA point (0x02/0x03), or the
+// existing 0x01 + 32-byte encoding for 25519 curves. Private ECDSA nodes require
+// a scalar greater than zero and less than the curve order. Returns 0 on success,
+// -1 for invalid Base58Check data/length, -2 for invalid key data, -3 for an
+// unexpected version, and -4 for an unknown curve. On failure, node is cleared
+// and fingerprint is unchanged. Only use the node after a successful return.
+int hdnode_deserialize(const char *str, uint32_t version_public, uint32_t version_private, const char *curve, HDNode *node, uint32_t *fingerprint);
+
+void hdnode_get_address_raw(HDNode *node, uint32_t version, uint8_t *addr_raw);
+void hdnode_get_address(HDNode *node, uint32_t version, char *addr, int addrsize);
+
+const curve_info *get_curve_by_name(const char *curve_name);
+
+#endif

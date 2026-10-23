@@ -1,0 +1,4 @@
+framework module TLCore {
+  umbrella header "TLCore-umbrella.h"
+  export *
+}

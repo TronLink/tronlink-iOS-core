@@ -1,0 +1,204 @@
+
+import BigInt
+import Foundation
+
+/// Web3Address error
+public enum Web3AddressError: Error {
+    /// Provided address is not valid (\(string))
+    case invalidAddress(String)
+    /// Printable / user displayable description
+    public var localizedDescription: String {
+        switch self {
+        case let .invalidAddress(string):
+            return "Provided address is not valid (\(string))"
+        }
+    }
+}
+
+/**
+ Web3Address class (20 byte data) used for most library
+ 
+ To init address you can do this:
+ ```
+ let addressString = "0x45245bc59219eeaaf6cd3f382e078a461ff9de7b"
+ let address1 = Web3Address(addressString)
+ let address2 = Web3Address("0x45245bc59219eeaaf6cd3f382e078a461ff9de7b")
+ ```
+ 
+ If user enters the address you need to check if address is in valid format. To do that use:
+ ```
+ let inputString = "0x45245bc59219eeaaf6cd3f382e078a461ff9de7b"
+ guard inputString.isAddress else { return }
+ // or
+ let address = Web3Address("0x45245bc59219eeaaf6cd3f382e078a461ff9de7b")
+ guard address.isValid else { return }
+ // or
+ try address.check() // will throw Web3AddressError.invalidAddress if its invalid
+ ```
+ 
+ Also Web3Address is confirmed to ExpressibleByStringLiteral so you can do this
+ ```
+ let address: Web3Address = "0x45245bc59219eeaaf6cd3f382e078a461ff9de7b"
+ ```
+ 
+ This is very usabe for test cases like if you want to test function (like read ERC20 balance)
+ you can just run
+ ```
+ let balance = try ERC20("0x45245bc59219eeaaf6cd3f382e078a461ff9de7b").balance(of: "0x6a6a0b4aaa60E97386F94c5414522159b45DEdE8")
+ print(balance)
+ 
+ ```
+ */
+public struct Web3Address {
+    /// Web3Address type
+    public enum AddressType {
+        /// Any ethereum address
+        case normal
+        /// Web3Address for contract deployment
+        case contractDeployment
+    }
+
+    /// Checks if address size is 20 bytes long.
+    /// Always returns true for contractDeployment address
+    public var isValid: Bool {
+        switch type {
+        case .normal:
+            return addressData.count == 20
+        case .contractDeployment:
+            return true
+        }
+    }
+    
+    var _address: String
+    /// Web3Address type
+    public var type: AddressType = .normal
+    
+    /// Binary representation of address
+    public var addressData: Data {
+        switch type {
+        case .normal:
+            return Data.fromHex(_address) ?? Data()
+        case .contractDeployment:
+            return Data()
+        }
+    }
+
+    /// Checksummed string for a valid address, or the stored input if invalid.
+    /// Invalid input is not repaired; use isValid/check() before using it as an address.
+    /// Returns 0x for contractDeployment addresses.
+    public var address: String {
+        switch type {
+        case .normal:
+            return Web3Address.toChecksumAddress(_address) ?? _address
+        case .contractDeployment:
+            return "0x"
+        }
+    }
+    
+    /// Converts exactly 20 bytes of ASCII hex to a checksum address.
+    /// Accepts an optional 0x/0X prefix; returns nil for invalid input.
+    public static func toChecksumAddress(_ addr: String) -> String? {
+        guard addr.isAddress else { return nil }
+        let address = addr.lowercased().withoutHex
+        guard let hash = address.data(using: .ascii)?.keccak256().hex else { return nil }
+        var ret = "0x"
+
+        for (i, char) in address.enumerated() {
+            let startIdx = hash.index(hash.startIndex, offsetBy: i)
+            let endIdx = hash.index(hash.startIndex, offsetBy: i + 1)
+            let hashChar = String(hash[startIdx ..< endIdx])
+            let c = String(char)
+            guard let int = Int(hashChar, radix: 16) else { return nil }
+            if int >= 8 {
+                ret += c.uppercased()
+            } else {
+                ret += c
+            }
+        }
+        return ret
+    }
+    
+    /// Init with addressString and type
+    /// - Parameter addressString: Hex string of address
+    /// - Parameter type: Web3Address type. default: .normal
+    /// Automatically adds 0x prefix if its not found
+    public init(_ addressString: String, type: AddressType = .normal) {
+        switch type {
+        case .normal:
+            // Normalize only the prefix; retain the caller's address letter casing.
+            _address = addressString.hasPrefix("0X")
+                ? "0x" + String(addressString.dropFirst(2))
+                : addressString.withHex
+            self.type = .normal
+        case .contractDeployment:
+            _address = "0x"
+            self.type = .contractDeployment
+        }
+    }
+
+    /// - Parameter addressData: Web3Address data
+    /// - Parameter type: Web3Address type. default: .normal
+    /// - Important: addressData is not the utf8 format of hex string
+    public init(_ addressData: Data, type: AddressType = .normal) {
+        _address = addressData.hex.withHex
+        self.type = type
+    }
+    
+    /// checks if address is valid
+    /// - Throws: Web3AddressError.invalidAddress if its not valid
+    public func check() throws {
+        guard isValid else { throw Web3AddressError.invalidAddress(_address) }
+    }
+    
+    /// - Returns: "0x" address
+    public static var contractDeployment: Web3Address {
+        return Web3Address("0x", type: .contractDeployment)
+    }
+    
+    //    public static func fromIBAN(_ iban: String) -> Web3Address {
+    //
+    //    }
+}
+
+extension Web3Address: Equatable {
+    /// Compares address checksum representation. So there won't be a conflict with string casing
+    public static func == (lhs: Web3Address, rhs: Web3Address) -> Bool {
+        return lhs.address == rhs.address && lhs.type == rhs.type
+    }
+}
+
+extension Web3Address: Hashable {
+    public var hashValue: Int {
+        return address.hashValue
+    }
+}
+
+extension Web3Address: CustomStringConvertible {
+    /// - Returns: Web3Address hex string formatted to checksum
+    public var description: String {
+        return address
+    }
+}
+
+extension Web3Address: ExpressibleByStringLiteral {
+    public typealias StringLiteralType = String
+    public init(stringLiteral value: StringLiteralType) {
+        self.init(value)
+    }
+}
+
+public extension String {
+    /// Checks for exactly 20 bytes of ASCII hex, with an optional `0x` or `0X` prefix.
+    /// Validates format only, without enforcing an EIP-55 checksum.
+    /// Use `isTRXAddress()` for TRON Base58Check addresses.
+    var isAddress: Bool {
+        let addressHex = hasPrefix("0x") || hasPrefix("0X") ? String(dropFirst(2)) : self
+        guard addressHex.utf8.count == 40 else { return false }
+        return Data(hexString: addressHex)?.count == 20
+    }
+    
+    /// - Returns: Contract deployment address.
+    var contractAddress: Web3Address {
+        return Web3Address(self, type: .contractDeployment)
+    }
+}
