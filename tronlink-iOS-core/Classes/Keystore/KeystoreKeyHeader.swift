@@ -65,8 +65,9 @@ public struct KeystoreKeyHeader {
             }
         }
         let encryptedKey = try aecCipher.encrypt(plaintext)
+        // V3 MAC uses DK[16..<32]; the trailing-key rule is read-only legacy compatibility.
         // Detach and clear this slice before the earlier derivedKey cleanup runs.
-        var prefix = derivedKey[(derivedKey.count - 16) ..< derivedKey.count]
+        var prefix = derivedKey[16..<32]
         defer {
             prefix.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
                 if let baseAddress = bytes.baseAddress {
