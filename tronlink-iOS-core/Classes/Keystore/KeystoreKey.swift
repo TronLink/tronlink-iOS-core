@@ -176,11 +176,11 @@ public struct KeystoreKey {
         // Keep the old trailing-16 rule only as read compatibility for long keys
         // accepted by previous releases. Both paths still require a complete MAC
         // match before AES; deriving the password key is performed only once.
-        let standardMACMatches = matchesMAC(derivedKey: derivedKey, keyRange: 16..<32)
-        let legacyMACMatches = derivedKey.count > 32 && matchesMAC(
-            derivedKey: derivedKey, keyRange: (derivedKey.count - 16)..<derivedKey.count
-        )
-        guard standardMACMatches || legacyMACMatches else {
+        let macMatches = matchesMAC(derivedKey: derivedKey, keyRange: 16..<32)
+            || (derivedKey.count > 32 && matchesMAC(
+                derivedKey: derivedKey, keyRange: (derivedKey.count - 16)..<derivedKey.count
+            ))
+        guard macMatches else {
             throw DecryptError.invalidPassword
         }
 

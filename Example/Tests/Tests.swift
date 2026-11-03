@@ -7344,3 +7344,178 @@ final class DataArrayCopyRegressionTests: XCTestCase {
         XCTAssertEqual(data, Data((0..<256).map { UInt8($0) }))
     }
 }
+
+/// V3 keys the MAC with DK[16..<32]; earlier releases used the trailing 16 bytes. Both are the
+/// same slice at dklen 32, so only long-dklen files can tell the rules apart.
+final class KeystoreLongDKLenMACRegressionTests: XCTestCase {
+    private enum MACKeySlice: CaseIterable {
+        case v3, legacyTrailing, unrelated
+
+        func range(dklen: Int) -> Range<Int> {
+            switch self {
+            case .v3: return 16..<32
+            case .legacyTrailing: return (dklen - 16)..<dklen
+            case .unrelated: return 32..<48
+            }
+        }
+    }
+
+    private let password = "long-dklen-password"
+    private let newPassword = "long-dklen-new-password"
+    private let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    /// secp256k1 scalar 1 and its TRON address.
+    private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+    private let privateKeyAddress = "417e5f4552091a69125d5dfcb7b8c2659029395bdf"
+    private let digest = Data(repeating: 0x11, count: 32)
+    private let longDKLen = 64
+
+    private var keyDirectory: URL!
+
+    override func setUp() {
+        super.setUp()
+        keyDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: keyDirectory)
+        super.tearDown()
+    }
+
+    func testNewHeaderKeepsDKLen32AndHistoricalMACLayout() throws {
+        let header = try KeystoreKeyHeader(password: password, data: privateKey)
+        XCTAssertEqual(header.kdfParams.desiredKeyLength, ScryptParams.defaultDesiredKeyLength)
+
+        let derived = try Scrypt(params: header.kdfParams).calculate(password: password)
+        XCTAssertEqual(header.mac, KeystoreKey.computeMAC(prefix: derived[16..<32], key: header.cipherText))
+        XCTAssertEqual(header.mac, KeystoreKey.computeMAC(prefix: Data(derived.suffix(16)), key: header.cipherText),
+                       "Releases that key the MAC with the trailing 16 bytes must still read new files")
+    }
+
+    func testLongDKLenPrivateKeyAcceptsV3AndLegacyMAC() throws {
+        for slice in [MACKeySlice.v3, .legacyTrailing] {
+            let key = try makePrivateKeyKeystore(slice: slice)
+            XCTAssertEqual(try key.decrypt(password: password), privateKey, "\(slice)")
+            XCTAssertEqual(try key.privateKey(password: password), privateKey, "\(slice)")
+            XCTAssertEqual(try key.sign(hash: digest, password: password).count, 65, "\(slice)")
+        }
+    }
+
+    func testLongDKLenRejectsWrongPasswordAndUnrelatedMACSlice() throws {
+        for slice in MACKeySlice.allCases {
+            let key = try makePrivateKeyKeystore(slice: slice)
+            assertInvalidPassword(try key.decrypt(password: "wrong-password"), "\(slice)")
+            assertInvalidPassword(try key.sign(hash: digest, password: "wrong-password"), "\(slice)")
+        }
+        let unrelated = try makePrivateKeyKeystore(slice: .unrelated)
+        assertInvalidPassword(try unrelated.decrypt(password: password), "unrelated slice")
+    }
+
+    func testLongDKLenHDKeystoreKeepsMnemonicAndSigningKey() throws {
+        let expectedKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        for slice in [MACKeySlice.v3, .legacyTrailing] {
+            let key = try makeHDKeystore(slice: slice)
+            let decrypted = try key.decrypt(password: password)
+            XCTAssertEqual(try KeystoreKey.splitMnemonicPayload(decrypted).mnemonic, mnemonic, "\(slice)")
+            XCTAssertEqual(try key.privateKey(password: password), expectedKey, "\(slice)")
+            assertInvalidPassword(try key.decrypt(password: "wrong-password"), "\(slice)")
+        }
+    }
+
+    /// Existing on-disk files: sign, export, then change the password through `KeyStore`.
+    func testOnDiskLongDKLenKeysSurviveSignExportAndPasswordUpdate() throws {
+        let hdPrivateKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        let fixtures: [(KeystoreKey, Data)] = [
+            (try makePrivateKeyKeystore(slice: .legacyTrailing), privateKey),
+            (try makeHDKeystore(slice: .legacyTrailing), hdPrivateKey),
+        ]
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true)
+        for (index, fixture) in fixtures.enumerated() {
+            try JSONEncoder().encode(fixture.0).write(to: keyDirectory.appendingPathComponent("UTC--legacy--\(index)"))
+        }
+        let store = try KeyStore(keyDirectory: keyDirectory)
+
+        for (key, expectedPrivateKey) in fixtures {
+            let account = try XCTUnwrap(store.account(for: key.address))
+            XCTAssertEqual(try store.signHash(digest, account: account, password: password).count, 65)
+            XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), expectedPrivateKey)
+            if key.type == .hierarchicalDeterministicWallet {
+                XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+            }
+            let exported = try JSONDecoder().decode(
+                KeystoreKey.self, from: store.export(account: account, password: password, newPassword: newPassword)
+            )
+            XCTAssertEqual(exported.crypto.kdfParams.desiredKeyLength, ScryptParams.defaultDesiredKeyLength)
+            XCTAssertEqual(exported.address, key.address)
+
+            try store.update(account: account, password: password, newPassword: newPassword)
+            let updated = try XCTUnwrap(store.key(for: key.address))
+            XCTAssertEqual(updated.crypto.kdfParams.desiredKeyLength, ScryptParams.defaultDesiredKeyLength)
+            XCTAssertEqual(updated.type, key.type)
+            XCTAssertEqual(updated.derivationPath, key.derivationPath)
+            XCTAssertEqual(try store.exportPrivateKey(account: account, password: newPassword), expectedPrivateKey)
+            assertInvalidPassword(try store.exportPrivateKey(account: account, password: password), "old password")
+        }
+
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(reloaded.accounts.count, fixtures.count)
+        for (key, expectedPrivateKey) in fixtures {
+            let account = try XCTUnwrap(reloaded.account(for: key.address))
+            XCTAssertEqual(try reloaded.exportPrivateKey(account: account, password: newPassword), expectedPrivateKey)
+        }
+    }
+
+    func testImportRewritesLongDKLenKeystoresWithDKLen32() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let fixtures = [
+            try makePrivateKeyKeystore(slice: .v3),
+            try makeHDKeystore(slice: .legacyTrailing),
+        ]
+        for key in fixtures {
+            let account = try store.import(json: JSONEncoder().encode(key), password: password, newPassword: newPassword)
+            XCTAssertEqual(account.address, key.address)
+            XCTAssertEqual(account.type, key.type)
+            let stored = try XCTUnwrap(store.key(for: account.address))
+            XCTAssertEqual(stored.crypto.kdfParams.desiredKeyLength, ScryptParams.defaultDesiredKeyLength)
+            XCTAssertEqual(try store.signHash(digest, account: account, password: newPassword).count, 65)
+        }
+    }
+
+    private func makePrivateKeyKeystore(slice: MACKeySlice) throws -> KeystoreKey {
+        return try makeKeystore(type: "private-key", address: privateKeyAddress, payload: privateKey, slice: slice)
+    }
+
+    private func makeHDKeystore(slice: MACKeySlice) throws -> KeystoreKey {
+        let publicKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).publicKey
+        let address = try KeystoreKey.decodeAddress(from: publicKey).data.hexString
+        let payload = try KeystoreKey.makeMnemonicPayload(mnemonic: mnemonic, passphrase: "")
+        return try makeKeystore(type: "mnemonic", address: address, payload: payload, slice: slice)
+    }
+
+    /// Low-cost scrypt parameters; only `dklen` and the MAC key slice matter here.
+    private func makeKeystore(type: String, address: String, payload: Data, slice: MACKeySlice) throws -> KeystoreKey {
+        let params = try ScryptParams(salt: Data(repeating: 0x5a, count: 32), n: 16, r: 1, p: 1, desiredKeyLength: longDKLen)
+        let derived = try Scrypt(params: params).calculate(password: password)
+        XCTAssertEqual(derived.count, longDKLen)
+        let cipherParams = CipherParams()
+        let cipherText = Data(try AES(
+            key: Array(derived[0..<16]), blockMode: CTR(iv: Array(cipherParams.iv)), padding: .noPadding
+        ).encrypt(Array(payload)))
+        let header = KeystoreKeyHeader(
+            cipherText: cipherText, cipherParams: cipherParams, kdfParams: params,
+            mac: KeystoreKey.computeMAC(prefix: derived[slice.range(dklen: longDKLen)], key: cipherText)
+        )
+        let crypto = try JSONSerialization.jsonObject(with: JSONEncoder().encode(header))
+        let json: [String: Any] = [
+            "address": address, "id": UUID().uuidString.lowercased(),
+            "type": type, "version": 3, "crypto": crypto,
+        ]
+        return try JSONDecoder().decode(KeystoreKey.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+
+    private func assertInvalidPassword<T>(_ expression: @autoclosure () throws -> T, _ message: String,
+                                          file: StaticString = #file, line: UInt = #line) {
+        XCTAssertThrowsError(try expression(), message, file: file, line: line) { error in
+            XCTAssertEqual(error as? DecryptError, .invalidPassword, "\(message): \(error)", file: file, line: line)
+        }
+    }
+}
