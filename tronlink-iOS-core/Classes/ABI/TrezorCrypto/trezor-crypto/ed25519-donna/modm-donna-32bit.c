@@ -3,6 +3,7 @@
 */
 
 #include "ed25519-donna.h"
+#include "memzero.h"
 
 /*
 	Arithmetic modulo the group order n = 2^252 +  27742317777372353535851937790883648493 = 7237005577332262213973186563042994240857116359379907606001950938285454250989
@@ -58,6 +59,7 @@ void reduce256_modm(bignum256modm r) {
 	r[6] ^= mask & (r[6] ^ t[6]);
 	r[7] ^= mask & (r[7] ^ t[7]);
 	r[8] ^= mask & (r[8] ^ t[8]);
+	memzero(t, sizeof(t));
 }
 
 /*
@@ -130,6 +132,8 @@ void barrett_reduce256_modm(bignum256modm r, const bignum256modm q1, const bignu
 
 	reduce256_modm(r);
 	reduce256_modm(r);
+	memzero(q3, sizeof(q3));
+	memzero(r2, sizeof(r2));
 }
 
 /* addition modulo m */
@@ -233,6 +237,8 @@ void mul256_modm(bignum256modm r, const bignum256modm x, const bignum256modm y) 
 	f = (bignum256modm_element_t)c; q1[7] = (q1[7] | (f << 22)) & 0x3fffffff; q1[8] = (f >> 8) & 0x3fffff;
 
 	barrett_reduce256_modm(r, q1, r1);
+	memzero(r1, sizeof(r1));
+	memzero(q1, sizeof(q1));
 }
 
 void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
@@ -270,8 +276,11 @@ void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
 	out[8] = ((x[ 7] >> 16) | (x[ 8] << 16)) & 0x00ffffff;
 
 	/* 8*31 = 248 bits, no need to reduce */
-	if (len < 32)
+	if (len < 32) {
+		memzero(work, sizeof(work));
+		memzero(x, sizeof(x));
 		return;
+	}
 
 	/* q1 = x >> 248 = 264 bits = 9 30 bit elements */
 	q1[0] = ((x[ 7] >> 24) | (x[ 8] <<  8)) & 0x3fffffff;
@@ -285,6 +294,9 @@ void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
 	q1[8] = ((x[15] >>  8)                );
 
 	barrett_reduce256_modm(out, q1, out);
+	memzero(work, sizeof(work));
+	memzero(x, sizeof(x));
+	memzero(q1, sizeof(q1));
 }
 
 void expand_raw256_modm(bignum256modm out, const unsigned char in[32]) {
@@ -308,6 +320,7 @@ void expand_raw256_modm(bignum256modm out, const unsigned char in[32]) {
 	out[6] = ((x[ 5] >> 20) | (x[ 6] << 12)) & 0x3fffffff;
 	out[7] = ((x[ 6] >> 18) | (x[ 7] << 14)) & 0x3fffffff;
 	out[8] = ((x[ 7] >> 16)                ) & 0x0000ffff;
+	memzero(x, sizeof(x));
 }
 
 int is_reduced256_modm(const bignum256modm in)

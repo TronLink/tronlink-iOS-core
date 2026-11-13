@@ -130,6 +130,9 @@ public final class KeyStore {
         return account
     }
     
+    /// Saves a cached key and registers its account. An existing address must keep its
+    /// registered file URL; saving at the same URL supports `addKey` password updates.
+    /// - Throws: `Error.accountAlreadyExists` if the address is registered at another URL.
     public func addAccount(account: Account) throws {
         mutationLock.lock()
         defer { mutationLock.unlock() }
@@ -341,7 +344,7 @@ public final class KeyStore {
     /// Updates the password of an existing account.
     ///
     /// - Parameters:
-    ///   - account: account to update
+    ///   - account: account to update, retaining its registered key file URL
     ///   - password: current password
     ///   - newPassword: new password
     ///   - derivationPath: optional HD wallet derivation path; defaults to the stored key path
@@ -486,6 +489,12 @@ public final class KeyStore {
         // Unknown files may contain the same address; finish loading before changing disk state.
         guard !hasUnreadableAccounts else {
             throw CocoaError(.fileReadUnknown)
+        }
+        // One address has one managed key file. A second path would leave the old key
+        // behind after password changes or deletion. Keep same-path updates working.
+        if let storedAccount = accountsByAddress[key.address],
+           storedAccount.url.standardizedFileURL != url.standardizedFileURL {
+            throw Error.accountAlreadyExists
         }
         let json = try JSONEncoder().encode(key)
         backupExclusionPending = true

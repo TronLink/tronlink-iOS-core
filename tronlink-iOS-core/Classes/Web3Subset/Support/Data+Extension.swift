@@ -17,15 +17,39 @@ public enum DataError: Error {
 }
 
 public extension Data {
-    /// Inits with array of type
-    init<T>(fromArray values: [T]) {
-        self = values.withUnsafeBufferPointer { Data(buffer: $0) }
-    }
-    /// Represents data as array of type
-    func toArray<T>(type _: T.Type) -> [T] {
-        return withUnsafeBytes {
-            [T](UnsafeBufferPointer(start: $0, count: self.count / MemoryLayout<T>.stride))
+    /// Copies fixed-width integers in native byte order. This is not an object serializer.
+    /// Integer widths must consist of complete bytes.
+    init<T: FixedWidthInteger>(fromArray values: [T]) {
+        precondition(T.bitWidth > 0 && T.bitWidth % 8 == 0, "Integer width must contain complete bytes")
+        self.init()
+        for value in values {
+            // Byte operations avoid copying object references or padding from a custom
+            // integer's in-memory representation. Preserve the existing native byte order.
+            var bytes = value.littleEndian
+            for _ in 0..<(T.bitWidth / 8) {
+                append(UInt8(truncatingIfNeeded: bytes))
+                bytes >>= 8
+            }
         }
+    }
+    /// Decodes fixed-width integers in native byte order, including from unaligned slices.
+    /// Preserves the existing behavior of ignoring an incomplete trailing integer.
+    /// Integer widths must consist of complete bytes; reference-containing objects are unsupported.
+    func toArray<T: FixedWidthInteger>(type _: T.Type) -> [T] {
+        precondition(T.bitWidth > 0 && T.bitWidth % 8 == 0, "Integer width must contain complete bytes")
+        let byteWidth = T.bitWidth / 8
+        var result: [T] = []
+        result.reserveCapacity(count / byteWidth)
+        var byteIndex = startIndex
+        for _ in 0..<(count / byteWidth) {
+            var value: T = 0
+            for offset in 0..<byteWidth {
+                value |= T(truncatingIfNeeded: self[byteIndex]) &<< (offset * 8)
+                formIndex(after: &byteIndex)
+            }
+            result.append(T(littleEndian: value))
+        }
+        return result
     }
 
     /// Constant time comparsion between two data objects

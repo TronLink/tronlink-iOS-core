@@ -172,22 +172,15 @@ public struct KeystoreKey {
             }
         }
 
-        // Detach and clear this slice before the earlier derivedKey cleanup runs.
-        var macPrefix = derivedKey[derivedKey.count - 16 ..< derivedKey.count]
-        defer {
-            macPrefix.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
-                if let baseAddress = bytes.baseAddress {
-                    memzero(baseAddress, bytes.count)
-                }
-            }
-        }
-        let mac = KeystoreKey.computeMAC(prefix: macPrefix, key: crypto.cipherText)
-        let macMatches = mac.count == crypto.mac.count && mac.withUnsafeBytes { (computed: UnsafeRawBufferPointer) in
-            return crypto.mac.withUnsafeBytes { (expected: UnsafeRawBufferPointer) in
-                return timingsafe_bcmp(computed.baseAddress!, expected.baseAddress!, computed.count) == 0
-            }
-        }
-        if !macMatches {
+        // V3 always authenticates with DK[16..<32], even when dklen is larger.
+        // Keep the old trailing-16 rule only as read compatibility for long keys
+        // accepted by previous releases. Both paths still require a complete MAC
+        // match before AES; deriving the password key is performed only once.
+        let macMatches = matchesMAC(derivedKey: derivedKey, keyRange: 16..<32)
+            || (derivedKey.count > 32 && matchesMAC(
+                derivedKey: derivedKey, keyRange: (derivedKey.count - 16)..<derivedKey.count
+            ))
+        guard macMatches else {
             throw DecryptError.invalidPassword
         }
 
@@ -222,6 +215,28 @@ public struct KeystoreKey {
 
         // Copy the result before clearing the temporary plaintext array.
         return Data(bytes: decryptedPK)
+    }
+
+    /// The ranges are chosen above after Scrypt has validated dklen >= 32.
+    /// Clear each MAC key slice before decrypt's derived-key cleanup runs.
+    private func matchesMAC(derivedKey: Data, keyRange: Range<Int>) -> Bool {
+        var macPrefix = derivedKey[keyRange]
+        defer {
+            macPrefix.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    memzero(baseAddress, bytes.count)
+                }
+            }
+        }
+        let mac = KeystoreKey.computeMAC(prefix: macPrefix, key: crypto.cipherText)
+        guard mac.count == crypto.mac.count else { return false }
+        return mac.withUnsafeBytes { (computed: UnsafeRawBufferPointer) in
+            return crypto.mac.withUnsafeBytes { (expected: UnsafeRawBufferPointer) in
+                guard let computedAddress = computed.baseAddress,
+                      let expectedAddress = expected.baseAddress else { return false }
+                return timingsafe_bcmp(computedAddress, expectedAddress, computed.count) == 0
+            }
+        }
     }
 
     static func computeMAC(prefix: Data, key: Data) -> Data {
