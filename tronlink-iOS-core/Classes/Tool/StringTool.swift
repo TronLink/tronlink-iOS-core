@@ -23,6 +23,7 @@ public extension String {
     }
     
     func index(from: Int) -> Index? {
+        guard from >= 0 else { return nil }
         return self.index(startIndex, offsetBy: from, limitedBy: endIndex)
     }
     
