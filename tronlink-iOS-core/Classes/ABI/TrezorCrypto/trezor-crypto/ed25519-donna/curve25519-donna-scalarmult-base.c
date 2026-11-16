@@ -1,5 +1,6 @@
 #include "ed25519-donna.h"
 #include "ed25519.h"
+#include "memzero.h"
 
 /* Calculates nQ where Q is the x-coordinate of a point on the curve
  *
@@ -64,4 +65,14 @@ void curve25519_scalarmult_donna(curve25519_key mypublic, const curve25519_key n
 	curve25519_recip(zmone, nqz);
 	curve25519_mul(nqz, nqx, zmone);
 	curve25519_contract(mypublic, nqz);
+
+	memzero(nqpqx, sizeof(nqpqx));
+	memzero(nqpqz, sizeof(nqpqz));
+	memzero(nqz, sizeof(nqz));
+	memzero(nqx, sizeof(nqx));
+	memzero(qx, sizeof(qx));
+	memzero(qpqx, sizeof(qpqx));
+	memzero(qqx, sizeof(qqx));
+	memzero(zzz, sizeof(zzz));
+	memzero(zmone, sizeof(zmone));
 }

@@ -89,13 +89,13 @@ public struct ScryptParams {
     ///   the `128 * r * n` allocation.
     public static let maxP = 16
 
-    /// Minimum derived-key length. `KeystoreKey.decrypt` takes the leading 16 bytes as
-    /// the AES key and the trailing 16 bytes as the MAC prefix, so a shorter derived
-    /// key makes those two slices overlap or read out of bounds.
+    /// Minimum derived-key length. V3 uses DK[0..<16] as the AES key and
+    /// DK[16..<32] as the MAC prefix, so both slices must be present.
     public static let minDesiredKeyLength = 32
 
-    /// Upper bound on the derived-key length. No standard V3 keystore exceeds 32; the
-    /// headroom matches Android. Extra length is merely discarded by `decrypt`.
+    /// Upper bound on accepted derived-key lengths, matching Android. V3 permits
+    /// dklen >= 32 but keeps the AES/MAC slices fixed. Decryption also accepts the
+    /// historical trailing-16 MAC for long keys; newly encrypted files use V3 rules.
     public static let maxDesiredKeyLength = 1024
 
     /// Random salt.

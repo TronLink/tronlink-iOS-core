@@ -1,5 +1,6 @@
 #include <assert.h>
 #include "ed25519-donna.h"
+#include "memzero.h"
 
 /* sqrt(x) is such an integer y that 0 <= y <= p - 1, y % 2 = 0, and y^2 = x (mod p). */
 /* d = -121665 / 121666 */
@@ -475,6 +476,9 @@ void ge25519_scalarmult(ge25519 *r, const ge25519 *p1, const bignum256modm s1) {
 		ge25519_p1p1_to_partial(r, &t);
 	}
 	curve25519_mul(r->t, t.x, t.y);
+	memzero(slide1, sizeof(slide1));
+	memzero(&pre, sizeof(pre));
+	memzero(&t, sizeof(t));
 }
 
 void ge25519_scalarmult_base_choose_niels(ge25519_niels *t, const uint8_t table[256][96], uint32_t pos, signed char b) {
@@ -499,6 +503,8 @@ void ge25519_scalarmult_base_choose_niels(ge25519_niels *t, const uint8_t table[
 	curve25519_swap_conditional(t->ysubx, t->xaddy, sign);
 	curve25519_neg(neg, t->t2d);
 	curve25519_swap_conditional(t->t2d, neg, sign);
+	memzero(packed, sizeof(packed));
+	memzero(neg, sizeof(neg));
 }
 
 /* computes [s]basepoint */
@@ -530,6 +536,8 @@ void ge25519_scalarmult_base_niels(ge25519 *r, const uint8_t basepoint_table[256
 		ge25519_scalarmult_base_choose_niels(&t, basepoint_table, i / 2, b[i]);
 		ge25519_nielsadd2(r, &t);
 	}
+	memzero(b, sizeof(b));
+	memzero(&t, sizeof(t));
 }
 
 int ge25519_check(const ge25519 *r){

@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'tronlink-iOS-core'
-  s.version          = '2.0.0'
+  s.version          = '2.0.1'
   s.summary          = 'tronlink-iOS-core is repo of TronLink'
   s.module_name      = 'TLCore'
 
@@ -47,11 +47,11 @@ Pod::Spec.new do |s|
     'SWIFT_OPTIMIZATION_LEVEL[config=Debug]' => '-Owholemodule'
   }
 
-  s.dependency 'gRPC', '1.84.0'
+  s.dependency 'gRPC', '1.84.1'
   s.dependency 'Protobuf', '5.36.2'
-  s.dependency 'gRPC-Core', '1.84.0'
-  s.dependency 'gRPC-ProtoRPC', '1.84.0'
-  s.dependency 'gRPC-RxLibrary', '1.84.0'
+  s.dependency 'gRPC-Core', '1.84.1'
+  s.dependency 'gRPC-ProtoRPC', '1.84.1'
+  s.dependency 'gRPC-RxLibrary', '1.84.1'
    
   s.dependency 'FMDB', '2.7.12'
   s.dependency 'BigInt', '5.2.0'
