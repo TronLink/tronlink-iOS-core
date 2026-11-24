@@ -73,7 +73,7 @@ private func decodeHexToBigUInt<T>(
     allowOptional: Bool = false
 ) throws -> BigUInt? {
     if allowOptional {
-        guard let string = try? container.decode(String.self, forKey: key) else { return nil }
+        guard let string = try container.decodeIfPresent(String.self, forKey: key) else { return nil }
         guard let number = BigUInt(string.withoutHex, radix: 16) else { throw Web3Error.dataError }
         return number
     }

@@ -1,4 +1,4 @@
-
+@_implementationOnly import TLCoreTrezorInternal
 import Foundation
 
 public final class Mnemonic {

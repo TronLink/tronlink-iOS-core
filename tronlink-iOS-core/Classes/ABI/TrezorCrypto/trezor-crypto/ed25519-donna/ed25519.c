@@ -14,6 +14,7 @@
 #define ED25519_FN(fn) fn
 #endif
 
+#include <string.h>
 #include "ed25519-donna.h"
 #include "ed25519.h"
 #include "memzero.h"
@@ -113,8 +114,20 @@ ED25519_FN(ed25519_cosi_sign) (const unsigned char *m, size_t mlen, const ed2551
 	memzero(a, sizeof(a));
 }
 
-void
-ED25519_FN(ed25519_sign) (const unsigned char *m, size_t mlen, const ed25519_secret_key sk, const ed25519_public_key pk, ed25519_signature RS) {
+int
+ED25519_FN(ed25519_sign_checked) (const unsigned char *m, size_t mlen, const ed25519_secret_key sk, const ed25519_public_key pk, ed25519_signature RS) {
+	if (!RS) return -1;
+	if (!sk || !pk || (!m && mlen)) {
+		memzero(RS, sizeof(ed25519_signature));
+		return -1;
+	}
+	if (!m) m = (const unsigned char *)"";
+	ed25519_public_key derived;
+	ED25519_FN(ed25519_publickey) (sk, derived);
+	if (memcmp(derived, pk, sizeof(derived)) != 0) {
+		memzero(RS, sizeof(ed25519_signature));
+		return -1;
+	}
 	ed25519_hash_context ctx;
 	bignum256modm r, S, a;
 	ge25519 ALIGN(16) R;
@@ -135,7 +148,7 @@ ED25519_FN(ed25519_sign) (const unsigned char *m, size_t mlen, const ed25519_sec
 	ge25519_pack(RS, &R);
 
 	/* S = H(R,A,m).. */
-	ed25519_hram(hram, RS, pk, m, mlen);
+	ed25519_hram(hram, RS, derived, m, mlen);
 	expand256_modm(S, hram, 64);
 
 	/* S = H(R,A,m)a */
@@ -155,11 +168,29 @@ ED25519_FN(ed25519_sign) (const unsigned char *m, size_t mlen, const ed25519_sec
 	memzero(S, sizeof(S));
 	memzero(a, sizeof(a));
 	memzero(&R, sizeof(R));
+	return 0;
+}
+
+void
+ED25519_FN(ed25519_sign) (const unsigned char *m, size_t mlen, const ed25519_secret_key sk, const ed25519_public_key pk, ed25519_signature RS) {
+	(void)ED25519_FN(ed25519_sign_checked)(m, mlen, sk, pk, RS);
 }
 
 #if USE_CARDANO
-void
-ED25519_FN(ed25519_sign_ext) (const unsigned char *m, size_t mlen, const ed25519_secret_key sk, const ed25519_secret_key skext, const ed25519_public_key pk, ed25519_signature RS) {
+int
+ED25519_FN(ed25519_sign_ext_checked) (const unsigned char *m, size_t mlen, const ed25519_secret_key sk, const ed25519_secret_key skext, const ed25519_public_key pk, ed25519_signature RS) {
+	if (!RS) return -1;
+	if (!sk || !pk || !skext || (!m && mlen)) {
+		memzero(RS, sizeof(ed25519_signature));
+		return -1;
+	}
+	if (!m) m = (const unsigned char *)"";
+	ed25519_public_key derived;
+	ED25519_FN(ed25519_publickey_ext) (sk, skext, derived);
+	if (memcmp(derived, pk, sizeof(derived)) != 0) {
+		memzero(RS, sizeof(ed25519_signature));
+		return -1;
+	}
 	ed25519_hash_context ctx;
 	bignum256modm r, S, a;
 	ge25519 ALIGN(16) R;
@@ -183,7 +214,7 @@ ED25519_FN(ed25519_sign_ext) (const unsigned char *m, size_t mlen, const ed25519
 	ge25519_pack(RS, &R);
 
 	/* S = H(R,A,m).. */
-	ed25519_hram(hram, RS, pk, m, mlen);
+	ed25519_hram(hram, RS, derived, m, mlen);
 	expand256_modm(S, hram, 64);
 
 	/* S = H(R,A,m)a */
@@ -203,6 +234,12 @@ ED25519_FN(ed25519_sign_ext) (const unsigned char *m, size_t mlen, const ed25519
 	memzero(S, sizeof(S));
 	memzero(a, sizeof(a));
 	memzero(&R, sizeof(R));
+	return 0;
+}
+
+void
+ED25519_FN(ed25519_sign_ext) (const unsigned char *m, size_t mlen, const ed25519_secret_key sk, const ed25519_secret_key skext, const ed25519_public_key pk, ed25519_signature RS) {
+	(void)ED25519_FN(ed25519_sign_ext_checked)(m, mlen, sk, skext, pk, RS);
 }
 #endif
 

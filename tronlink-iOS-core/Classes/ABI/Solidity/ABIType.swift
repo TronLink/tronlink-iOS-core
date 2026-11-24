@@ -76,10 +76,14 @@ public indirect enum ABIType: Equatable, CustomStringConvertible {
             return type.isDynamic
         case .tuple(let types):
             return types.contains(where: { $0.isDynamic })
-        case .function(let function):
-            // ABIValue.function represents a full call, including its arguments.
-            return function.parameters.contains(where: { $0.isDynamic })
+        case .function:
+            return false
         }
+    }
+
+    /// External functions share the same ABI wire type regardless of their name.
+    func matchesParameter(_ other: ABIType) -> Bool {
+        return self == other || description == other.description
     }
 
     /// Type description
@@ -101,8 +105,8 @@ public indirect enum ABIType: Equatable, CustomStringConvertible {
             return "ufixed\(m)x\(n)"
         case .bytes(let size):
             return "bytes\(size)"
-        case .function(let f):
-            return f.description
+        case .function:
+            return "function"
         case .array(let type, let size):
             return "\(type)[\(size)]"
         case .dynamicBytes:

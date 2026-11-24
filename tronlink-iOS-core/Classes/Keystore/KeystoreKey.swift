@@ -1,4 +1,4 @@
-
+@_implementationOnly import TLCoreTrezorInternal
 import CryptoSwift
 import Darwin
 import Foundation
@@ -272,28 +272,31 @@ public struct KeystoreKey {
     /// Decrypts the key and derives the private key used by account operations. The caller owns the result and
     /// is responsible for clearing it.
     func privateKey(password: String) throws -> Data {
+        var payload = try decrypt(password: password)
+        defer { payload.resetBytes(in: 0..<payload.count) }
         switch type {
         case .encryptedKey:
-            var secret = try decrypt(password: password)
-            // Compatibility with keystores written by an older release when an HD keystore was
-            // imported through the raw-private-key path: the payload is the mnemonic (>32 bytes)
-            // and only its first 32 bytes ever defined this key's address and signatures.
-            // `EthereumCrypto` now requires exactly 32 bytes, so keep using them.
-            guard secret.count > 32 else {
-                return secret
-            }
-            let key = Data(secret.prefix(32))
-            secret.resetBytes(in: 0 ..< secret.count)
-            return key
+            // Historical oversized raw files signed with the first 32 plaintext bytes.
+            var scalar = Data(payload.prefix(32))
+            defer { scalar.resetBytes(in: 0..<scalar.count) }
+            try verifyAddress(publicKey: EthereumCrypto.getPublicKey(from: scalar))
+            return scalar
         case .hierarchicalDeterministicWallet:
-            var decrypted = try decrypt(password: password)
-            defer {
-                decrypted.resetBytes(in: 0 ..< decrypted.count)
-            }
-            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(decrypted)
-            // Stored bytes already define the account; normalizing an older Unicode passphrase
-            // here would silently change the private key used for signing.
-            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: .legacy).getKey(at: 0).privateKey
+            return try verifiedHDMaterial(payload).key.privateKey
+        }
+    }
+
+    func verifiedHDMaterial(_ payload: Data) throws -> (mnemonic: String, key: HDKey) {
+        let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(payload)
+        let key = try Wallet(mnemonic: mnemonic, passphrase: passphrase,
+                             path: derivationPath, normalization: .legacy).getKey(at: 0)
+        try verifyAddress(publicKey: key.publicKey)
+        return (mnemonic, key)
+    }
+
+    private func verifyAddress(publicKey: Data) throws {
+        guard try KeystoreKey.decodeAddress(from: publicKey) == address else {
+            throw KeyStore.Error.invalidKey
         }
     }
 

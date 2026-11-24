@@ -1,5 +1,4 @@
-
-
+@_implementationOnly import TLCoreTrezorInternal
 // Hierarchical deterministic key.
 public class HDKey {
     var node: HDNode

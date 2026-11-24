@@ -18,6 +18,7 @@
 		9E0100012C80A10000000001 /* Secp256k1BackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0100022C80A10000000001 /* Secp256k1BackendTests.swift */; };
 		9E0100032C80A10000000001 /* Secp256k1PerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0100042C80A10000000001 /* Secp256k1PerformanceTests.swift */; };
 		9E0100052C80A10000000001 /* GRPCServiceWrapperTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 9E0100062C80A10000000001 /* GRPCServiceWrapperTests.m */; };
+		5C1920012C80A10000000001 /* TrezorBoundaryTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 5C1920022C80A10000000001 /* TrezorBoundaryTests.m */; };
 		C58268B2CC9EA0489D656BB7 /* Pods_tronlink_iOS_core_Tests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B87DF053D2FE1ADD7AE7F346 /* Pods_tronlink_iOS_core_Tests.framework */; };
 /* End PBXBuildFile section */
 
@@ -52,6 +53,7 @@
 		9E0100022C80A10000000001 /* Secp256k1BackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secp256k1BackendTests.swift; sourceTree = "<group>"; };
 		9E0100042C80A10000000001 /* Secp256k1PerformanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secp256k1PerformanceTests.swift; sourceTree = "<group>"; };
 		9E0100062C80A10000000001 /* GRPCServiceWrapperTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GRPCServiceWrapperTests.m; sourceTree = "<group>"; };
+		5C1920022C80A10000000001 /* TrezorBoundaryTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TrezorBoundaryTests.m; sourceTree = "<group>"; };
 		B87DF053D2FE1ADD7AE7F346 /* Pods_tronlink_iOS_core_Tests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_tronlink_iOS_core_Tests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		E992246AD369DA00E2D4C666 /* Pods-tronlink-iOS-core_Tests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-tronlink-iOS-core_Tests.release.xcconfig"; path = "Target Support Files/Pods-tronlink-iOS-core_Tests/Pods-tronlink-iOS-core_Tests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -126,6 +128,7 @@
 				9E0100042C80A10000000001 /* Secp256k1PerformanceTests.swift */,
 				607FACEB1AFB9204008FA782 /* Tests.swift */,
 				9E0100062C80A10000000001 /* GRPCServiceWrapperTests.m */,
+				5C1920022C80A10000000001 /* TrezorBoundaryTests.m */,
 				607FACE91AFB9204008FA782 /* Supporting Files */,
 			);
 			path = Tests;
@@ -396,6 +399,7 @@
 				9E0100032C80A10000000001 /* Secp256k1PerformanceTests.swift in Sources */,
 				607FACEC1AFB9204008FA782 /* Tests.swift in Sources */,
 				9E0100052C80A10000000001 /* GRPCServiceWrapperTests.m in Sources */,
+				5C1920012C80A10000000001 /* TrezorBoundaryTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -575,6 +579,15 @@
 					"DEBUG=1",
 					"$(inherited)",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/Internal",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/aes",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/chacha20poly1305",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/ed25519-donna",
+				);
+				SWIFT_INCLUDE_PATHS = "$(inherited) \"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/Internal\"";
 				INFOPLIST_FILE = Tests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.cocoapods.$(PRODUCT_NAME:rfc1034identifier)";
@@ -594,6 +607,15 @@
 					"$(PLATFORM_DIR)/Developer/Library/Frameworks",
 					"$(inherited)",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/Internal",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/aes",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/chacha20poly1305",
+					"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/ed25519-donna",
+				);
+				SWIFT_INCLUDE_PATHS = "$(inherited) \"$(SRCROOT)/../tronlink-iOS-core/Classes/ABI/TrezorCrypto/Internal\"";
 				INFOPLIST_FILE = Tests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = "org.cocoapods.$(PRODUCT_NAME:rfc1034identifier)";

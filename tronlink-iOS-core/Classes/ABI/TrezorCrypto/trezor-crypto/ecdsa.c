@@ -673,15 +673,28 @@ void scalar_multiply(const ecdsa_curve *curve, const bignum256 *k, curve_point *
 int ecdh_multiply(const ecdsa_curve *curve, const uint8_t *priv_key, const uint8_t *pub_key, uint8_t *session_key)
 {
 	curve_point point;
-	if (!ecdsa_read_pubkey(curve, pub_key, &point)) {
+	if (!session_key) return 1;
+	if (!curve || !priv_key || !pub_key || !ecdsa_read_pubkey(curve, pub_key, &point)) {
+		memzero(session_key, 65);
 		return 1;
 	}
 
 	bignum256 k;
 	bn_read_be(priv_key, &k);
+	if (bn_is_zero(&k) || !bn_is_less(&k, &curve->order)) {
+		memzero(&k, sizeof(k));
+		memzero(&point, sizeof(point));
+		memzero(session_key, 65);
+		return 1;
+	}
 	point_multiply(curve, &k, &point, &point);
 	memzero(&k, sizeof(k));
 
+	if (point_is_infinity(&point)) {
+		memzero(&point, sizeof(point));
+		memzero(session_key, 65);
+		return 1;
+	}
 	session_key[0] = 0x04;
 	bn_write_be(&point.x, session_key + 1);
 	bn_write_be(&point.y, session_key + 33);

@@ -29,13 +29,25 @@ abort "Security framework is missing" unless frameworks.include?("Security")
 
 preserved = Array(spec["preserve_paths"])
 required = [
+  "tronlink-iOS-core/Classes/ABI/TrezorCrypto/Internal/module.modulemap",
   "tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/*.table",
   "tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/LICENSE",
   "ThirdPartyLicenses/*"
 ]
 missing = required - preserved
 abort "missing preserve_paths: #{missing.join(", ")}" unless missing.empty?
-' "$spec_json"; then
+
+root = File.dirname(File.expand_path(ARGV.fetch(1)))
+expand = ->(patterns) { Array(patterns).flat_map { |p| Dir.glob(p, base: root) }.sort }
+api = expand.call(spec.fetch("public_header_files"))
+c_headers = Dir.glob("tronlink-iOS-core/Classes/ABI/TrezorCrypto/**/*.h", base: root).sort
+trezor = spec.fetch("subspecs").find { |s| s["name"] == "Trezor" }
+abort "Trezor public header leak" unless (api & c_headers).empty?
+abort "missing public wordlist" unless api.any? { |p| p.end_with?("/TLMnemonicWordlist.h") }
+abort "missing project-only Trezor headers" unless expand.call(trezor.fetch("project_header_files")) == c_headers
+abort "missing Trezor visibility flag" unless Array(trezor["compiler_flags"]).include?("-fvisibility=$(TLCORE_TREZOR_VISIBILITY)")
+abort "Trezor symbols must be hidden" unless spec.fetch("pod_target_xcconfig")["TLCORE_TREZOR_VISIBILITY"] == "hidden"
+' "$spec_json" "$podspec"; then
     fail "podspec-contract" "Security or license paths are missing"
 fi
 pass "podspec-contract"
@@ -51,11 +63,14 @@ for required_line in \
     '#define FOUNDATION_EXPORT extern' \
     '#import "Api.pbrpc.h"' \
     '#import "EthereumCrypto.h"' \
-    '#import "TrezorCrypto.h"'; do
+    '#import "TLMnemonicWordlist.h"'; do
     if ! grep -F "$required_line" "$umbrella_header" >/dev/null 2>&1; then
         fail "umbrella-contract" "missing $required_line"
     fi
 done
+if grep -F 'TrezorCrypto.h' "$umbrella_header" >/dev/null; then
+    fail "umbrella-contract" "TrezorCrypto.h is internal"
+fi
 pass "umbrella-contract"
 
 for required_path in \

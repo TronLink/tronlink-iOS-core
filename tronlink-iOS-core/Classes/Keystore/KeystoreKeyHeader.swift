@@ -1,4 +1,4 @@
-
+@_implementationOnly import TLCoreTrezorInternal
 import CryptoSwift
 import Foundation
 

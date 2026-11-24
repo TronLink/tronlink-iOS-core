@@ -4,7 +4,7 @@ import XCTest
 
 final class Secp256k1PerformanceTests: XCTestCase {
     func testFixedVectorSigningPerformanceEnvelope() throws {
-        let key = TLCore.PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let key = try TLCore.PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
         let hash = Data(repeating: 0x11, count: 32)
         let expected = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
 

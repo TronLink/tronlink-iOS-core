@@ -55,6 +55,4 @@ int mnemonic_to_entropy(const char *mnemonic, uint8_t *entropy);
 // an unchecked failure would derive every wallet from an all-zero seed.
 int mnemonic_to_seed(const char *mnemonic, const char *passphrase, uint8_t seed[512 / 8], void (*progress_callback)(uint32_t current, uint32_t total)) __attribute__((warn_unused_result));
 
-const char * const *mnemonic_wordlist(void);
-
 #endif

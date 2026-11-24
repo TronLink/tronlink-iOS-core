@@ -29,18 +29,17 @@ public class PrivateKey {
     /// Private key data, fixed for the lifetime of this instance.
     public let privateKey: Data
     
-    /// Cached public key derived from this instance's private key.
-    public private(set) lazy var publicKey: Data = try! SECP256K1.privateToPublic(privateKey: privateKey)
-    
-    /// Cached address derived from this instance's public key.
-    public private(set) lazy var address: Web3Address = try! Web3Utils.publicToAddress(publicKey)
-    
-    /// Init with private key data. run .verify() to verify it
-    public init(_ privateKey: Data) {
+    public let publicKey: Data
+    public let address: Web3Address
+
+    /// Validates the scalar before exposing an identity or its derived properties.
+    public init(_ privateKey: Data) throws {
+        let publicKey = try SECP256K1.privateToPublic(privateKey: privateKey)
+        self.address = try Web3Utils.publicToAddress(publicKey)
+        self.publicKey = publicKey
         self.privateKey = privateKey
     }
-    
-    
+
     /// Signs hash with private key signature
     ///
     /// - Parameter hash: 32 bytes hash. To get hash call data.keccak256()
@@ -59,7 +58,7 @@ public class PrivateKey {
     }
     
     
-    /// Verifies the private key. Also every 32 byte private keys are valid
+    /// Checks the length and secp256k1 scalar bounds.
     ///
     /// - Throws: SECP256K1Error.invalidPrivateKey
     public func verify() throws {

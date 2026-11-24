@@ -286,6 +286,7 @@ public final class KeyStore {
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
             newKey = try KeystoreKey(password: newPassword, preservingStoredMnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
         }
+        guard newKey.address == account.address else { throw Error.invalidKey }
         return try JSONEncoder().encode(newKey)
     }
 
@@ -300,21 +301,7 @@ public final class KeyStore {
             throw DecryptError.missingAccountKey
         }
 
-        switch key.type {
-        case .encryptedKey:
-            var privateKey = try key.privateKey(password: password)
-            defer {
-                privateKey.resetBytes(in: 0..<privateKey.count)
-            }
-            return privateKey
-        case .hierarchicalDeterministicWallet:
-            var privateKey = try key.decrypt(password: password)
-            defer {
-                privateKey.resetBytes(in: 0..<privateKey.count)
-            }
-            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
-            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: key.derivationPath, normalization: .legacy).getKey(at: 0).privateKey
-        }
+        return try key.privateKey(password: password)
     }
     
     /// Exports a account as a mnemonic phrase.
@@ -337,7 +324,7 @@ public final class KeyStore {
         case .encryptedKey:
             throw EncryptError.invalidMnemonic
         case .hierarchicalDeterministicWallet:
-            return try KeystoreKey.splitMnemonicPayload(data).mnemonic
+            return try key.verifiedHDMaterial(data).mnemonic
         }
     }
 
@@ -370,6 +357,9 @@ public final class KeyStore {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
+            if let path = derivationPath, path != key.derivationPath {
+                _ = try key.verifiedHDMaterial(privateKey)
+            }
             newKey = try KeystoreKey(password: newPassword,
                                       preservingStoredMnemonic: mnemonic,
                                       passphrase: passphrase,
@@ -386,16 +376,33 @@ public final class KeyStore {
 
     /// Deletes an account including its key if the password is correct.
     public func delete(account: Account, password: String) throws {
+        try removeAccount(account, password: password) { try FileManager.default.removeItem(at: $0) }
+    }
+
+    /// Moves the authenticated file to an unused sibling URL before unregistering the account.
+    /// The caller owns the backup until commit or rollback. A visible backup in the
+    /// key directory can be loaded as an account when the store is reopened.
+    public func moveToDeletionBackup(account: Account, password: String, backupURL: URL,
+                                     fileManager: FileManager = .default) throws {
+        try removeAccount(account, password: password) { source in
+            guard backupURL.isFileURL, source.standardizedFileURL != backupURL.standardizedFileURL,
+                  source.deletingLastPathComponent().standardizedFileURL == backupURL.deletingLastPathComponent().standardizedFileURL else {
+                throw CocoaError(.fileWriteInvalidFileName)
+            }
+            try fileManager.moveItem(at: source, to: backupURL)
+        }
+    }
+
+    private func removeAccount(_ account: Account, password: String, removeFile: (URL) throws -> Void) throws {
         mutationLock.lock()
         defer { mutationLock.unlock() }
 
-        let (key, storedAccount) = try withStateLock { () -> (KeystoreKey, Account) in
-            guard let key = keysByAddress[account.address],
-                  let storedAccount = accountsByAddress[account.address] else {
-                throw DecryptError.missingAccountKey
-            }
-            return (key, storedAccount)
+        guard let storedAccount = withStateLock({ accountsByAddress[account.address] }) else {
+            throw DecryptError.missingAccountKey
         }
+        let original = try Data(contentsOf: storedAccount.url)
+        let key = try JSONDecoder().decode(KeystoreKey.self, from: original)
+        guard key.address == account.address else { throw Error.invalidKey }
         var decryptedKey = try key.decrypt(password: password)
         decryptedKey.resetBytes(in: 0..<decryptedKey.count)
 
@@ -403,7 +410,21 @@ public final class KeyStore {
             guard !hasUnreadableAccounts else {
                 throw CocoaError(.fileReadUnknown)
             }
-            try FileManager.default.removeItem(at: storedAccount.url)
+            // A second file may have appeared since this store loaded the account.
+            let urls = try FileManager.default.contentsOfDirectory(at: keyDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            for url in urls where url.standardizedFileURL != storedAccount.url.standardizedFileURL {
+                if try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true { continue }
+                let data = try Data(contentsOf: url)
+                if let other = try? JSONDecoder().decode(KeystoreKey.self, from: data),
+                   other.address == account.address {
+                    throw Error.accountAlreadyExists
+                }
+            }
+            guard try Data(contentsOf: storedAccount.url) == original else {
+                throw Error.invalidKey
+            }
+            try removeFile(storedAccount.url)
             keysByAddress[account.address] = nil
             accountsByAddress[account.address] = nil
         }
@@ -564,6 +585,7 @@ extension KeyStore {
     /// Generate an address with mnemonic derivationPath.
     /// `password` is the BIP39 passphrase. Use the same normalization when importing the wallet.
     public func generateWalletAddress(derivationPath:String = Wallet.defaultPath,mnemonic:String,password:String = "", normalization: Mnemonic.Normalization = .bip39) throws -> Address{
+        guard Mnemonic.isValid(mnemonic) else { throw Error.invalidMnemonic }
         let wallet = try Wallet(mnemonic: mnemonic, passphrase: password, path: derivationPath, normalization: normalization)
         let pubKey = try wallet.getKey(at: 0).publicKey
         return try KeystoreKey.decodeAddress(from: pubKey)

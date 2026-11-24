@@ -78,12 +78,12 @@ public extension Data {
     }
     
     /// - Parameter separateEvery: Position where separator should be inserted.
-    /// Counts per byte (not per character)
+    /// Counts bytes. A nonpositive interval returns ungrouped hex.
     /// - Parameter separator: Separator string
     /// - Returns: Hex representation of data
     func hex(separateEvery: Int, separator: String = " ") -> String {
+        guard separateEvery > 0 else { return hex }
         var string = ""
-        string.reserveCapacity(count*2+count/separateEvery*separator.count)
         var separateCount = separateEvery
         withUnsafeBytes { (bytes: UnsafePointer<UInt8>) in
             for i in 0..<count {

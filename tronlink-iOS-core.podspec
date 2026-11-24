@@ -12,37 +12,37 @@ Pod::Spec.new do |s|
   s.swift_versions = '4.2'
   s.framework = 'Security'
 
-  s.source_files = 'tronlink-iOS-core/Classes/**/*.{h,m,c,swift}'
+  api_headers = [
+    'tronlink-iOS-core/Classes/TLCore-umbrella.h',
+    'tronlink-iOS-core/Classes/ABI/ObjectiveC/*.h',
+    'tronlink-iOS-core/Classes/gRPC/**/*.h'
+  ]
+  s.public_header_files = api_headers
+  s.source_files = api_headers + [
+    'tronlink-iOS-core/Classes/**/*.swift',
+    'tronlink-iOS-core/Classes/{ABI/ObjectiveC,gRPC}/**/*.m'
+  ]
+  trezor_root = 'tronlink-iOS-core/Classes/ABI/TrezorCrypto'
+  trezor_headers = "#{trezor_root}/trezor-crypto"
   s.preserve_paths = [
-    'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/*.table',
-    'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/LICENSE',
+    "#{trezor_root}/Internal/module.modulemap",
+    "#{trezor_headers}/*.table",
+    "#{trezor_headers}/LICENSE",
     'ThirdPartyLicenses/*'
   ]
   s.module_map = 'tronlink-iOS-core/TLCore.modulemap'
 
-  trezor_headers = 'tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto'
-  s.private_header_files = [
-    "#{trezor_headers}/nem_serialize.h",
-    "#{trezor_headers}/bip39_english.h",
-    "#{trezor_headers}/blake2_common.h",
-    "#{trezor_headers}/check_mem.h",
-    "#{trezor_headers}/groestl_internal.h",
-    "#{trezor_headers}/aes/aesopt.h",
-    "#{trezor_headers}/aes/aestab.h",
-    "#{trezor_headers}/chacha20poly1305/ecrypt-machine.h",
-    "#{trezor_headers}/chacha20poly1305/ecrypt-portable.h",
-    "#{trezor_headers}/chacha20poly1305/poly1305-donna-32.h",
-    "#{trezor_headers}/ed25519-donna/curve25519-donna-scalarmult-base.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-hash-custom.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-hash-custom-keccak.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-hash-custom-sha3.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-keccak.h",
-    "#{trezor_headers}/ed25519-donna/ed25519-sha3.h"
-  ]
+  s.subspec 'Trezor' do |crypto|
+    crypto.source_files = "#{trezor_root}/**/*.{h,c,m}"
+    crypto.project_header_files = "#{trezor_root}/**/*.h"
+    crypto.compiler_flags = '-fvisibility=$(TLCORE_TREZOR_VISIBILITY)'
+  end
 
   trezor = "$(PODS_TARGET_SRCROOT)/#{trezor_headers}"
   s.pod_target_xcconfig = {
     'HEADER_SEARCH_PATHS' => "$(inherited) \"#{trezor}\" \"#{trezor}/aes\" \"#{trezor}/chacha20poly1305\" \"#{trezor}/ed25519-donna\"",
+    'SWIFT_INCLUDE_PATHS' => "$(inherited) \"$(PODS_TARGET_SRCROOT)/#{trezor_root}/Internal\"",
+    'TLCORE_TREZOR_VISIBILITY' => 'hidden',
     'OTHER_CFLAGS' => '$(inherited) -O3',
     'SWIFT_OPTIMIZATION_LEVEL[config=Debug]' => '-Owholemodule'
   }

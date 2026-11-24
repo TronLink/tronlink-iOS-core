@@ -20,7 +20,11 @@ public struct Function: Equatable, CustomStringConvertible {
         if values.count != parameters.count {
             throw ABIError.invalidNumberOfArguments
         }
-        return try zip(parameters, values).map({ try ABIValue($1, type: $0) })
+        return try zip(parameters, values).map { type, argument in
+            let value = try ABIValue(argument, type: type)
+            try value.validate(asArgument: true)
+            return value
+        }
     }
 
     /// Function signature

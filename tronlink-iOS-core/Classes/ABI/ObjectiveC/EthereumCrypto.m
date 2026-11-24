@@ -1,6 +1,6 @@
 
 #import "EthereumCrypto.h"
-#import "TrezorCrypto.h"
+#import "../TrezorCrypto/TrezorCrypto.h"
 
 /// scalar_multiply() only guards 0 < k < order with assert(), which NDEBUG compiles out.
 static BOOL isValidPrivateKeyData(NSData *privateKey) {
@@ -45,6 +45,12 @@ static BOOL isValidPublicKeyData(NSData *publicKey) {
         ecdsa_get_public_key65(&secp256k1, privateKey.bytes, publicKey.mutableBytes);
     }
     return publicKey;
+}
+
++ (BOOL)isValidUncompressedPublicKey:(nonnull NSData *)publicKey {
+    if (publicKey.length != 65 || ((const uint8_t *)publicKey.bytes)[0] != 0x04) return NO;
+    curve_point point;
+    return ecdsa_read_pubkey(&secp256k1, publicKey.bytes, &point) == 1;
 }
 
 + (nonnull NSData *)uncompressPublicKey:(nonnull NSData *)publicKey {

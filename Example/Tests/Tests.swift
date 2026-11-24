@@ -1,6 +1,7 @@
 import XCTest
 import GRPCClient
 @testable import TLCore
+import TLCoreTrezorInternal
 
 private final class AddressMappingStoreStub: TRXAddressMappingStore {
     var loadResult: [String: String]?
@@ -1218,7 +1219,7 @@ final class SingleTLCorePublicAPITests: XCTestCase {
         try encoder.encode(BigUInt(42))
         XCTAssertEqual(encoder.data.count, 32)
 
-        let privateKey = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let privateKey = try PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
         try privateKey.verify()
         XCTAssertTrue(privateKey.address.isValid)
         XCTAssertNotNil(ABIv2Encoder.encode(types: [.uint(bits: 256)], values: [BigUInt(42) as AnyObject]))
@@ -1657,7 +1658,7 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
     private let messageHash = Data(repeating: 0x11, count: 32)
 
     func testPrivateKeySignAndRecoverMatchesGoldenValues() throws {
-        let key = TLCore.PrivateKey(privateKeyData)
+        let key = try TLCore.PrivateKey(privateKeyData)
         try key.verify()
         XCTAssertEqual(key.publicKey.hex,
                        "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
@@ -1723,7 +1724,7 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
     }
 
     func testPersonalRecoveryBindsSignatureToOriginalMessage() throws {
-        let key = TLCore.PrivateKey(privateKeyData)
+        let key = try TLCore.PrivateKey(privateKeyData)
         let message = Data("0ab".utf8)
         let wrappedMessage = Data("\u{19}Ethereum Signed Message:\n30ab".utf8)
         let signature = try key.sign(hash: EthereumCrypto.hash(wrappedMessage))
@@ -1818,6 +1819,11 @@ final class EmbeddedWeb3GoldenTests: XCTestCase {
             let data = try JSONSerialization.data(withJSONObject: object)
             let log = try JSONDecoder().decode(TLCore.EventLog.self, from: data)
             XCTAssertEqual(log.removed, expected, "removed: \(String(describing: removed))")
+        }
+        for value: Any in [1 as Any, [1] as Any, ["value": true] as Any] {
+            object["removed"] = value
+            let data = try JSONSerialization.data(withJSONObject: object)
+            XCTAssertThrowsError(try JSONDecoder().decode(TLCore.EventLog.self, from: data))
         }
         // Preserve the existing failure for malformed legacy hex strings.
         object["removed"] = "not-hex"
@@ -2195,6 +2201,38 @@ final class ABIValueBoundsTests: XCTestCase {
         XCTAssertEqual(encoder.data, Data([0xde, 0xad]))
     }
 
+    func testExternalFunctionOccupiesOneSlotAndCallsRemainTopLevel() throws {
+        let transfer = Function(name: "transfer", parameters: [.address, .uint(bits: 256)])
+        let use = Function(name: "use", parameters: [.function(transfer)])
+        let bytes = Data(repeating: 0x11, count: 20) + Data([0xa9, 0x05, 0x9c, 0xbb])
+        let encoder = ABIEncoder()
+        try encoder.encode(function: use, arguments: [bytes])
+        let expected = Data([0x29, 0x24, 0x97, 0xd3]) + bytes + Data(repeating: 0, count: 8)
+        XCTAssertEqual(encoder.data, expected)
+        XCTAssertThrowsError(try encoder.encode(function: use, arguments: [Data()]))
+        XCTAssertThrowsError(try encoder.encode(tuple: [.function(use, [.externalFunction(transfer, bytes)])]))
+        XCTAssertThrowsError(try encoder.encode(tuple: [.bool(true), .address(Address(data: Data()))]))
+        XCTAssertEqual(encoder.data, expected)
+    }
+
+    func testGroupingAndChunkSizeBoundaries() {
+        let data = Data([1, 2, 3, 4])
+        XCTAssertEqual(data.hex(separateEvery: 2, separator: "-"), "0102-0304-")
+        for size in [0, Int.min] {
+            XCTAssertEqual(data.hex(separateEvery: size), "01020304")
+            XCTAssertTrue([1, 2].split(intoChunksOf: size).isEmpty)
+        }
+        XCTAssertEqual([1, 2, 3].split(intoChunksOf: 2), [[1, 2], [3]])
+        XCTAssertEqual([1, 2, 3].split(intoChunksOf: Int.max), [[1, 2, 3]])
+    }
+
+    func testInvalidIdentityAndOffCurveCoordinatesThrow() {
+        XCTAssertThrowsError(try PrivateKey(Data(repeating: 0, count: 32)))
+        let coordinates = Data(repeating: 0, count: 64)
+        XCTAssertThrowsError(try Web3Utils.publicToAddressData(coordinates))
+        XCTAssertThrowsError(try Web3Utils.publicToAddressData(Data([4]) + coordinates))
+    }
+
     func testRawSignedEncoderRejectsOverflowAndNormalizesNegativeZero() throws {
         let limit = BigInt(1) << 255
         for value in [limit, -limit - 1] {
@@ -2297,6 +2335,14 @@ final class DerivationPathIndexTests: XCTestCase {
                        "b5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28")
     }
 
+    func testDefaultWalletDerivesTheRequestedFinalIndex() throws {
+        let wallet = try Wallet(mnemonic: mnemonic)
+        let explicit = try Wallet(mnemonic: mnemonic, path: "m/44'/195'/0'/0/1")
+        XCTAssertEqual(try wallet.getKey(at: 1).privateKey, try explicit.getKey(at: 0).privateKey)
+        XCTAssertNotEqual(try wallet.getKey(at: 0).privateKey, try wallet.getKey(at: 1).privateKey)
+        XCTAssertThrowsError(try explicit.getKey(at: 1))
+    }
+
     func testLegacyEncodedHardenedPathsPreserveDerivedKeys() throws {
         let paths = [
             ("m/44'/195'/2147483648'/0/0", "m/44'/195'/0'/0/0"),
@@ -2341,6 +2387,82 @@ final class EmbeddedKeystoreTests: XCTestCase {
             try? FileManager.default.removeItem(at: keyDirectory)
         }
         super.tearDown()
+    }
+
+    func testDeleteRefusesAnAccountDuplicatedAfterLoading() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let copy = keyDirectory.appendingPathComponent("second.json")
+        try FileManager.default.copyItem(at: account.url, to: copy)
+        XCTAssertThrowsError(try store.delete(account: account, password: password))
+        let backup = account.url.appendingPathExtension("backup")
+        XCTAssertThrowsError(try store.moveToDeletionBackup(account: account, password: password, backupURL: backup))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        for url in [account.url, copy] { XCTAssertTrue(FileManager.default.fileExists(atPath: url.path)) }
+        try FileManager.default.removeItem(at: copy)
+        try store.delete(account: account, password: password)
+        XCTAssertTrue(try KeyStore(keyDirectory: keyDirectory).accounts.isEmpty)
+    }
+
+    func testDeletionBackupMovesOnlyAnAuthenticatedFileToAnUnusedSibling() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let original = try Data(contentsOf: account.url)
+        let backup = account.url.appendingPathExtension("backup")
+        let outside = keyDirectory.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        XCTAssertThrowsError(try store.moveToDeletionBackup(account: account, password: password, backupURL: outside))
+        XCTAssertThrowsError(try store.moveToDeletionBackup(account: account, password: "incorrect", backupURL: backup))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        let existing = Data("occupied".utf8)
+        try existing.write(to: backup)
+        XCTAssertThrowsError(try store.moveToDeletionBackup(account: account, password: password, backupURL: backup))
+        XCTAssertEqual(try Data(contentsOf: backup), existing)
+        XCTAssertEqual(try Data(contentsOf: account.url), original)
+        XCTAssertEqual(store.account(for: account.address)?.url, account.url)
+        try FileManager.default.removeItem(at: backup)
+
+        try store.moveToDeletionBackup(account: account, password: password, backupURL: backup)
+        XCTAssertEqual(try Data(contentsOf: backup), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.url.path))
+        XCTAssertNil(store.account(for: account.address))
+    }
+
+    func testPreviewAndImportRejectTheSameInvalidMnemonic() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let invalid = Array(repeating: "abandon", count: 12).joined(separator: " ")
+        XCTAssertThrowsError(try store.generateWalletAddress(mnemonic: invalid))
+        XCTAssertThrowsError(try store.import(mnemonic: invalid, encryptPassword: password))
+        let preview = try store.generateWalletAddress(mnemonic: mnemonic)
+        XCTAssertEqual(try store.import(mnemonic: mnemonic, encryptPassword: password).address, preview)
+    }
+
+    func testLoadedKeyMustMatchAddressForSigningExportAndPasswordChange() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let original = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        var key = try XCTUnwrap(store.key(for: original.address))
+        key.address = Address(data: Data([0x41]) + Data(repeating: 1, count: 20))
+        let saved = try JSONEncoder().encode(key)
+        try saved.write(to: original.url)
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(reopened.account(for: key.address))
+        let digest = Data(repeating: 1, count: 32)
+        XCTAssertThrowsError(try reopened.signHash(digest, account: account, password: password))
+        XCTAssertThrowsError(try reopened.signHashes([digest], account: account, password: password))
+        XCTAssertThrowsError(try reopened.exportPrivateKey(account: account, password: password))
+        XCTAssertThrowsError(try reopened.exportMnemonic(account: account, password: password))
+        XCTAssertThrowsError(try reopened.export(account: account, password: password, newPassword: password))
+        XCTAssertThrowsError(try reopened.update(account: account, password: password, newPassword: "updated"))
+        XCTAssertEqual(try Data(contentsOf: original.url), saved)
+    }
+
+    func testSharedScryptMatchesIndependentDerivations() throws {
+        let params = try ScryptParams(salt: Data("NaCl".utf8), n: 32, r: 1, p: 1, desiredKeyLength: 32)
+        let passwords = ["first", "second", "third", "fourth"]
+        let expected = try passwords.map { try Scrypt(params: params).calculate(password: $0) }
+        let shared = Scrypt(params: params)
+        DispatchQueue.concurrentPerform(iterations: passwords.count) { index in
+            XCTAssertEqual(try? shared.calculate(password: passwords[index]), expected[index])
+        }
     }
 
     func testPrivateKeyExportSurvivesHDNodeCleanup() throws {
@@ -4214,6 +4336,19 @@ final class ABIv2RegressionTests: XCTestCase {
         XCTAssertNil(TLCore.ABIv2Decoder.decode(types: [impossibleStaticArray], data: word(1)))
     }
 
+    func testEventAliasesPreserveMetadataAndPositions() throws {
+        let json = """
+        {"type":"event","name":"Note","anonymous":true,"inputs":[
+        {"name":"name","type":"uint256","indexed":false},{"name":"0","type":"uint256","indexed":false}]}
+        """
+        guard case let .event(event) = try parseRecord(json) else { return XCTFail("Expected event") }
+        let log = try eventLog(data: words([7, 9]), topics: [])
+        let result = try XCTUnwrap(TLCore.ABIv2Decoder.decodeLog(event: event, eventLog: log))
+        XCTAssertEqual(result["name"] as? String, "Note")
+        XCTAssertEqual(result["0"] as? BigUInt, 7)
+        XCTAssertEqual(result["1"] as? BigUInt, 9)
+    }
+
     func testAnonymousEventDoesNotRequireSignatureTopic() throws {
         let json = """
         {"type":"event","name":"Note","anonymous":true,"inputs":[{"name":"n","type":"uint256","indexed":false}]}
@@ -5369,7 +5504,7 @@ final class DataSliceInputRegressionTests: XCTestCase {
             "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc44626"
                 + "aa772b878bc912bdbb33a0014ec507c4b3896ea85aa914b74dee9b7ac3e56da01"
         ))
-        let key = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let key = try PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
         for recoveryID: UInt8 in [1, 28] {
             let input = Data(signature.prefix(64)) + Data([recoveryID])
             for offset in [0, 1, 17, 80] {
@@ -5388,7 +5523,7 @@ final class DataSliceInputRegressionTests: XCTestCase {
     }
 
     func testPersonalRecoveryAcceptsMessageAndSignatureSlices() throws {
-        let key = PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let key = try PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
         let message = Data("core-203".utf8)
         let signature = try key.sign(hash: Web3Utils.hashPersonalMessage(message)).data
         XCTAssertEqual(try Web3Utils.personalECRecover(message, signature: signature), key.address)
@@ -5437,7 +5572,7 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
 
     func testChangingInputDataCannotChangeAnExistingSigningIdentity() throws {
         var input = firstKey
-        let key = PrivateKey(input)
+        let key = try PrivateKey(input)
         input[input.index(before: input.endIndex)] = 2
 
         XCTAssertEqual(input, secondKey)
@@ -5447,14 +5582,14 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
     }
 
     func testSwitchingAccountsUsesIndependentObjectsWithConsistentIdentities() throws {
-        var selected = PrivateKey(firstKey)
+        var selected = try PrivateKey(firstKey)
         let previous = selected
         let previousPublicKey = previous.publicKey
         let previousAddress = previous.address
 
         // CORE-204: changing privateKey/publicKey/address directly is no longer
         // permitted by the public API. Replace the selected object instead.
-        selected = PrivateKey(secondKey)
+        selected = try PrivateKey(secondKey)
         let expectedPublicKey = try Web3Utils.privateToPublic(secondKey)
         let expectedAddress = try Web3Utils.publicToAddress(expectedPublicKey)
         XCTAssertNotEqual(previousAddress, expectedAddress)
@@ -5473,7 +5608,7 @@ final class PrivateKeyIdentityRegressionTests: XCTestCase {
     }
 
     func testMutatingReturnedValuesCannotOverwriteCachedIdentity() throws {
-        let key = PrivateKey(firstKey)
+        let key = try PrivateKey(firstKey)
         let expectedPublicKey = key.publicKey
         var publicKeyCopy = key.publicKey
         publicKeyCopy[publicKeyCopy.startIndex] = 0
@@ -6497,7 +6632,7 @@ final class Blake256EmptyUpdateRegressionTests: XCTestCase {
     }
 
     private func streamedHasher(_ chunks: [[UInt8]], type: HasherType) -> [UInt8] {
-        var hasher = TLCore.Hasher()
+        var hasher = TLCoreTrezorInternal.Hasher()
         hasher_Init(&hasher, type)
         for chunk in chunks {
             if chunk.isEmpty {

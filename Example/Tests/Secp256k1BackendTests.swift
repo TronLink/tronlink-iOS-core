@@ -1,6 +1,7 @@
 import XCTest
 import BigInt
 @testable import TLCore
+import TLCoreTrezorInternal
 
 final class Secp256k1BackendTests: XCTestCase {
     private struct DeterministicVector {
@@ -38,7 +39,7 @@ final class Secp256k1BackendTests: XCTestCase {
     }
 
     func testCurrentBackendMatchesFixedSignatureVector() throws {
-        let key = TLCore.PrivateKey(privateKey)
+        let key = try TLCore.PrivateKey(privateKey)
         let signature = try key.sign(hash: messageHash)
 
         XCTAssertEqual(signature.data.hex, signatureHex)
@@ -140,7 +141,7 @@ final class Secp256k1BackendTests: XCTestCase {
             let buffer = Data(repeating: 0xa5, count: 17) + valid
             let sliced = buffer[17 ..< buffer.endIndex]
             XCTAssertEqual(try TLCore.Web3Utils.hashECRecover(hash: messageHash, signature: sliced),
-                           TLCore.PrivateKey(privateKey).address)
+                           try TLCore.PrivateKey(privateKey).address)
         }
     }
 
@@ -268,7 +269,7 @@ final class Secp256k1BackendTests: XCTestCase {
                 recoveryID: recoveryID,
                 compressed: false
             )
-            let facadeKey = TLCore.PrivateKey(vector.privateKey)
+            let facadeKey = try TLCore.PrivateKey(vector.privateKey)
             let facadeSignature = try facadeKey.sign(hash: vector.hash).data
             let compressed = try XCTUnwrap(TrezorSecp256k1Backend.privateToPublic(
                 vector.privateKey,
@@ -684,7 +685,7 @@ final class ECDSADigestVerificationTests: XCTestCase {
 
     func testPublicKeyOnlyForgeryForZeroModuloDigestsIsRejected() throws {
         let order = try XCTUnwrap(Data.fromHex(try XCTUnwrap(vectors.first).order))
-        let publicKey = TLCore.PrivateKey(Data(repeating: 0x11, count: 32)).publicKey
+        let publicKey = try TLCore.PrivateKey(Data(repeating: 0x11, count: 32)).publicKey
         // t = 1: r = Q.x and s = r make (r/s)*Q = Q, so x(Q) = r without the private key.
         let forged = Data(publicKey[1 ..< 33]) + Data(publicKey[1 ..< 33])
         for digest in [zero, order] {
@@ -744,7 +745,7 @@ final class ECDSADigestVerificationTests: XCTestCase {
     func testGeneratedSignaturesVerifyExceptForZeroModuloDigests() throws {
         let vector = try XCTUnwrap(vectors.first)
         let order = try XCTUnwrap(Data.fromHex(vector.order))
-        let key = TLCore.PrivateKey(one)
+        let key = try TLCore.PrivateKey(one)
         let ordinaryHash = Data(repeating: 0x11, count: 32)
         for digest in [zero, order, one, Data(repeating: 0xff, count: 32), ordinaryHash] {
             let signature = try key.sign(hash: digest).data
@@ -846,7 +847,7 @@ final class SignatureLayoutRegressionTests: XCTestCase {
     }
 
     func testSoftwareSigningKeepsTheExistingSignatureAndComponents() throws {
-        let key = TLCore.PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
+        let key = try TLCore.PrivateKey(Data(repeating: 0, count: 31) + Data([1]))
         let signature = try key.sign(hash: Data(repeating: 0x11, count: 32))
         try signature.check()
         let r = "e7c93726a865578504442b1a6827f676e0ed74bdff2be3960d1e253bbcfc4462"

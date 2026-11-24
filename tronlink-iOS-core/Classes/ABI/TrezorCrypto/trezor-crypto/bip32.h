@@ -50,6 +50,7 @@ typedef struct {
 	uint8_t private_key_extension[32];
 
 	uint8_t public_key[33];
+	uint8_t public_only;  // Set by public import and public child derivation.
 	const curve_info *curve;
 } HDNode;
 

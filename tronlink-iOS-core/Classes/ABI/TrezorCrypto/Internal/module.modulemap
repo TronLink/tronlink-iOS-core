@@ -1,0 +1,4 @@
+module TLCoreTrezorInternal {
+  header "../TrezorCrypto.h"
+  export *
+}

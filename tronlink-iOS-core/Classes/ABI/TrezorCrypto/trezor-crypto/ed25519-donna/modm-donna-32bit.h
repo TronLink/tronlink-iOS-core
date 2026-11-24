@@ -40,6 +40,8 @@ void sub256_modm(bignum256modm r, const bignum256modm x, const bignum256modm y);
 /* multiplication modulo m */
 void mul256_modm(bignum256modm r, const bignum256modm x, const bignum256modm y);
 
+/* Up to 64 input bytes. Checked form returns 1 on success, 0 on failure. */
+int expand256_modm_checked(bignum256modm out, const unsigned char *in, size_t len);
 void expand256_modm(bignum256modm out, const unsigned char *in, size_t len);
 
 void expand_raw256_modm(bignum256modm out, const unsigned char in[32]);

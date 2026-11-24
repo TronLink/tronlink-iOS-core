@@ -1,4 +1,4 @@
-
+@_implementationOnly import TLCoreTrezorInternal
 import CryptoSwift
 import Foundation
 
@@ -12,6 +12,7 @@ public final class Scrypt {
     /// Configuration parameters.
     public let params: ScryptParams
 
+    private let calculationLock = NSLock()
     private var salsaBlock = [UInt32](repeating: 0, count: 16)
 
     /// Initializes `Scrypt` with configuration parameters.
@@ -21,6 +22,8 @@ public final class Scrypt {
 
     /// Runs the key derivation function with a specific password.
     public func calculate(password: String) throws -> Data {
+        calculationLock.lock()
+        defer { calculationLock.unlock() }
         guard let passwordData = password.data(using: .utf8) else {
             throw Error.invalidPassword
         }

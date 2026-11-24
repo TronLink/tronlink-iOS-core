@@ -168,7 +168,7 @@ void nem_transaction_start(nem_transaction_ctx *ctx, const ed25519_public_key pu
 
 size_t nem_transaction_end(nem_transaction_ctx *ctx, const ed25519_secret_key private_key, ed25519_signature signature) {
 	if (private_key != NULL && signature != NULL) {
-		ed25519_sign_keccak(ctx->buffer, ctx->offset, private_key, ctx->public_key, signature);
+		if (ed25519_sign_checked_keccak(ctx->buffer, ctx->offset, private_key, ctx->public_key, signature) != 0) return 0;
 	}
 
 	return ctx->offset;

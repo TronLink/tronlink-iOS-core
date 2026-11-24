@@ -17,6 +17,16 @@ public final class ABIEncoder: Codable {
     /// Encodes an `ABIValue`
     public func encode(_ value: ABIValue) throws {
         try value.validate()
+        let initialCount = data.count
+        do {
+            try append(value)
+        } catch {
+            data.removeLast(data.count - initialCount)
+            throw error
+        }
+    }
+
+    private func append(_ value: ABIValue) throws {
         switch value {
         case .uint(_, let value):
             try encode(value)
@@ -32,28 +42,33 @@ public final class ABIEncoder: Codable {
             try encode(value)
         case .bytes(let data):
             try encode(data, static: true)
+        case .externalFunction(_, let reference):
+            try encode(reference, static: true)
         case .function(let f, let args):
             try encode(signature: f.description)
-            try encode(tuple: args)
+            try appendTuple(args)
         case .array(_, let array):
-            try encode(tuple: array)
+            try appendTuple(array)
         case .dynamicBytes(let data):
             try encode(data, static: false)
         case .string(let string):
             try encode(string)
         case .dynamicArray(_, let array):
             try encode(array.count)
-            try encode(tuple: array)
+            try appendTuple(array)
         case .tuple(let array):
-            try encode(tuple: array)
+            try appendTuple(array)
         }
     }
 
     /// Encodes a tuple
     public func encode(tuple: [ABIValue]) throws {
+        try encode(.tuple(tuple))
+    }
+
+    private func appendTuple(_ tuple: [ABIValue]) throws {
         var headSize = 0
         for subvalue in tuple {
-            try subvalue.validate()
             if subvalue.isDynamic {
                 headSize += 32
             } else {
@@ -67,20 +82,19 @@ public final class ABIEncoder: Codable {
                 try encode(headSize + dynamicOffset)
                 dynamicOffset += subvalue.length
             } else {
-                try encode(subvalue)
+                try append(subvalue)
             }
         }
 
         for subvalue in tuple where subvalue.isDynamic {
-            try encode(subvalue)
+            try append(subvalue)
         }
     }
 
     /// Encodes a function call
     public func encode(function: Function, arguments: [Any]) throws {
         let values = try function.castArguments(arguments)
-        try encode(signature: function.description)
-        try encode(tuple: values)
+        try encode(.function(function, values))
     }
 
     /// Encodes a boolean field.
