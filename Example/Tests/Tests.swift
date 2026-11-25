@@ -868,6 +868,32 @@ class Tests: XCTestCase {
         XCTAssertFalse("Tnotanaddress".isEIP712TronAddress())
     }
 
+    func testAddressHexRequiresASCIIHexDigitsForEveryByte() {
+        let body = "0A" + String(repeating: "bc", count: 19)
+        let bytes = Data([0x41, 0x0a] + Array(repeating: UInt8(0xbc), count: 19))
+        let base58 = String(base58CheckEncoding: bytes)
+
+        for prefix in ["", "0x", "0X"] {
+            let address = prefix + "41" + body
+            XCTAssertEqual(address.hexDecodedData(), bytes)
+            XCTAssertEqual(address.convertBase58HexAddressToTronAddress(), base58)
+            XCTAssertTrue(address.isEIP712TronAddress())
+            XCTAssertEqual(address.convertEIP712TronAddress(), body)
+            XCTAssertNil(prefix.hexDecodedData())
+
+            for invalidPair in ["+A", "-0", " A", "ＡA"] {
+                let malformed = prefix + "41" + invalidPair + String(body.dropFirst(2))
+                XCTAssertNil(malformed.hexDecodedData())
+                XCTAssertFalse(malformed.isEIP712TronAddress())
+                XCTAssertEqual(malformed.convertBase58HexAddressToTronAddress(), "")
+            }
+        }
+        XCTAssertEqual("0X0000fF".hexDecodedData(), Data([0, 0, 255]))
+        for invalid in ["0X0x01", "0x0X01", "0X0", "00\n0"] {
+            XCTAssertNil(invalid.hexDecodedData())
+        }
+    }
+
     func testHexValidationRejectsTrailingLineTerminators() {
         // ICU lets `$` match before a final line terminator, so `^...$` accepted these.
         XCTAssertFalse("ABCDEF\r\n".isSignStringHexEncoded)
