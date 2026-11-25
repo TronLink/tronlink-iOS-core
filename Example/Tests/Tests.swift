@@ -1390,6 +1390,24 @@ final class TwosComplementDecodingBoundaryTests: XCTestCase {
 }
 
 final class BigIntegerAmountFormattingBoundaryTests: XCTestCase {
+    func testTokenPrecisionBoundaryForParsingAndFormatting() throws {
+        let lastUnit = "0." + String(repeating: "0", count: 254) + "1"
+        XCTAssertEqual(BigUInt(lastUnit, decimals: 255), BigUInt(1))
+        XCTAssertEqual(BigUInt(1).string(unitDecimals: 255, decimals: Int.max), lastUnit)
+        XCTAssertEqual(BigInt(-1).string(unitDecimals: 255, decimals: Int.max), "-" + lastUnit)
+        let natural = try NaturalUnits("1")
+        XCTAssertEqual(try natural.number(with: 255).description, "1" + String(repeating: "0", count: 255))
+
+        for invalid in [256, 257] {
+            XCTAssertNil(BigUInt("0", decimals: invalid))
+            XCTAssertNil(BigUInt("1", decimals: invalid))
+            XCTAssertEqual(BigUInt(0).string(unitDecimals: invalid), "")
+            XCTAssertEqual(BigUInt(1).string(unitDecimals: invalid, decimals: 2), "")
+            XCTAssertEqual(BigInt(-1).string(unitDecimals: invalid), "")
+            XCTAssertThrowsError(try natural.number(with: invalid))
+        }
+    }
+
     func testNegativePrecisionReturnsNoNumericValueForUnsignedAndSignedAmounts() {
         for amount in [BigUInt(0), BigUInt(1), BigUInt(1234567)] {
             for invalid in [-1, Int.min] {
