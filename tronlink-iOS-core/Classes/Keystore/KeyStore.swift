@@ -132,7 +132,8 @@ public final class KeyStore {
     
     /// Saves a cached key and registers its account. An existing address must keep its
     /// registered file URL; saving at the same URL supports `addKey` password updates.
-    /// - Throws: `Error.accountAlreadyExists` if the address is registered at another URL.
+    /// - Throws: `Error.accountAlreadyExists` if the address is registered at another URL
+    ///   or a new account's destination is already occupied.
     public func addAccount(account: Account) throws {
         mutationLock.lock()
         defer { mutationLock.unlock() }
@@ -513,8 +514,8 @@ public final class KeyStore {
         }
         // One address has one managed key file. A second path would leave the old key
         // behind after password changes or deletion. Keep same-path updates working.
-        if let storedAccount = accountsByAddress[key.address],
-           storedAccount.url.standardizedFileURL != url.standardizedFileURL {
+        let registeredAccount = accountsByAddress[key.address]
+        if let account = registeredAccount, account.url.standardizedFileURL != url.standardizedFileURL {
             throw Error.accountAlreadyExists
         }
         let json = try JSONEncoder().encode(key)
@@ -531,9 +532,19 @@ public final class KeyStore {
         try handle.write(contentsOf: json)
         try handle.synchronize()
         try handle.close()
-        // Commit only after metadata succeeds; rename preserves it and atomically replaces the key.
-        guard rename(temporaryURL.path, url.path) == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+        // Reserve the destination at commit time. Another store may have created it since load().
+        let result: Int32
+        if registeredAccount == nil {
+            result = renamex_np(temporaryURL.path, url.path, UInt32(RENAME_EXCL))
+        } else {
+            result = rename(temporaryURL.path, url.path)
+        }
+        guard result == 0 else {
+            let code = errno
+            if code == EEXIST && registeredAccount == nil {
+                throw Error.accountAlreadyExists
+            }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: nil)
         }
     }
 

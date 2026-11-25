@@ -2683,6 +2683,33 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertEqual(try updated.exportMnemonic(account: account, password: newPassword), mnemonic)
     }
 
+    func testNewAccountRequiresAnUnusedDestinationAndCanRetry() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        try store.addKey(key: key)
+
+        // This file appeared after the store loaded and has no entry in its account cache.
+        let occupiedURL = keyDirectory.appendingPathComponent("reserved.json")
+        let original = Data("reserved".utf8)
+        try original.write(to: occupiedURL)
+        var account = Account(address: key.address, type: key.type, url: occupiedURL)
+        XCTAssertThrowsError(try store.addAccount(account: account)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else {
+                return XCTFail("Expected accountAlreadyExists, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: occupiedURL), original)
+        XCTAssertNil(store.account(for: key.address))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: keyDirectory.path), ["reserved.json"])
+
+        account.url = keyDirectory.appendingPathComponent("new-account.json")
+        try store.addAccount(account: account)
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let saved = try XCTUnwrap(reloaded.account(for: key.address))
+        XCTAssertEqual(saved.url, account.url)
+        XCTAssertEqual(try reloaded.exportMnemonic(account: saved, password: password), mnemonic)
+    }
+
     func testExistingAccountCannotLeaveASecondKeyFileThroughAddOrUpdate() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
