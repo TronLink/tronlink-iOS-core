@@ -2748,6 +2748,75 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertEqual(importedAgain.address, account.address)
     }
 
+    func testStalePasswordChangePreservesNewPasswordAndCannotRecreateRemovedFile() throws {
+        let current = try KeyStore(keyDirectory: keyDirectory)
+        let account = try current.import(mnemonic: mnemonic, encryptPassword: password)
+        let stale = try KeyStore(keyDirectory: keyDirectory)
+        let newPassword = "current-password"
+        try current.update(account: account, password: password, newPassword: "intermediate-password")
+        try current.update(account: account, password: "intermediate-password", newPassword: newPassword)
+        let committed = try Data(contentsOf: account.url)
+
+        XCTAssertThrowsError(try stale.update(account: account, password: password, newPassword: "other-password")) {
+            XCTAssertEqual(($0 as? CocoaError)?.code, .fileLocking)
+        }
+        XCTAssertEqual(try Data(contentsOf: account.url), committed)
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try reopened.exportMnemonic(account: account, password: newPassword), mnemonic)
+
+        // Wallet management can remove the file directly before replacing its KeyStore instance.
+        try FileManager.default.removeItem(at: account.url)
+        XCTAssertThrowsError(try reopened.update(account: account, password: newPassword, newPassword: password)) {
+            XCTAssertEqual(($0 as? CocoaError)?.code, .fileReadNoSuchFile)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.url.path))
+    }
+
+    func testConcurrentLegacyPasswordChangesPreserveTheWinningPayload() throws {
+        let legacy = try makeLegacyOversizedEncryptedKey()
+        let payload = try legacy.key.decrypt(password: password)
+        let url = keyDirectory.appendingPathComponent("legacy.json")
+        try FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true, attributes: nil)
+        // Historical files need not use today's JSON serialization.
+        try (legacy.json + Data([0x0a])).write(to: url)
+        let stores = [try KeyStore(keyDirectory: keyDirectory), try KeyStore(keyDirectory: keyDirectory)]
+        let account = try XCTUnwrap(stores[0].account(for: legacy.key.address))
+        let passwords = ["first-password", "second-password"]
+        let hash = Data(repeating: 0x42, count: 32)
+        let originalSignature = try stores[0].signHash(hash, account: account, password: password)
+        for (store, newPassword) in zip(stores, passwords) {
+            var key = legacy.key
+            key.crypto = try KeystoreKeyHeader(password: newPassword, data: payload)
+            try store.addKey(key: key)
+        }
+
+        let resultLock = NSLock()
+        var winners = [Int]()
+        DispatchQueue.concurrentPerform(iterations: stores.count) { index in
+            do {
+                try stores[index].addAccount(account: account)
+                resultLock.lock()
+                winners.append(index)
+                resultLock.unlock()
+            } catch {
+                XCTAssertEqual((error as? CocoaError)?.code, .fileLocking)
+            }
+        }
+
+        XCTAssertEqual(winners.count, 1)
+        let winner = try XCTUnwrap(winners.first)
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        let saved = try XCTUnwrap(reopened.key(for: account.address))
+        XCTAssertEqual(try saved.decrypt(password: passwords[winner]), payload)
+        XCTAssertEqual(try reopened.signHash(hash, account: account, password: passwords[winner]), originalSignature)
+
+        // A successful writer can continue updating from the version it just committed.
+        try stores[winner].addKey(key: legacy.key)
+        try stores[winner].addAccount(account: account)
+        let finalStore = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(try finalStore.exportPrivateKey(account: account, password: password), legacy.privateKey)
+    }
+
     func testAddKeyThenAddAccountAtSamePathPreservesWalletAfterPasswordChange() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let account = try store.import(mnemonic: mnemonic,

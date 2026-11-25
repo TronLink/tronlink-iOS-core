@@ -7,8 +7,9 @@ public final class KeyStore {
     /// The key file directory.
     public let keyDirectory: URL
 
-    /// Dictionary of accounts by address.
-    private var accountsByAddress = [Address: Account]()
+    /// Each account retains the digest of the encrypted file it loaded or last saved.
+    /// Staging a replacement with addKey leaves that digest intact.
+    private var accountsByAddress = [Address: (account: Account, fileDigest: Data)]()
 
     /// Dictionary of keys by address.
     private var keysByAddress = [Address: KeystoreKey]()
@@ -87,7 +88,7 @@ public final class KeyStore {
             }
             if accountsByAddress[key.address] == nil {
                 let account = Account(address: key.address, type: key.type, url: url)
-                accountsByAddress[key.address] = account
+                accountsByAddress[key.address] = (account, json.sha256T())
             }
         }
     }
@@ -95,14 +96,14 @@ public final class KeyStore {
     /// List of accounts.
     public var accounts: [Account] {
         return withStateLock {
-            Array(accountsByAddress.values)
+            accountsByAddress.values.map { $0.account }
         }
     }
 
     /// Retrieves an account for the given address, if it exists.
     public func account(for address: Address) -> Account? {
         return withStateLock {
-            accountsByAddress[address]
+            accountsByAddress[address]?.account
         }
     }
 
@@ -123,9 +124,7 @@ public final class KeyStore {
         let account = Account(address: key.address, type: type, url: url)
 
         try withStateLock {
-            try save(key: key, to: url)
-            cache(key)
-            accountsByAddress[key.address] = account
+            try register(account, key: key)
         }
         return account
     }
@@ -134,6 +133,7 @@ public final class KeyStore {
     /// registered file URL; saving at the same URL supports `addKey` password updates.
     /// - Throws: `Error.accountAlreadyExists` if the address is registered at another URL
     ///   or a new account's destination is already occupied.
+    ///   A changed file throws `CocoaError(.fileLocking)`. Reopen the store before retrying.
     public func addAccount(account: Account) throws {
         mutationLock.lock()
         defer { mutationLock.unlock() }
@@ -142,8 +142,7 @@ public final class KeyStore {
             guard let key = keysByAddress[account.address] else {
                 throw DecryptError.missingAccountKey
             }
-            try save(key: key, to: account.url)
-            accountsByAddress[account.address] = account
+            try register(account, key: key)
         }
     }
     
@@ -210,9 +209,7 @@ public final class KeyStore {
             guard accountsByAddress[newKey.address] == nil else {
                 throw Error.accountAlreadyExists
             }
-            try save(key: newKey, to: url)
-            cache(newKey)
-            accountsByAddress[newKey.address] = account
+            try register(account, key: newKey)
         }
 
         return account
@@ -251,9 +248,7 @@ public final class KeyStore {
             guard accountsByAddress[newKey.address] == nil else {
                 throw Error.accountAlreadyExists
             }
-            try save(key: newKey, to: url)
-            cache(newKey)
-            accountsByAddress[newKey.address] = account
+            try register(account, key: newKey)
         }
 
         return account
@@ -331,6 +326,9 @@ public final class KeyStore {
 
     /// Updates the password of an existing account.
     ///
+    /// A changed or missing registered file causes a storage error. Reopen the store to
+    /// load the current account state before retrying.
+    ///
     /// - Parameters:
     ///   - account: account to update, retaining its registered key file URL
     ///   - password: current password
@@ -370,7 +368,8 @@ public final class KeyStore {
             throw Error.invalidKey
         }
         try withStateLock {
-            try save(key: newKey, to: account.url)
+            let digest = try save(key: newKey, to: account.url)
+            accountsByAddress[account.address]?.fileDigest = digest
             cache(newKey)
         }
     }
@@ -398,7 +397,7 @@ public final class KeyStore {
         mutationLock.lock()
         defer { mutationLock.unlock() }
 
-        guard let storedAccount = withStateLock({ accountsByAddress[account.address] }) else {
+        guard let storedAccount = withStateLock({ accountsByAddress[account.address]?.account }) else {
             throw DecryptError.missingAccountKey
         }
         let original = try Data(contentsOf: storedAccount.url)
@@ -422,10 +421,12 @@ public final class KeyStore {
                     throw Error.accountAlreadyExists
                 }
             }
-            guard try Data(contentsOf: storedAccount.url) == original else {
-                throw Error.invalidKey
+            try withCommitLock(for: storedAccount.url) {
+                guard try Data(contentsOf: storedAccount.url) == original else {
+                    throw Error.invalidKey
+                }
+                try removeFile(storedAccount.url)
             }
-            try removeFile(storedAccount.url)
             keysByAddress[account.address] = nil
             accountsByAddress[account.address] = nil
         }
@@ -507,7 +508,28 @@ public final class KeyStore {
         return String(format: "%04d-%02d-%02dT%02d-%02d-%02d.%09d%@", components.year!, components.month!, components.day!, components.hour!, components.minute!, components.second!, components.nanosecond!, tz)
     }
 
-    private func save(key: KeystoreKey, to url: URL) throws {
+    private func register(_ account: Account, key: KeystoreKey) throws {
+        let digest = try save(key: key, to: account.url)
+        accountsByAddress[key.address] = (account, digest)
+        cache(key)
+    }
+
+    // Lock the parent directory: the destination inode changes on every atomic replacement.
+    // Separate opens coordinate writers across instances and processes without a sidecar file.
+    private func withCommitLock(for url: URL, _ body: () throws -> Void) throws {
+        let directory = url.deletingLastPathComponent().path
+        var fd: Int32
+        repeat {
+            fd = open(directory, O_RDONLY | O_DIRECTORY | O_EXLOCK | O_CLOEXEC)
+        } while fd == -1 && errno == EINTR
+        guard fd != -1 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+        }
+        defer { _ = close(fd) }
+        try body()
+    }
+
+    private func save(key: KeystoreKey, to url: URL) throws -> Data {
         // Unknown files may contain the same address; finish loading before changing disk state.
         guard !hasUnreadableAccounts else {
             throw CocoaError(.fileReadUnknown)
@@ -515,7 +537,7 @@ public final class KeyStore {
         // One address has one managed key file. A second path would leave the old key
         // behind after password changes or deletion. Keep same-path updates working.
         let registeredAccount = accountsByAddress[key.address]
-        if let account = registeredAccount, account.url.standardizedFileURL != url.standardizedFileURL {
+        if let registered = registeredAccount, registered.account.url.standardizedFileURL != url.standardizedFileURL {
             throw Error.accountAlreadyExists
         }
         let json = try JSONEncoder().encode(key)
@@ -532,20 +554,22 @@ public final class KeyStore {
         try handle.write(contentsOf: json)
         try handle.synchronize()
         try handle.close()
-        // Reserve the destination at commit time. Another store may have created it since load().
-        let result: Int32
-        if registeredAccount == nil {
-            result = renamex_np(temporaryURL.path, url.path, UInt32(RENAME_EXCL))
-        } else {
-            result = rename(temporaryURL.path, url.path)
-        }
-        guard result == 0 else {
-            let code = errno
-            if code == EEXIST && registeredAccount == nil {
-                throw Error.accountAlreadyExists
+        if let registered = registeredAccount {
+            try withCommitLock(for: url) {
+                let current = try Data(contentsOf: url)
+                guard current.sha256T() == registered.fileDigest else {
+                    throw CocoaError(.fileLocking)
+                }
+                guard rename(temporaryURL.path, url.path) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+                }
             }
+        } else if renamex_np(temporaryURL.path, url.path, UInt32(RENAME_EXCL)) != 0 {
+            let code = errno
+            if code == EEXIST { throw Error.accountAlreadyExists }
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: nil)
         }
+        return json.sha256T()
     }
 
     private func retryDirectoryBackupExclusion() {
