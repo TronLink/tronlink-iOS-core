@@ -398,7 +398,9 @@ extension KeystoreKey: Codable {
         switch try values.decodeIfPresent(String.self, forKey: .type) {
         case TypeString.mnemonic?:
             type = .hierarchicalDeterministicWallet
-            derivationPath = try values.decodeIfPresent(String.self, forKey: .derivationPath) ?? Wallet.defaultPath
+            let storedPath = try values.decodeIfPresent(String.self, forKey: .derivationPath) ?? Wallet.defaultPath
+            // Account operations verify the derived key against the file's address.
+            derivationPath = DerivationPath.restoringStoredPath(storedPath)
         default:
             type = .encryptedKey
         }

@@ -356,13 +356,17 @@ public final class KeyStore {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
-            if let path = derivationPath, path != key.derivationPath {
+            var path = key.derivationPath
+            if let requested = derivationPath, requested != key.derivationPath {
                 _ = try key.verifiedHDMaterial(privateKey)
+                // Older wallet databases can supply the historical spelling during rotation.
+                // The rebuilt key must also match the original address before the write.
+                path = DerivationPath.restoringStoredPath(requested)
             }
             newKey = try KeystoreKey(password: newPassword,
                                       preservingStoredMnemonic: mnemonic,
                                       passphrase: passphrase,
-                                      derivationPath: derivationPath ?? key.derivationPath)
+                                      derivationPath: path)
         }
         guard newKey.address == key.address else {
             throw Error.invalidKey

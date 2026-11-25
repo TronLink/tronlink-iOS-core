@@ -2343,6 +2343,26 @@ final class DerivationPathIndexTests: XCTestCase {
         XCTAssertThrowsError(try explicit.getKey(at: 1))
     }
 
+    func testMissingPathComponentsCannotSelectTheRootOrAShorterPath() throws {
+        let wallet = try Wallet(mnemonic: mnemonic, path: "m")
+        let root = try wallet.getKey(at: 0).publicKey
+        XCTAssertEqual(DerivationPath("m")?.description, "m")
+        for path in ["", "/", "///", "m/", "/0", "0/", "m/m", "0/m/1", "m/44'/195'/0'//0"] {
+            XCTAssertNil(DerivationPath(path), path)
+            wallet.path = path
+            XCTAssertThrowsError(try wallet.getKey(at: 0), path) { error in
+                guard case Wallet.Error.invalidDerivationPath = error else { return XCTFail("Unexpected error: \(error)") }
+            }
+        }
+        wallet.path = "m//x"
+        XCTAssertThrowsError(try wallet.getKey(at: 7))
+        wallet.path = Wallet.defaultPath
+        let standard = try wallet.getKey(at: 0).publicKey
+        XCTAssertNotEqual(standard, root)
+        wallet.path = "44'/195'/0'/0/0"
+        XCTAssertEqual(try wallet.getKey(at: 0).publicKey, standard)
+    }
+
     func testLegacyEncodedHardenedPathsPreserveDerivedKeys() throws {
         let paths = [
             ("m/44'/195'/2147483648'/0/0", "m/44'/195'/0'/0/0"),
@@ -2434,6 +2454,55 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertThrowsError(try store.import(mnemonic: invalid, encryptPassword: password))
         let preview = try store.generateWalletAddress(mnemonic: mnemonic)
         XCTAssertEqual(try store.import(mnemonic: mnemonic, encryptPassword: password).address, preview)
+    }
+
+    func testFreshMnemonicOperationsRejectMissingPathComponents() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        for path in ["", "m/44'/195'/0'//0"] {
+            XCTAssertThrowsError(try store.generateWalletAddress(derivationPath: path, mnemonic: mnemonic))
+            XCTAssertThrowsError(try store.checkingAccountAlreadyExists(mnemonic: mnemonic, derivationPath: path, encryptPassword: password))
+            XCTAssertThrowsError(try store.import(mnemonic: mnemonic, derivationPath: path, encryptPassword: password))
+            XCTAssertThrowsError(try KeystoreKey(password: password, mnemonic: mnemonic, derivationPath: path, normalization: .legacy))
+        }
+        var inconsistent = try KeystoreKey(password: password, mnemonic: mnemonic)
+        inconsistent.derivationPath = ""
+        XCTAssertThrowsError(try store.import(json: JSONEncoder().encode(inconsistent), password: password, newPassword: password)) { error in
+            guard case KeyStore.Error.invalidKey = error else { return XCTFail("Expected address mismatch, got \(error)") }
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: keyDirectory.path).isEmpty)
+    }
+
+    func testHistoricalHDPathsRetainSigningKeysAcrossPasswordChangesAndBackups() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let backupStore = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("restored"))
+        let hash = Data(repeating: 0x34, count: 32)
+        for (stored, effective) in [("", "m"), ("m/44'/195'/0'//0", "m/44'/195'/0'/0")] {
+            let passphrase = "old-passphrase"
+            let expected = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: effective, normalization: .legacy).getKey(at: 0)
+            var key = try KeystoreKey(password: password, mnemonic: mnemonic, passphrase: passphrase, derivationPath: effective)
+            key.derivationPath = stored
+            let file = keyDirectory.appendingPathComponent(key.address.data.hexString + ".json")
+            try JSONEncoder().encode(key).write(to: file)
+
+            let reopened = try KeyStore(keyDirectory: store.keyDirectory)
+            let account = try XCTUnwrap(reopened.account(for: key.address))
+            XCTAssertEqual(try reopened.exportPrivateKey(account: account, password: password), expected.privateKey)
+            let originalFile = try Data(contentsOf: file)
+            XCTAssertThrowsError(try reopened.update(account: account, password: password, newPassword: "rejected", derivationPath: "m//1"))
+            XCTAssertEqual(try Data(contentsOf: file), originalFile)
+            try reopened.update(account: account, password: password, newPassword: "rotated", derivationPath: stored)
+            let rotated = try KeyStore(keyDirectory: store.keyDirectory)
+            XCTAssertThrowsError(try rotated.exportPrivateKey(account: account, password: password))
+            XCTAssertEqual(try rotated.exportMnemonic(account: account, password: "rotated"), mnemonic)
+            let signature = try rotated.signHash(hash, account: account, password: "rotated")
+            XCTAssertTrue(EthereumCrypto.verify(signature: signature, message: hash, publicKey: expected.publicKey))
+            let backup = try rotated.export(account: account, password: "rotated", newPassword: password)
+            let restored = try backupStore.import(json: backup, password: password, newPassword: password)
+            XCTAssertEqual(restored.address, account.address)
+            XCTAssertEqual(try backupStore.exportPrivateKey(account: restored, password: password), expected.privateKey)
+            XCTAssertEqual(try backupStore.generateWalletPath(account: restored), effective)
+        }
     }
 
     func testLoadedKeyMustMatchAddressForSigningExportAndPasswordChange() throws {
