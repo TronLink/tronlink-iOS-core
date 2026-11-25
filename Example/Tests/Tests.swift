@@ -3064,6 +3064,56 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertNotEqual(try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: "ＴＲＥＺＯＲ", normalization: .legacy), expected)
     }
 
+    func testEquivalentMnemonicImportsAndPreviewsTheOriginalAccount() throws {
+        let input = mnemonic.replacingOccurrences(of: "abandon", with: "ａbandon")
+                            .replacingOccurrences(of: " ", with: "\u{3000}")
+        let path = "m/44'/195'/0'/0/3"
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let expected = try KeystoreKey(password: password, mnemonic: mnemonic, passphrase: "TREZOR", derivationPath: path)
+        XCTAssertEqual(try store.generateWalletAddress(derivationPath: path, mnemonic: input, password: "ＴＲＥＺＯＲ"), expected.address)
+        XCTAssertFalse(try store.checkingAccountAlreadyExists(mnemonic: input, passphrase: "ＴＲＥＺＯＲ", derivationPath: path, encryptPassword: password))
+
+        let account = try store.import(mnemonic: input, passphrase: "ＴＲＥＺＯＲ", derivationPath: path, encryptPassword: password)
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertEqual(account.address, expected.address)
+        XCTAssertEqual(try reopened.exportMnemonic(account: account, password: password), mnemonic)
+        XCTAssertEqual(try reopened.exportPrivateKey(account: account, password: password), try expected.privateKey(password: password))
+        for spelling in [mnemonic, input] {
+            XCTAssertThrowsError(try reopened.checkingAccountAlreadyExists(mnemonic: spelling, passphrase: "TREZOR", derivationPath: path, encryptPassword: password)) { error in
+                guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate account") }
+            }
+        }
+        XCTAssertEqual(reopened.accounts.count, 1)
+
+        let digest = Data(repeating: 0x42, count: 32)
+        let signature = try expected.sign(hash: digest, password: password)
+        let newPassword = password + "-updated"
+        try reopened.update(account: account, password: password, newPassword: newPassword)
+        XCTAssertEqual(try reopened.signHash(digest, account: account, password: newPassword), signature)
+        let backup = try reopened.export(account: account, password: newPassword, newPassword: newPassword)
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("restored"))
+        let restored = try target.import(json: backup, password: newPassword, newPassword: password)
+        XCTAssertEqual(restored.address, expected.address)
+        XCTAssertEqual(try target.signHash(digest, account: restored, password: password), signature)
+    }
+
+    func testMnemonicEntryPointsKeepChecksumNulAndLegacyValidation() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let cases: [(String, Mnemonic.Normalization)] = [
+            (mnemonic.replacingOccurrences(of: " ", with: "\u{3000}"), .legacy),
+            (mnemonic.replacingOccurrences(of: "about", with: "ａbandon"), .bip39),
+            (mnemonic + "\u{0}about", .bip39),
+            (mnemonic.replacingOccurrences(of: "about", with: "éabout"), .bip39)
+        ]
+        for (input, mode) in cases {
+            XCTAssertThrowsError(try store.generateWalletAddress(mnemonic: input, normalization: mode))
+            XCTAssertThrowsError(try store.checkingAccountAlreadyExists(mnemonic: input, encryptPassword: password, normalization: mode))
+            XCTAssertThrowsError(try store.import(mnemonic: input, encryptPassword: password, normalization: mode))
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: keyDirectory.path).isEmpty)
+    }
+
     func testCanonicalUnicodePassphrasesAgreeOnlyInBIP39Mode() throws {
         let composed = "\u{00e9}"
         let decomposed = "e\u{0301}"

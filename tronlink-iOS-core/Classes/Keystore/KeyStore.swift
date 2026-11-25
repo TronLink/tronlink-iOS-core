@@ -229,13 +229,8 @@ public final class KeyStore {
         mutationLock.lock()
         defer { mutationLock.unlock() }
 
-        if !Mnemonic.isValid(mnemonic) {
-            throw Error.invalidMnemonic
-        }
-
-        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: normalization)
-        let pubKey = try wallet.getKey(at: 0).publicKey
-        let address = try KeystoreKey.decodeAddress(from: pubKey)
+        let address = try generateWalletAddress(derivationPath: derivationPath, mnemonic: mnemonic,
+                                                password: passphrase, normalization: normalization)
         if self.account(for: address) != nil {
             throw Error.accountAlreadyExists
         }
@@ -608,13 +603,8 @@ extension KeyStore {
     }
 
     public func checkingAccountAlreadyExists(mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, encryptPassword: String, normalization: Mnemonic.Normalization = .bip39) throws -> Bool {
-        if !Mnemonic.isValid(mnemonic) {
-            throw Error.invalidMnemonic
-        }
-        
-        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath, normalization: normalization)
-        let pubKey = try wallet.getKey(at: 0).publicKey
-        let address = try KeystoreKey.decodeAddress(from: pubKey)
+        let address = try generateWalletAddress(derivationPath: derivationPath, mnemonic: mnemonic,
+                                                password: passphrase, normalization: normalization)
         if self.account(for: address) != nil {
             throw Error.accountAlreadyExists
         }
@@ -624,8 +614,9 @@ extension KeyStore {
     /// Generate an address with mnemonic derivationPath.
     /// `password` is the BIP39 passphrase. Use the same normalization when importing the wallet.
     public func generateWalletAddress(derivationPath:String = Wallet.defaultPath,mnemonic:String,password:String = "", normalization: Mnemonic.Normalization = .bip39) throws -> Address{
-        guard Mnemonic.isValid(mnemonic) else { throw Error.invalidMnemonic }
-        let wallet = try Wallet(mnemonic: mnemonic, passphrase: password, path: derivationPath, normalization: normalization)
+        let seedMnemonic = Mnemonic.normalize(mnemonic, using: normalization)
+        guard Mnemonic.isValid(seedMnemonic) else { throw Error.invalidMnemonic }
+        let wallet = try Wallet(mnemonic: seedMnemonic, passphrase: password, path: derivationPath, normalization: normalization)
         let pubKey = try wallet.getKey(at: 0).publicKey
         return try KeystoreKey.decodeAddress(from: pubKey)
     }
