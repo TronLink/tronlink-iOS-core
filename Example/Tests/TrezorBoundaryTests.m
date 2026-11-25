@@ -16,6 +16,38 @@
     XCTAssertTrue(words[2048] == NULL);
 }
 
+- (void)testMnemonicCleanupPreservesCallerOutputAndChecksumResult {
+    // BIP39 vector for 128 bits of all ones. The checksum occupies the next four bits.
+    const char *valid = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
+    uint8_t expected[33] = {0}, output[33];
+    memset(expected, 0xff, 16);
+    expected[16] = 0x50;
+    memset(output, 0xa5, sizeof(output));
+    XCTAssertEqual(mnemonic_to_entropy(valid, output), 132);
+    XCTAssertEqual(memcmp(output, expected, sizeof(output)), 0);
+    XCTAssertEqual(mnemonic_check(valid), 1);
+
+    // All words still decode when only the checksum is wrong.
+    const char *badChecksum = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo";
+    XCTAssertEqual(mnemonic_to_entropy(badChecksum, output), 132);
+    expected[16] = 0xf0;
+    XCTAssertEqual(memcmp(output, expected, sizeof(output)), 0);
+    XCTAssertEqual(mnemonic_check(badChecksum), 0);
+
+    const char *malformed[] = {
+        NULL, "zoo", "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo nonsense",
+        "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wordtoolong",
+        "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo "
+    };
+    memset(expected, 0xa5, sizeof(expected));
+    for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++) {
+        memset(output, 0xa5, sizeof(output));
+        XCTAssertEqual(mnemonic_to_entropy(malformed[i], output), 0);
+        XCTAssertEqual(memcmp(output, expected, sizeof(output)), 0);
+        XCTAssertEqual(mnemonic_check(malformed[i]), 0);
+    }
+}
+
 - (void)testPublicOnlyNodesKeepTheirAddressAndRejectPrivateOperations {
     uint8_t chain[32] = {0}, scalar[32] = {0};
     scalar[31] = 1;

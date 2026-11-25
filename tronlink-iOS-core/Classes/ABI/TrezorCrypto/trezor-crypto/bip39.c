@@ -169,6 +169,7 @@ int mnemonic_to_entropy(const char *mnemonic, uint8_t *entropy)
 	char current_word[10];
 	uint32_t j, k, ki, bi = 0;
 	uint8_t bits[32 + 1];
+	int bit_count = 0;
 
 	memzero(bits, sizeof(bits));
 	i = 0;
@@ -176,7 +177,7 @@ int mnemonic_to_entropy(const char *mnemonic, uint8_t *entropy)
 		j = 0;
 		while (mnemonic[i] != ' ' && mnemonic[i] != 0) {
 			if (j >= sizeof(current_word) - 1) {
-				return 0;
+				goto cleanup;
 			}
 			current_word[j] = mnemonic[i];
 			i++; j++;
@@ -188,7 +189,7 @@ int mnemonic_to_entropy(const char *mnemonic, uint8_t *entropy)
 		k = 0;
 		for (;;) {
 			if (!wordlist[k]) { // word not found
-				return 0;
+				goto cleanup;
 			}
 			if (strcmp(current_word, wordlist[k]) == 0) { // word found on index k
 				for (ki = 0; ki < 11; ki++) {
@@ -202,26 +203,30 @@ int mnemonic_to_entropy(const char *mnemonic, uint8_t *entropy)
 			k++;
 		}
 	}
-	if (bi != n * 11) {
-		return 0;
+	if (bi == n * 11) {
+		memcpy(entropy, bits, sizeof(bits));
+		bit_count = n * 11;
 	}
-	memcpy(entropy, bits, sizeof(bits));
-	return n * 11;
+cleanup:
+	memzero(current_word, sizeof(current_word));
+	memzero(bits, sizeof(bits));
+	return bit_count;
 }
 
 int mnemonic_check(const char *mnemonic)
 {
 	uint8_t bits[32 + 1];
 	int seed_len = mnemonic_to_entropy(mnemonic, bits);
-	if (!seed_len) {
-		return 0;
+	int valid = 0;
+	if (seed_len) {
+		int words = seed_len / 11;
+		uint8_t checksum = bits[words * 4 / 3];
+		sha256_Raw(bits, words * 4 / 3, bits);
+		int checksum_bits = words / 3;
+		valid = (bits[0] >> (8 - checksum_bits)) == (checksum >> (8 - checksum_bits));
 	}
-	int words = seed_len / 11;
-
-	uint8_t checksum = bits[words * 4 / 3];
-	sha256_Raw(bits, words * 4 / 3, bits);
-	int checksum_bits = words / 3;
-	return (bits[0] >> (8 - checksum_bits)) == (checksum >> (8 - checksum_bits));
+	memzero(bits, sizeof(bits));
+	return valid;
 }
 
 int mnemonic_to_seed(const char *mnemonic, const char *passphrase, uint8_t seed[512 / 8], void (*progress_callback)(uint32_t current, uint32_t total))
