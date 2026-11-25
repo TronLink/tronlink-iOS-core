@@ -4330,6 +4330,49 @@ final class ABIv2RegressionTests: XCTestCase {
         XCTAssertThrowsError(try TLCore.ABIv2TypeParser.parseTypeString("uint256garbage"))
     }
 
+    func testParameterNamesCannotOverwriteDecodedPositions() throws {
+        let parameters = """
+        [{"name":"lower","type":"uint256"},{"name":"2","type":"uint256"},{"name":"0","type":"uint256"}]
+        """
+        let function = try parseRecord("""
+        {"type":"function","name":"bounds","inputs":\(parameters),"outputs":\(parameters)}
+        """)
+        let constructor = try parseRecord("{\"type\":\"constructor\",\"inputs\":\(parameters)}")
+        let error = try parseRecord("{\"type\":\"error\",\"name\":\"Bounds\",\"inputs\":\(parameters)}")
+        guard case let .error(customError) = error else { return XCTFail("Expected custom error") }
+
+        let payload = words([10, 20, 30])
+        let revert = customError.methodEncoding + payload
+        let cases = [
+            ("function input", function.decodeInputData(payload)),
+            ("function output", function.decodeReturnData(payload)),
+            ("constructor input", constructor.decodeInputData(payload)),
+            ("error input", error.decodeInputData(revert)),
+            ("error return", error.decodeReturnData(revert))
+        ]
+        for (entry, result) in cases {
+            let decoded = try XCTUnwrap(result, entry)
+            XCTAssertEqual(decoded["0"] as? BigUInt, BigUInt(10), entry)
+            XCTAssertEqual(decoded["1"] as? BigUInt, BigUInt(20), entry)
+            XCTAssertEqual(decoded["2"] as? BigUInt, BigUInt(30), entry)
+            XCTAssertEqual(decoded["lower"] as? BigUInt, BigUInt(10), entry)
+        }
+    }
+
+    func testAliasesOutsideThePositionKeysKeepTheirValues() throws {
+        let element = try parseRecord("""
+        {"type":"function","name":"read","outputs":[
+          {"name":"value","type":"uint256"},{"type":"uint256"},{"name":"value","type":"uint256"},
+          {"name":"01","type":"uint256"},{"name":"9","type":"uint256"}]}
+        """)
+        let decoded = try XCTUnwrap(element.decodeReturnData(words([10, 20, 30, 40, 50])))
+        XCTAssertNil(decoded[""])
+        XCTAssertEqual(decoded["1"] as? BigUInt, BigUInt(20))
+        XCTAssertEqual(decoded["value"] as? BigUInt, BigUInt(30))
+        XCTAssertEqual(decoded["01"] as? BigUInt, BigUInt(40))
+        XCTAssertEqual(decoded["9"] as? BigUInt, BigUInt(50))
+    }
+
     func testReceiveAndCustomErrorJSONSupportIndependentRevertPayload() throws {
         guard case let .receive(receive) = try parseRecord("{\"type\":\"receive\",\"stateMutability\":\"payable\"}") else {
             return XCTFail("Expected receive")

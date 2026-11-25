@@ -189,11 +189,12 @@ extension ABIv2.Element {
                                               allowLegacyBytes32: allowLegacyBytes32),
               values.count == parameters.count else { return nil }
         var result = [String: Any]()
-        for index in parameters.indices {
-            result[String(index)] = values[index]
-            if !parameters[index].name.isEmpty {
-                result[parameters[index].name] = values[index]
-            }
+        for (parameter, value) in zip(parameters, values) where !parameter.name.isEmpty {
+            result[parameter.name] = value
+        }
+        // A position always identifies its own value, even if a parameter has that name.
+        for (index, value) in values.enumerated() {
+            result[String(index)] = value
         }
         return result
     }
