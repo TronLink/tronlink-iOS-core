@@ -2446,6 +2446,9 @@ final class EmbeddedKeystoreTests: XCTestCase {
         let reopened = try KeyStore(keyDirectory: keyDirectory)
         let account = try XCTUnwrap(reopened.account(for: key.address))
         let digest = Data(repeating: 1, count: 32)
+        XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+            guard case KeyStore.Error.invalidKey = error else { return XCTFail("Expected address mismatch, got \(error)") }
+        }
         XCTAssertThrowsError(try reopened.signHash(digest, account: account, password: password))
         XCTAssertThrowsError(try reopened.signHashes([digest], account: account, password: password))
         XCTAssertThrowsError(try reopened.exportPrivateKey(account: account, password: password))
@@ -3772,7 +3775,7 @@ final class KeystoreCTRCounterRegressionTests: XCTestCase {
 
     func testDecryptionCleanupPreservesReturnedDataAcrossRepeatedCalls() throws {
         for cipher in ["aes-128-ctr", "aes-128-cbc"] {
-            for plaintext in [privateKey, Data(repeating: 0x5a, count: 96)] {
+            for plaintext in [privateKey, privateKey + Data(repeating: 0x5a, count: 64)] {
                 let key = try makeKey(plaintext: plaintext, iv: iv(counter: 0), cipher: cipher)
                 let retainedResult = try key.decrypt(password: password)
                 var nextResult = try key.decrypt(password: password)
@@ -3819,6 +3822,23 @@ final class KeystoreCTRCounterRegressionTests: XCTestCase {
         }
     }
 
+    func testPublicDecryptRequiresTheRawSigningAddress() throws {
+        for cipher in ["aes-128-ctr", "aes-128-cbc"] {
+            for plaintext in [privateKey, privateKey + Data(repeating: 0x5a, count: 64)] {
+                let original = try makeKey(plaintext: plaintext, iv: iv(counter: 0), cipher: cipher)
+                XCTAssertEqual(try original.decrypt(password: password), plaintext)
+                var wrongIV = original
+                wrongIV.crypto.cipherParams.iv = iv(counter: 1)
+                XCTAssertThrowsError(try wrongIV.decrypt(password: password))
+                var key = original
+                key.address = Address(data: Data([0x41]) + Data(repeating: 1, count: 20))
+                XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+                    guard case KeyStore.Error.invalidKey = error else { return XCTFail("Expected address mismatch, got \(error)") }
+                }
+            }
+        }
+    }
+
     func testCTRDecryptAcceptsTheLastAvailableBlock() throws {
         let cases: [(Int, UInt64)] = [
             (1, .max), (16, .max),
@@ -3828,7 +3848,8 @@ final class KeystoreCTRCounterRegressionTests: XCTestCase {
         for (count, counter) in cases {
             let plaintext = Data(repeating: 0x5a, count: count)
             let key = try makeKey(plaintext: plaintext, iv: iv(counter: counter))
-            XCTAssertEqual(try key.decrypt(password: password), plaintext, "Length: \(count)")
+            // These arbitrary lengths exercise the cipher counter independently of wallet identity.
+            XCTAssertEqual(try key.decryptPayload(password: password), plaintext, "Length: \(count)")
         }
     }
 

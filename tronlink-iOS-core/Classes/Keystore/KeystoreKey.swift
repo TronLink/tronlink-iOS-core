@@ -152,10 +152,31 @@ public struct KeystoreKey {
         return Address(data: data)
     }
 
-    /// Decrypts the key and returns the private key.
-    /// CTR input must fit the IV's remaining 64-bit counter range; otherwise this
-    /// throws `CTR.Error.invalidInitializationVector` after verifying the password.
+    /// Returns the stored plaintext after verifying the account's derived address.
+    /// An HD payload contains the mnemonic and optional passphrase. A historical oversized
+    /// private-key payload is returned intact after its effective first 32 bytes are verified.
+    /// Use `KeyStore.exportPrivateKey(account:password:)` to obtain the signing key.
+    /// CTR counter exhaustion throws `CTR.Error.invalidInitializationVector` after password verification.
     public func decrypt(password: String) throws -> Data {
+        var payload = try decryptPayload(password: password)
+        do {
+            switch type {
+            case .encryptedKey:
+                var scalar = try verifiedRawPrivateKey(payload)
+                scalar.resetBytes(in: 0..<scalar.count)
+            case .hierarchicalDeterministicWallet:
+                _ = try verifiedHDMaterial(payload)
+            }
+        } catch {
+            payload.resetBytes(in: 0..<payload.count)
+            throw error
+        }
+        return payload
+    }
+
+    /// Authenticates the ciphertext and decrypts it. Account operations verify the derived
+    /// address before releasing key material or saving a replacement.
+    func decryptPayload(password: String) throws -> Data {
         var derivedKey: Data
         switch crypto.kdf {
         case "scrypt":
@@ -272,18 +293,22 @@ public struct KeystoreKey {
     /// Decrypts the key and derives the private key used by account operations. The caller owns the result and
     /// is responsible for clearing it.
     func privateKey(password: String) throws -> Data {
-        var payload = try decrypt(password: password)
+        var payload = try decryptPayload(password: password)
         defer { payload.resetBytes(in: 0..<payload.count) }
         switch type {
         case .encryptedKey:
-            // Historical oversized raw files signed with the first 32 plaintext bytes.
-            var scalar = Data(payload.prefix(32))
-            defer { scalar.resetBytes(in: 0..<scalar.count) }
-            try verifyAddress(publicKey: EthereumCrypto.getPublicKey(from: scalar))
-            return scalar
+            return try verifiedRawPrivateKey(payload)
         case .hierarchicalDeterministicWallet:
             return try verifiedHDMaterial(payload).key.privateKey
         }
+    }
+
+    private func verifiedRawPrivateKey(_ payload: Data) throws -> Data {
+        // Historical oversized raw files signed with the first 32 plaintext bytes.
+        var scalar = Data(payload.prefix(32))
+        defer { scalar.resetBytes(in: 0..<scalar.count) }
+        try verifyAddress(publicKey: EthereumCrypto.getPublicKey(from: scalar))
+        return scalar
     }
 
     func verifiedHDMaterial(_ payload: Data) throws -> (mnemonic: String, key: HDKey) {

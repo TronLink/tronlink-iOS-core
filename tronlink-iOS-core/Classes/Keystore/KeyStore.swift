@@ -180,7 +180,7 @@ public final class KeyStore {
             }
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
-            var privateKey = try key.decrypt(password: password)
+            var privateKey = try key.decryptPayload(password: password)
             defer {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
@@ -275,7 +275,7 @@ public final class KeyStore {
             }
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
-            var privateKey = try key.decrypt(password: password)
+            var privateKey = try key.decryptPayload(password: password)
             defer {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
@@ -311,7 +311,7 @@ public final class KeyStore {
         guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw DecryptError.missingAccountKey
         }
-        var data = try key.decrypt(password: password)
+        var data = try key.decryptPayload(password: password)
         defer {
             data.resetBytes(in: 0 ..< data.count)
         }
@@ -351,7 +351,7 @@ public final class KeyStore {
             }
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
-            var privateKey = try key.decrypt(password: password)
+            var privateKey = try key.decryptPayload(password: password)
             defer {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
@@ -403,7 +403,7 @@ public final class KeyStore {
         let original = try Data(contentsOf: storedAccount.url)
         let key = try JSONDecoder().decode(KeystoreKey.self, from: original)
         guard key.address == account.address else { throw Error.invalidKey }
-        var decryptedKey = try key.decrypt(password: password)
+        var decryptedKey = try key.decryptPayload(password: password)
         decryptedKey.resetBytes(in: 0..<decryptedKey.count)
 
         try withStateLock {
