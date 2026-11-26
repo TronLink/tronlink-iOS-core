@@ -2453,6 +2453,62 @@ final class EmbeddedKeystoreTests: XCTestCase {
         super.tearDown()
     }
 
+    func testNewRegistrationChecksTheDestinationDirectoryAcrossStores() throws {
+        let first = try KeyStore(keyDirectory: keyDirectory)
+        let stale = try KeyStore(keyDirectory: keyDirectory)
+        let external = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("other-store"))
+        let account = try first.import(mnemonic: mnemonic, encryptPassword: password)
+        let original = try Data(contentsOf: account.url)
+        let alternate = Account(address: account.address, type: account.type, url: keyDirectory.appendingPathComponent("old-wallet.json"))
+        for store in [stale, external] {
+            try store.addKey(key: XCTUnwrap(first.key(for: account.address)))
+            XCTAssertThrowsError(try store.addAccount(account: alternate)) { error in
+                guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate account") }
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alternate.url.path))
+        XCTAssertEqual(try Data(contentsOf: account.url), original)
+        XCTAssertEqual(try first.exportMnemonic(account: account, password: password), mnemonic)
+    }
+
+    func testPendingHiddenDeletionBackupReservesOnlyItsOwnAddress() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let backup = keyDirectory.appendingPathComponent("." + account.url.lastPathComponent).appendingPathExtension(KeyStore.deletionBackupFileExtension)
+        try store.moveToDeletionBackup(account: account, password: password, backupURL: backup)
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertNil(reopened.account(for: account.address))
+        XCTAssertThrowsError(try reopened.import(mnemonic: mnemonic, encryptPassword: password)) {
+            XCTAssertEqual(($0 as? CocoaError)?.code, .fileLocking)
+        }
+        _ = try reopened.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        try FileManager.default.removeItem(at: backup)
+        XCTAssertEqual(try reopened.import(mnemonic: mnemonic, encryptPassword: password).address, account.address)
+    }
+
+    func testConcurrentRegistrationsAtDifferentNamesPublishOneFile() throws {
+        let stores = [try KeyStore(keyDirectory: keyDirectory), try KeyStore(keyDirectory: keyDirectory)]
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        for store in stores { try store.addKey(key: key) }
+        let urls = ["first", "second"].map { keyDirectory.appendingPathComponent($0) }
+        let lock = NSLock()
+        var duplicateCount = 0
+        DispatchQueue.concurrentPerform(iterations: stores.count) { index in
+            do {
+                try stores[index].addAccount(account: Account(address: key.address, type: key.type, url: urls[index]))
+            } catch KeyStore.Error.accountAlreadyExists {
+                lock.lock()
+                duplicateCount += 1
+                lock.unlock()
+            } catch { XCTFail("Unexpected registration error: \(error)") }
+        }
+        XCTAssertEqual(duplicateCount, 1)
+        XCTAssertEqual(urls.filter { FileManager.default.fileExists(atPath: $0.path) }.count, 1)
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        let account = try XCTUnwrap(reopened.account(for: key.address))
+        XCTAssertEqual(try reopened.exportMnemonic(account: account, password: password), mnemonic)
+    }
+
     func testDeleteRefusesAnAccountDuplicatedAfterLoading() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let account = try store.import(mnemonic: mnemonic, encryptPassword: password)

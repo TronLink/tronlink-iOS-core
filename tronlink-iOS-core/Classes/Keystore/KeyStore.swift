@@ -4,6 +4,9 @@ import Darwin
 
 /// Manages directories of key and wallet files and presents them as accounts.
 public final class KeyStore {
+    /// A hidden sibling with this extension is a pending deletion, never a live account.
+    /// Until the caller finishes recovery its address cannot be newly registered.
+    public static let deletionBackupFileExtension = "wallet-delete-backup"
     /// The key file directory.
     public let keyDirectory: URL
 
@@ -409,18 +412,13 @@ public final class KeyStore {
             guard !hasUnreadableAccounts else {
                 throw CocoaError(.fileReadUnknown)
             }
-            // A second file may have appeared since this store loaded the account.
-            let urls = try FileManager.default.contentsOfDirectory(at: keyDirectory,
-                includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
-            for url in urls where url.standardizedFileURL != storedAccount.url.standardizedFileURL {
-                if try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true { continue }
-                let data = try Data(contentsOf: url)
-                if let other = try? JSONDecoder().decode(KeystoreKey.self, from: data),
-                   other.address == account.address {
-                    throw Error.accountAlreadyExists
-                }
-            }
             try withCommitLock(for: storedAccount.url) {
+                let directory = storedAccount.url.deletingLastPathComponent()
+                try rejectOtherFiles(for: account.address, in: directory, excluding: storedAccount.url)
+                // External accounts also retain the original managed-directory deletion check.
+                if directory.standardizedFileURL != keyDirectory.standardizedFileURL {
+                    try rejectOtherFiles(for: account.address, in: keyDirectory, excluding: storedAccount.url)
+                }
                 guard try Data(contentsOf: storedAccount.url) == original else {
                     throw Error.invalidKey
                 }
@@ -513,6 +511,34 @@ public final class KeyStore {
         cache(key)
     }
 
+    // Match the loader's file formats, including legacy names and HD payloads.
+    private func rejectOtherFiles(for address: Address, in directory: URL, excluding destination: URL, includeDeletionBackups: Bool = false) throws {
+        let metadata: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isHiddenKey]
+        let urls = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: Array(metadata),
+            options: includeDeletionBackups ? [] : [.skipsHiddenFiles])
+        for url in urls where url.standardizedFileURL != destination.standardizedFileURL {
+            // Another writer may still be preparing or discarding its own hidden temp file.
+            if url.lastPathComponent.hasPrefix(".") && url.pathExtension != Self.deletionBackupFileExtension { continue }
+            let values = try url.resourceValues(forKeys: metadata)
+            if values.isDirectory == true { continue }
+            let hidden = url.lastPathComponent.hasPrefix(".") || values.isHidden == true
+            if hidden && url.pathExtension != Self.deletionBackupFileExtension { continue }
+            // Also support external registration in a directory with non-wallet entries.
+            // Never open a pipe/device while holding the directory lock.
+            if values.isRegularFile != true {
+                let target = try url.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                if target.isDirectory == true { continue }
+                guard target.isRegularFile == true else { throw CocoaError(.fileReadUnknown) }
+            }
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            if let other = try? JSONDecoder().decode(KeystoreKey.self, from: data), other.address == address {
+                if hidden { throw CocoaError(.fileLocking) }
+                throw Error.accountAlreadyExists
+            }
+        }
+    }
+
     // Lock the parent directory: the destination inode changes on every atomic replacement.
     // Separate opens coordinate writers across instances and processes without a sidecar file.
     private func withCommitLock(for url: URL, _ body: () throws -> Void) throws {
@@ -553,8 +579,8 @@ public final class KeyStore {
         try handle.write(contentsOf: json)
         try handle.synchronize()
         try handle.close()
-        if let registered = registeredAccount {
-            try withCommitLock(for: url) {
+        try withCommitLock(for: url) {
+            if let registered = registeredAccount {
                 let current = try Data(contentsOf: url)
                 guard current.sha256T() == registered.fileDigest else {
                     throw CocoaError(.fileLocking)
@@ -562,11 +588,14 @@ public final class KeyStore {
                 guard rename(temporaryURL.path, url.path) == 0 else {
                     throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
                 }
+            } else {
+                try rejectOtherFiles(for: key.address, in: url.deletingLastPathComponent(), excluding: url, includeDeletionBackups: true)
+                if renamex_np(temporaryURL.path, url.path, UInt32(RENAME_EXCL)) != 0 {
+                    let code = errno
+                    if code == EEXIST { throw Error.accountAlreadyExists }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: nil)
+                }
             }
-        } else if renamex_np(temporaryURL.path, url.path, UInt32(RENAME_EXCL)) != 0 {
-            let code = errno
-            if code == EEXIST { throw Error.accountAlreadyExists }
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: nil)
         }
         return json.sha256T()
     }
