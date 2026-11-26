@@ -2469,6 +2469,78 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: alternate.url.path))
         XCTAssertEqual(try Data(contentsOf: account.url), original)
         XCTAssertEqual(try first.exportMnemonic(account: account, password: password), mnemonic)
+
+        // The destination is empty, but a different writer has already registered the
+        // same address in the stale store's managed directory.
+        var outside = alternate
+        outside.url = external.keyDirectory.appendingPathComponent("external.json")
+        XCTAssertThrowsError(try stale.addAccount(account: outside)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate account") }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.url.path))
+        XCTAssertEqual(try Data(contentsOf: account.url), original)
+    }
+
+    func testExternalRegistrationReservesAddressAcrossReopenRollbackAndCommit() throws {
+        let managed = keyDirectory.appendingPathComponent("managed", isDirectory: true)
+        let owner = try KeyStore(keyDirectory: managed)
+        let external = keyDirectory.appendingPathComponent("other", isDirectory: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        let account = Account(address: key.address, type: key.type, url: external.appendingPathComponent("wallet.json"))
+        try owner.addKey(key: key)
+        try owner.addAccount(account: account)
+
+        let competing = try KeyStore(keyDirectory: managed)
+        try competing.addKey(key: key)
+        let local = Account(address: key.address, type: key.type, url: managed.appendingPathComponent("local.json"))
+        func assertDuplicate() {
+            XCTAssertThrowsError(try competing.addAccount(account: local)) { error in
+                guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate, got \(error)") }
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: local.url.path))
+        }
+        assertDuplicate()
+
+        let backup = external.appendingPathComponent(".rollback")
+        try owner.moveToDeletionBackup(account: account, password: password, backupURL: backup)
+        XCTAssertThrowsError(try competing.addAccount(account: local)) {
+            XCTAssertEqual(($0 as? CocoaError)?.code, .fileLocking)
+        }
+        try FileManager.default.moveItem(at: backup, to: account.url)
+        assertDuplicate()
+
+        // A host may recover the external directory using its own KeyStore, then
+        // commit the deletion by removing the backup itself.
+        let recovery = try KeyStore(keyDirectory: external)
+        try recovery.moveToDeletionBackup(account: account, password: password, backupURL: backup)
+        try FileManager.default.removeItem(at: backup)
+        try competing.addAccount(account: local)
+        let reopened = try KeyStore(keyDirectory: managed)
+        XCTAssertEqual(try reopened.exportMnemonic(account: local, password: password), mnemonic)
+    }
+
+    func testFailedExternalRegistrationCanRetryAfterTheDestinationWasOccupied() throws {
+        let managed = keyDirectory.appendingPathComponent("managed", isDirectory: true)
+        let remote = keyDirectory.appendingPathComponent("remote", isDirectory: true)
+        let store = try KeyStore(keyDirectory: managed)
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        try store.addKey(key: key)
+        let url = remote.appendingPathComponent("wallet")
+        let occupied = Data("existing file".utf8)
+        try occupied.write(to: url)
+        let account = Account(address: key.address, type: key.type, url: url)
+        XCTAssertThrowsError(try store.addAccount(account: account)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected occupied destination") }
+        }
+        XCTAssertEqual(try Data(contentsOf: url), occupied)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: managed.path).isEmpty)
+        try FileManager.default.removeItem(at: url)
+        try store.addAccount(account: account)
+        try store.delete(account: account, password: password)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: managed.path).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
     func testPendingHiddenDeletionBackupReservesOnlyItsOwnAddress() throws {
@@ -2484,6 +2556,27 @@ final class EmbeddedKeystoreTests: XCTestCase {
         _ = try reopened.createAccount(password: password, type: .hierarchicalDeterministicWallet)
         try FileManager.default.removeItem(at: backup)
         XCTAssertEqual(try reopened.import(mnemonic: mnemonic, encryptPassword: password).address, account.address)
+    }
+
+    func testConcurrentManagedAndExternalRegistrationHaveOneWinner() throws {
+        let external = keyDirectory.appendingPathComponent("external", isDirectory: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        let stores = [try KeyStore(keyDirectory: keyDirectory), try KeyStore(keyDirectory: keyDirectory)]
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        let urls = [keyDirectory.appendingPathComponent("local.json"), external.appendingPathComponent("remote.json")]
+        for store in stores { try store.addKey(key: key) }
+        DispatchQueue.concurrentPerform(iterations: stores.count) { index in
+            do {
+                try stores[index].addAccount(account: Account(address: key.address, type: key.type, url: urls[index]))
+            } catch KeyStore.Error.accountAlreadyExists {
+                // The other writer committed first.
+            } catch { XCTFail("Unexpected registration error: \(error)") }
+        }
+        let committed = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        XCTAssertEqual(committed.count, 1)
+        let saved = try KeystoreKey(contentsOf: XCTUnwrap(committed.first))
+        XCTAssertEqual(saved.address, key.address)
+        XCTAssertEqual(try saved.decrypt(password: password), try key.decrypt(password: password))
     }
 
     func testConcurrentRegistrationsAtDifferentNamesPublishOneFile() throws {
@@ -2509,18 +2602,28 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertEqual(try reopened.exportMnemonic(account: account, password: password), mnemonic)
     }
 
-    func testDeleteRefusesAnAccountDuplicatedAfterLoading() throws {
+    func testPasswordChangeAndDeleteRefuseAnAccountDuplicatedAfterLoading() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
         let copy = keyDirectory.appendingPathComponent("second.json")
         try FileManager.default.copyItem(at: account.url, to: copy)
+        let original = try Data(contentsOf: account.url)
+        XCTAssertThrowsError(try store.update(account: account, password: password, newPassword: "rotated")) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate account") }
+        }
+        XCTAssertEqual(try Data(contentsOf: account.url), original)
+        XCTAssertEqual(try Data(contentsOf: copy), original)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
         XCTAssertThrowsError(try store.delete(account: account, password: password))
         let backup = account.url.appendingPathExtension("backup")
         XCTAssertThrowsError(try store.moveToDeletionBackup(account: account, password: password, backupURL: backup))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         for url in [account.url, copy] { XCTAssertTrue(FileManager.default.fileExists(atPath: url.path)) }
         try FileManager.default.removeItem(at: copy)
-        try store.delete(account: account, password: password)
+        try store.update(account: account, password: password, newPassword: "rotated")
+        let reopened = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertThrowsError(try reopened.exportMnemonic(account: account, password: password))
+        try reopened.delete(account: account, password: "rotated")
         XCTAssertTrue(try KeyStore(keyDirectory: keyDirectory).accounts.isEmpty)
     }
 
@@ -2605,7 +2708,7 @@ final class EmbeddedKeystoreTests: XCTestCase {
         }
     }
 
-    func testLoadedKeyMustMatchAddressForSigningExportAndPasswordChange() throws {
+    func testLoadedKeyMustMatchAddressForSigningExportPasswordChangeAndDeletion() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let original = try store.import(mnemonic: mnemonic, encryptPassword: password)
         var key = try XCTUnwrap(store.key(for: original.address))
@@ -2624,6 +2727,15 @@ final class EmbeddedKeystoreTests: XCTestCase {
         XCTAssertThrowsError(try reopened.exportMnemonic(account: account, password: password))
         XCTAssertThrowsError(try reopened.export(account: account, password: password, newPassword: password))
         XCTAssertThrowsError(try reopened.update(account: account, password: password, newPassword: "updated"))
+        let backup = original.url.appendingPathExtension("backup")
+        XCTAssertThrowsError(try reopened.delete(account: account, password: password)) { error in
+            guard case KeyStore.Error.invalidKey = error else { return XCTFail("Expected address mismatch") }
+        }
+        XCTAssertThrowsError(try reopened.moveToDeletionBackup(account: account, password: password, backupURL: backup)) { error in
+            guard case KeyStore.Error.invalidKey = error else { return XCTFail("Expected address mismatch") }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertNotNil(reopened.account(for: account.address))
         XCTAssertEqual(try Data(contentsOf: original.url), saved)
     }
 
@@ -3991,6 +4103,64 @@ extension EmbeddedKeystoreTests {
 final class KeystoreCTRCounterRegressionTests: XCTestCase {
     private let password = "ctr-regression-password"
     private let privateKey = Data(repeating: 0, count: 31) + Data([1])
+
+    func testEthereumV3KeepsItsSigningKeyAndStoredAddressAfterPasswordRotation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("ethereum-v3.json")
+        let tron = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(tron)) as? [String: Any])
+        object["address"] = "7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+        object["Crypto"] = object.removeValue(forKey: "crypto")
+        object.removeValue(forKey: "type")
+        let legacyJSON = try JSONSerialization.data(withJSONObject: object)
+        try legacyJSON.write(to: url)
+        let key = try KeystoreKey(contentsOf: url)
+        let message = Data(repeating: 7, count: 32)
+        let signature = try tron.sign(hash: message, password: password)
+        XCTAssertEqual(try key.decrypt(password: password), privateKey)
+        XCTAssertEqual(try key.sign(hash: message, password: password), signature)
+
+        let store = try KeyStore(keyDirectory: directory)
+        let account = try XCTUnwrap(store.account(for: key.address))
+        XCTAssertThrowsError(try store.checkingAccountAlreadyExists(json: JSONEncoder().encode(tron), password: password, newPassword: password)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate account") }
+        }
+        try store.update(account: account, password: password, newPassword: "rotated")
+        let reopened = try KeyStore(keyDirectory: directory)
+        XCTAssertEqual(try KeystoreKey(contentsOf: url).address, key.address)
+        XCTAssertThrowsError(try reopened.exportPrivateKey(account: account, password: password))
+        XCTAssertEqual(try reopened.signHash(message, account: account, password: "rotated"), signature)
+        // Backups from the TRON account store retain its historical 21-byte export format.
+        let backup = try reopened.export(account: account, password: "rotated", newPassword: password)
+        let target = try KeyStore(keyDirectory: directory.appendingPathComponent("restored"))
+        let restored = try target.import(json: backup, password: password, newPassword: password)
+        XCTAssertEqual(restored.address, tron.address)
+        XCTAssertEqual(try target.exportPrivateKey(account: restored, password: password), privateKey)
+        let imported = try KeyStore(keyDirectory: directory.appendingPathComponent("imported"))
+        let importedAccount = try imported.import(json: legacyJSON, password: password, newPassword: "import-password")
+        XCTAssertEqual(importedAccount.address, tron.address)
+        XCTAssertEqual(try imported.signHash(message, account: importedAccount, password: "import-password"), signature)
+        XCTAssertThrowsError(try imported.import(json: legacyJSON, password: password, newPassword: password)) { error in
+            guard case KeyStore.Error.accountAlreadyExists = error else { return XCTFail("Expected duplicate account") }
+        }
+        try reopened.delete(account: account, password: "rotated")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testAddressVerificationRejectsWrongEthereumHashTronPrefixAndLength() throws {
+        let original = try makeKey(plaintext: privateKey, iv: iv(counter: 0))
+        let hash = Data(original.address.data.dropFirst())
+        let invalid = [Data(repeating: 0, count: 20), Data([0x42]) + hash, Data(hash.dropFirst()), Data([0, 0x41]) + hash]
+        for address in invalid {
+            var key = original
+            key.address = Address(data: address)
+            XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+                guard case KeyStore.Error.invalidKey = error else { return XCTFail("Expected address mismatch") }
+            }
+        }
+    }
 
     func testDecryptionCleanupPreservesReturnedDataAcrossRepeatedCalls() throws {
         for cipher in ["aes-128-ctr", "aes-128-cbc"] {

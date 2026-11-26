@@ -73,6 +73,23 @@ if grep -F 'TrezorCrypto.h' "$umbrella_header" >/dev/null; then
 fi
 pass "umbrella-contract"
 
+# Exercise the same symbol check used for a built archive or dylib.
+export_check="$script_dir/check_trezor_exports.awk"
+wordlist='00000010 (__TEXT,__text) external _mnemonic_wordlist'
+private_seed='00000020 (__TEXT,__text) private external _mnemonic_to_seed'
+if ! printf '%s\n' "$wordlist" "$private_seed" | awk -f "$export_check"; then
+    fail "trezor-export-contract" "public word list with private helpers should pass"
+fi
+if printf '%s\n' "$private_seed" | awk -f "$export_check" >/dev/null; then
+    fail "trezor-export-contract" "missing public word list should fail"
+fi
+for symbol in mnemonic_to_seed mnemonic_to_entropy mnemonic_check mnemonic_wordlist_copy hdnode_from_seed; do
+    if printf '%s\n' "$wordlist" "00000020 (__TEXT,__text) external _$symbol" | awk -f "$export_check" >/dev/null; then
+        fail "trezor-export-contract" "unexpected export _$symbol should fail"
+    fi
+done
+pass "trezor-export-contract"
+
 for required_path in \
     "$repository_root/tronlink-iOS-core/Classes/ABI/TrezorCrypto/trezor-crypto/LICENSE" \
     "$repository_root/ThirdPartyLicenses/TronWalletABI-LICENSE" \

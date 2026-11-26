@@ -109,15 +109,8 @@ for architecture in $architectures; do
     if ! nm -arch "$architecture" -mU "$binary" >"$detailed_symbols" 2>/dev/null; then
         fail "artifact-trezor-symbols" "cannot inspect visibility for $architecture"
     fi
-    exports="$temporary_directory/exports-$architecture.txt"
-    awk '/ external / && !/private external/ { print $NF }' "$detailed_symbols" >"$exports" ||
-        fail "artifact-trezor-symbols" "cannot read visibility for $architecture"
-    if ! grep -Fx '_mnemonic_wordlist' "$exports" >/dev/null; then
-        fail "artifact-trezor-symbols" "missing public word list for $architecture"
-    fi
-    if grep -E '^_(hdnode_|ed25519_|ecdh_multiply$|ecdsa_|expand256_modm|pbkdf2_hmac_|aes_|(x?chacha20poly1305|rfc7539)_|random32$)' "$exports" >/dev/null; then
-        fail "artifact-trezor-symbols" "internal Trezor API exported by $architecture"
-    fi
+    LC_ALL=C awk -f "$script_dir/check_trezor_exports.awk" "$detailed_symbols" ||
+        fail "artifact-trezor-symbols" "unexpected Trezor exports for $architecture"
 done
 
 pass "artifact-old-symbols"

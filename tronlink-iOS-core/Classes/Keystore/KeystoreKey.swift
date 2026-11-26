@@ -3,6 +3,13 @@ import CryptoSwift
 import Darwin
 import Foundation
 
+extension Address {
+    /// Identity used for keystore comparisons. Preserve the original bytes in wallet files.
+    var keystoreIdentity: Data {
+        return data.count == 20 ? Data([0x41]) + data : data
+    }
+}
+
 /// Key definition.
 public struct KeystoreKey {
     /// Ethereum address.
@@ -307,7 +314,7 @@ public struct KeystoreKey {
         // Historical oversized raw files signed with the first 32 plaintext bytes.
         var scalar = Data(payload.prefix(32))
         defer { scalar.resetBytes(in: 0..<scalar.count) }
-        try verifyAddress(publicKey: EthereumCrypto.getPublicKey(from: scalar))
+        try verifyDerivedAddress(KeystoreKey.decodeAddress(from: EthereumCrypto.getPublicKey(from: scalar)))
         return scalar
     }
 
@@ -315,12 +322,13 @@ public struct KeystoreKey {
         let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(payload)
         let key = try Wallet(mnemonic: mnemonic, passphrase: passphrase,
                              path: derivationPath, normalization: .legacy).getKey(at: 0)
-        try verifyAddress(publicKey: key.publicKey)
+        try verifyDerivedAddress(KeystoreKey.decodeAddress(from: key.publicKey))
         return (mnemonic, key)
     }
 
-    private func verifyAddress(publicKey: Data) throws {
-        guard try KeystoreKey.decodeAddress(from: publicKey) == address else {
+    /// Fresh derivations use the TRON prefix. Ethereum V3 stores the same hash in 20 bytes.
+    func verifyDerivedAddress(_ derived: Address) throws {
+        guard derived.data.count == 21, derived.data.first == 0x41, derived.data == address.keystoreIdentity else {
             throw KeyStore.Error.invalidKey
         }
     }
