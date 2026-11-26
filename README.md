@@ -28,16 +28,6 @@ tronlink-iOS-core is available through [CocoaPods](https://cocoapods.org). To in
 pod 'tronlink-iOS-core', '2.0.2'
 ```
 
-## Updating to 2.0.2
-
-`PrivateKey(_:)` now validates the scalar during initialization. In a throwing Swift function, use `let key = try TLCore.PrivateKey(data)`. Handle the error at the point where your app accepts private-key input.
-
-TLCore keeps the vendored Trezor C headers and symbols internal. Use `Wallet.getKey(at:)` for HD derivation, `Mnemonic` for BIP39 operations, and `EthereumCrypto` for secp256k1 operations. The English word list remains available through `mnemonic_wordlist()`.
-
-Existing wallet files can be opened in place. Password rotation preserves the stored address. Importing an Ethereum V3 file into a TRON `KeyStore` returns the corresponding TRON address.
-
-`addKey` followed by `addAccount` still supports external file URLs. For an external account, TLCore keeps a protected, hidden directory reference in the managed directory so other writers can detect the registration. The reference contains only the relative directory path. `moveToDeletionBackup` accepts visible and hidden sibling names, including existing names such as `.rollback`. The address is reserved while its backup exists.
-
 ## Demo
 
 - [Create wallet](./Example/Tests/Tests.swift)
