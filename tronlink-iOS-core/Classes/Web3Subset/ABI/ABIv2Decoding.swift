@@ -292,6 +292,7 @@ public struct ABIv2Decoder {
         let nonIndexedTypes = event.inputs.filter { !$0.indexed }.map { $0.type }
         guard let nonIndexedValues = decodeTuple(types: nonIndexedTypes, data: eventLog.data,
                                                 base: 0, depth: 0, budget: &budget) else { return nil }
+        let reserved = Set(event.inputs.indices.map { String($0) }).union(["name"])
         var content: [String: Any] = ["name": event.name]
         var indexedIndex = 0
         var nonIndexedIndex = 0
@@ -305,7 +306,7 @@ public struct ABIv2Decoder {
                 nonIndexedIndex += 1
             }
             content[String(index)] = value
-            if !input.name.isEmpty {
+            if !input.name.isEmpty && !reserved.contains(input.name) {
                 content[input.name] = value
             }
         }

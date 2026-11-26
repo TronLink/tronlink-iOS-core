@@ -103,23 +103,14 @@ for architecture in $architectures; do
         fi
     fi
 
-    for required_symbol in \
-        _ecdsa_sign_digest \
-        _ecdsa_get_public_key65 \
-        _ecdsa_recover_pub_from_sig \
-        _hdnode_from_seed \
-        _hdnode_private_ckd \
-        _random32; do
-        if LC_ALL=C grep -F -x "$required_symbol" "$symbols" >/dev/null; then
-            :
-        else
-            grep_status=$?
-            if [ "$grep_status" -eq 1 ]; then
-                fail "artifact-trezor-symbols" "missing $required_symbol in architecture $architecture"
-            fi
-            fail "artifact-boundary" "cannot scan required symbols in architecture $architecture"
-        fi
-    done
+    # Archive members may retain private externs. A linked dylib can also
+    # localize or strip them. Only externally visible definitions form its API.
+    detailed_symbols="$temporary_directory/details-$architecture.txt"
+    if ! nm -arch "$architecture" -mU "$binary" >"$detailed_symbols" 2>/dev/null; then
+        fail "artifact-trezor-symbols" "cannot inspect visibility for $architecture"
+    fi
+    LC_ALL=C awk -f "$script_dir/check_trezor_exports.awk" "$detailed_symbols" ||
+        fail "artifact-trezor-symbols" "unexpected Trezor exports for $architecture"
 done
 
 pass "artifact-old-symbols"

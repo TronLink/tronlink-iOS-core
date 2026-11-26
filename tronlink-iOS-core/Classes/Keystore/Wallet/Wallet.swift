@@ -1,4 +1,4 @@
-
+@_implementationOnly import TLCoreTrezorInternal
 import Foundation
 
 /// A hierarchical deterministic wallet.
@@ -30,7 +30,18 @@ public class Wallet {
     }
 
     private func getDerivationPath(for index: Int) throws -> DerivationPath {
-        guard let path = DerivationPath(path.replacingOccurrences(of: "x", with: String(index))) else {
+        guard UInt32(exactly: index) != nil else { throw Error.invalidDerivationPath }
+        let resolved: String
+        if path == Wallet.defaultPath {
+            guard index <= 0x7fffffff else { throw Error.invalidDerivationPath }
+            resolved = String(path.dropLast()) + String(index)
+        } else if path.contains("x") {
+            resolved = path.replacingOccurrences(of: "x", with: String(index))
+        } else {
+            guard index == 0 else { throw Error.invalidDerivationPath }
+            resolved = path
+        }
+        guard let path = DerivationPath(resolved) else {
             throw Error.invalidDerivationPath
         }
         return path
@@ -68,7 +79,8 @@ public class Wallet {
         return HDKey(node: &node)
     }
 
-    /// Generates the key at the specified derivation path index.
+    /// The default path uses the final address index. An explicit template replaces
+    /// `x` with the index. A fixed custom path accepts zero and is used verbatim.
     ///
     /// - Throws: `Wallet.Error`
     public func getKey(at index: Int) throws -> HDKey {

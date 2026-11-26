@@ -17,6 +17,8 @@ end
 post_install do |installer|
     installer.pods_project.targets.each do |target|
         target.build_configurations.each do |config|
+            # The Example XCTest bundle links the private C test API across a dylib boundary.
+            config.build_settings['TLCORE_TREZOR_VISIBILITY'] = 'default' if target.name == 'tronlink-iOS-core'
             config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
         end
     end

@@ -3,6 +3,8 @@
 
 @interface EthereumCrypto : NSObject
 
++ (BOOL)isValidUncompressedPublicKey:(nonnull NSData *)publicKey NS_SWIFT_NAME(isValidUncompressedPublicKey(_:));
+
 + (BOOL)isValidPrivateKey:(nonnull NSData *)privateKey NS_SWIFT_NAME(isValidPrivateKey(_:));
 
 /// Extracts the public key from a 32-byte private key.

@@ -10,13 +10,11 @@ public struct DerivationPath: Hashable, CustomStringConvertible {
         self.indices = indices
     }
 
-    /// Initializes a derivation path with a string description like `m/10/0/2'/3`
+    /// Accepts an absolute or relative path. Only an explicit `m` denotes the root.
     public init?(_ string: String) {
+        guard !DerivationPath.hasEmptyComponent(string) else { return nil }
         let components = string.split(separator: "/")
-        for component in components {
-            if component == "m" {
-                continue
-            }
+        for component in components.dropFirst(components.first == "m" ? 1 : 0) {
             if component.hasSuffix("'") {
                 guard let index = Int(component.dropLast()), UInt32(exactly: index) != nil else {
                     return nil
@@ -29,6 +27,19 @@ public struct DerivationPath: Hashable, CustomStringConvertible {
                 indices.append(Index(index, hardened: false))
             }
         }
+    }
+
+    /// Older files skipped empty components and misplaced root markers. Keep the other
+    /// components verbatim, including index templates and historical hardened values.
+    static func restoringStoredPath(_ path: String) -> String {
+        let components = path.split(separator: "/")
+        guard hasEmptyComponent(path) || components.dropFirst().contains("m") else { return path }
+        let children = components.filter { $0 != "m" }
+        return children.isEmpty ? "m" : "m/" + children.joined(separator: "/")
+    }
+
+    private static func hasEmptyComponent(_ path: String) -> Bool {
+        return path.isEmpty || path.hasPrefix("/") || path.hasSuffix("/") || path.contains("//")
     }
 
     /// Increments the last index of the derivation path.
@@ -57,7 +68,7 @@ public struct DerivationPath: Hashable, CustomStringConvertible {
 
     /// String representation.
     public var description: String {
-        return "m/" + indices.map({ $0.description }).joined(separator: "/")
+        return indices.isEmpty ? "m" : "m/" + indices.map({ $0.description }).joined(separator: "/")
     }
 
     public var hashValue: Int {

@@ -59,22 +59,23 @@ extension Web3Utils {
     }
 
     public static func publicToAddressData(_ publicKey: Data) throws -> Data {
-        if publicKey.count == 33 {
-            guard let decompressedKey = TrezorSecp256k1Backend.uncompressPublicKey(publicKey) else {
+        let point: Data
+        switch publicKey.count {
+        case 33:
+            guard let key = TrezorSecp256k1Backend.uncompressPublicKey(publicKey) else {
                 throw SECP256DataError.cannotParsePublicKey
             }
-            return try publicToAddressData(decompressedKey)
-        } else {
-            var stipped = publicKey
-            if stipped.count == 65 {
-                guard stipped.first == 4 else { throw PublicKeyToAddressError.shouldStartWith4 }
-                stipped = stipped.dropFirst()
+            point = key
+        case 64, 65:
+            if publicKey.count == 65 && publicKey.first != 4 { throw PublicKeyToAddressError.shouldStartWith4 }
+            point = publicKey.count == 64 ? Data([4]) + publicKey : publicKey
+            guard EthereumCrypto.isValidUncompressedPublicKey(point) else {
+                throw SECP256DataError.cannotParsePublicKey
             }
-            guard stipped.count == 64 else { throw PublicKeyToAddressError.invalidPublicKeySize }
-            let sha3 = stipped.keccak256()
-            let addressData = sha3[12 ..< 32]
-            return addressData
+        default:
+            throw PublicKeyToAddressError.invalidPublicKeySize
         }
+        return Data(point.dropFirst().keccak256().suffix(20))
     }
 
     public static func publicToAddress(_ publicKey: Data) throws -> Web3Address {

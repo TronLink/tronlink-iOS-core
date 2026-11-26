@@ -1,4 +1,4 @@
-
+@_implementationOnly import TLCoreTrezorInternal
 import Foundation
 
 public final class Mnemonic {
@@ -75,10 +75,13 @@ public final class Mnemonic {
     public static func isValid(_ string: String) -> Bool {
         // C would validate only the prefix before an embedded NUL.
         guard !string.utf8.contains(0),
-            let asciiCString = string.cString(using: String.Encoding.ascii) else {
+            var asciiCString = string.cString(using: String.Encoding.ascii) else {
             return false
         }
-        return mnemonic_check(asciiCString) != 0
+        return asciiCString.withUnsafeMutableBufferPointer { buffer in
+            defer { memzero(buffer.baseAddress, buffer.count) }
+            return mnemonic_check(buffer.baseAddress) != 0
+        }
     }
 
     /// Derives the wallet seed using BIP39 NFKD normalization by default.

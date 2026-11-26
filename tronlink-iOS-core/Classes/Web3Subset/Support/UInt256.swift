@@ -11,11 +11,11 @@ extension BigUInt {
     }
     
     /// - Parameter string: String number. can be: "0.023", "123123123.12312312312"
-    /// - Parameter decimals: Nonnegative number of decimal places to scale by.
-    /// - Returns: nil for negative precision or an amount without decimal digits.
+    /// - Parameter decimals: Token precision in the range 0...255.
+    /// - Returns: nil for unsupported precision or an amount without decimal digits.
     /// Explicit zero, surrounding whitespace, and omitted integer/fractional parts remain supported.
     public init?(_ string: String, decimals: Int) {
-        guard decimals >= 0,
+        guard UInt8(exactly: decimals) != nil,
               string.utf8.contains(where: { $0 >= 48 && $0 <= 57 }) else { return nil }
         let separators = CharacterSet(charactersIn: ".,")
         let components = string.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: separators)
@@ -58,9 +58,9 @@ extension BigUInt {
     /// then limit the decimal part to "decimals" symbols and uses a "decimalSeparator" as a separator.
     /// Fallbacks to scientific format if higher precision is required.
     /// default: decimals: 18, decimalSeparator: ".", options: .stripZeroes
-    /// - Returns: An empty string if unitDecimals or decimals is negative.
+    /// - Returns: An empty string if unitDecimals is outside 0...255 or display precision is negative.
     public func string(unitDecimals: Int, decimals: Int = 18, decimalSeparator: String = ".", options: StringOptions = .default) -> String {
-        guard unitDecimals >= 0, decimals >= 0 else { return "" }
+        guard UInt8(exactly: unitDecimals) != nil, decimals >= 0 else { return "" }
         guard self != 0 else { return "0" }
         var toDecimals = decimals
         if unitDecimals < toDecimals {
@@ -124,7 +124,7 @@ extension BigInt {
     /// then limit the decimal part to "decimals" symbols and uses a "decimalSeparator" as a separator.
     /// Fallbacks to scientific format if higher precision is required.
     /// default: decimals: 18, decimalSeparator: ".", options: .stripZeroes
-    /// - Returns: An empty string if unitDecimals or decimals is negative.
+    /// - Returns: An empty string if unitDecimals is outside 0...255 or display precision is negative.
     public func string(unitDecimals: Int, decimals: Int = 18, decimalSeparator: String = ".", options: StringOptions = .default) -> String {
         let formatted = magnitude.string(unitDecimals: unitDecimals, decimals: decimals, decimalSeparator: decimalSeparator, options: options)
         guard !formatted.isEmpty else { return "" }
@@ -175,11 +175,11 @@ public struct NaturalUnits {
         guard int >= 0 else { throw Error.cannotConvert(int.description) }
         self.string = int.description
     }
-    /// - Parameter decimals: Nonnegative number of decimal places for the target asset.
+    /// - Parameter decimals: Token precision in the range 0...255.
     /// - Returns: The amount in base units, without rounding or substituting zero on failure.
-    /// - Throws: Error.cannotConvert if decimals is negative or parsing at that precision fails.
+    /// - Throws: Error.cannotConvert if the precision is unsupported or the amount cannot be converted.
     public func number(with decimals: Int) throws -> BigUInt {
-        guard decimals >= 0, let number = BigUInt(string, decimals: decimals) else {
+        guard let number = BigUInt(string, decimals: decimals) else {
             throw Error.cannotConvert(string)
         }
         return number

@@ -24,7 +24,10 @@ public indirect enum ABIValue {
     /// Fixed-length bytes
     case bytes(Data)
 
-    /// A function call
+    /// A 20-byte EVM contract address followed by its four-byte selector.
+    case externalFunction(Function, Data)
+
+    /// A top-level function call
     case function(Function, [ABIValue])
 
     /// Fixed-length array where all values have the same type
@@ -59,7 +62,7 @@ public indirect enum ABIValue {
             return .ufixed(bits, scale)
         case .bytes(let data):
             return .bytes(data.count)
-        case .function(let f, _):
+        case .function(let f, _), .externalFunction(let f, _):
             return .function(f)
         case .array(let type, let array):
             return .array(type, array.count)
@@ -77,7 +80,7 @@ public indirect enum ABIValue {
     /// Encoded length in bytes
     public var length: Int {
         switch self {
-        case .uint, .int, .address, .bool, .fixed, .ufixed:
+        case .uint, .int, .address, .bool, .fixed, .ufixed, .externalFunction:
             return 32
         case .bytes(let data):
             return ((data.count + 31) / 32) * 32
@@ -105,7 +108,7 @@ public indirect enum ABIValue {
     /// Whether the value is dynamic
     public var isDynamic: Bool {
         switch self {
-        case .uint, .int, .address, .bool, .fixed, .ufixed, .bytes:
+        case .uint, .int, .address, .bool, .fixed, .ufixed, .bytes, .externalFunction:
             return false
         case .dynamicBytes, .string, .dynamicArray:
             return true
@@ -147,6 +150,8 @@ public indirect enum ABIValue {
         case (.bytes(let count), let data as Data):
             guard data.count <= count else { throw ABIError.invalidArgumentType }
             self = .bytes(data + Data(repeating: 0, count: count - data.count))
+        case (.function(let f), let bytes as Data):
+            self = .externalFunction(f, bytes)
         case (.function(let f), let args as [Any]):
             self = .function(f, try f.castArguments(args))
         case (.array(let type, let count), let array as [Any]):
@@ -170,7 +175,7 @@ public indirect enum ABIValue {
     }
 
     /// Enum cases are public, so encoding must also validate values built without init(_:type:).
-    func validate() throws {
+    func validate(asArgument: Bool = false) throws {
         try type.validate()
         switch self {
         case .uint(let bits, let value), .ufixed(let bits, _, let value):
@@ -178,17 +183,22 @@ public indirect enum ABIValue {
         case .int(let bits, let value), .fixed(let bits, _, let value):
             try ABIValue.validateSignedInteger(value, bits: bits)
         case .array(let type, let values), .dynamicArray(let type, let values):
-            guard values.allSatisfy({ $0.type == type }) else { throw ABIError.invalidArgumentType }
-            for value in values { try value.validate() }
+            guard values.allSatisfy({ $0.type.matchesParameter(type) }) else { throw ABIError.invalidArgumentType }
+            for value in values { try value.validate(asArgument: true) }
         case .tuple(let values):
-            for value in values { try value.validate() }
+            for value in values { try value.validate(asArgument: true) }
         case .function(let function, let values):
+            guard !asArgument else { throw ABIError.invalidArgumentType }
             guard values.count == function.parameters.count else { throw ABIError.invalidNumberOfArguments }
             for (type, value) in zip(function.parameters, values) {
-                guard value.type == type else { throw ABIError.invalidArgumentType }
-                try value.validate()
+                guard value.type.matchesParameter(type) else { throw ABIError.invalidArgumentType }
+                try value.validate(asArgument: true)
             }
-        case .address, .bool, .bytes, .dynamicBytes, .string:
+        case .externalFunction(_, let bytes):
+            guard bytes.count == 24 else { throw ABIError.invalidArgumentType }
+        case .address(let address):
+            guard ABIEncoder.evmAddress20(from: address.data) != nil else { throw ABIError.invalidAddress }
+        case .bool, .bytes, .dynamicBytes, .string:
             break
         }
     }

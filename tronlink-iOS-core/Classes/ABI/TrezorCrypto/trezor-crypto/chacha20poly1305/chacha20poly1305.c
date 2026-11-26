@@ -37,8 +37,21 @@ void xchacha20poly1305_init(chacha20poly1305_ctx *ctx, uint8_t key[32], uint8_t 
 
 // Encrypt n bytes of plaintext where n must be evenly divisible by the
 // Chacha20 blocksize of 64, except for the final n bytes of plaintext.
+// ECRYPT discards the unused part of its final block. Only the last
+// chunk may therefore end in the middle of a 64-byte keystream block.
+static void chacha20_xor(ECRYPT_ctx *ctx, const uint8_t *in, uint8_t *out, size_t n)
+{
+    while (n) {
+        uint32_t chunk = chacha20poly1305_chunk_size(n);
+        ECRYPT_encrypt_bytes(ctx, in, out, chunk);
+        in += chunk;
+        out += chunk;
+        n -= chunk;
+    }
+}
+
 void chacha20poly1305_encrypt(chacha20poly1305_ctx *ctx, uint8_t *in, uint8_t *out, size_t n) {
-    ECRYPT_encrypt_bytes(&ctx->chacha20, in, out, n);
+    chacha20_xor(&ctx->chacha20, in, out, n);
     poly1305_update(&ctx->poly1305, out, n);
 }
 
@@ -46,7 +59,7 @@ void chacha20poly1305_encrypt(chacha20poly1305_ctx *ctx, uint8_t *in, uint8_t *o
 // Chacha20 blocksize of 64, except for the final n bytes of ciphertext.
 void chacha20poly1305_decrypt(chacha20poly1305_ctx *ctx, uint8_t *in, uint8_t *out, size_t n) {
     poly1305_update(&ctx->poly1305, in, n);
-    ECRYPT_encrypt_bytes(&ctx->chacha20, in, out, n);
+    chacha20_xor(&ctx->chacha20, in, out, n);
 }
 
 // Include authenticated data in the Poly1305 MAC.

@@ -35,4 +35,4 @@ FOUNDATION_EXPORT const unsigned char TLCoreVersionString[];
 #import "HTTP.pbobjc.h"
 #import "Descriptor.pbobjc.h"
 #import "EthereumCrypto.h"
-#import "TrezorCrypto.h"
+#import "TLMnemonicWordlist.h"

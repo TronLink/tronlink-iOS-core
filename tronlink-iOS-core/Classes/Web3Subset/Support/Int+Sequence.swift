@@ -30,9 +30,10 @@ extension Range: IteratorProtocol where Bound == Int {
     /// - Returns: The next element in the underlying sequence, if a next element
     ///   exists; otherwise, `nil`.
     public mutating func next() -> Bound? {
-        guard lowerBound + 1 < upperBound else { return nil }
-        self = lowerBound+1..<upperBound
-        return lowerBound
+        guard lowerBound < upperBound else { return nil }
+        let value = lowerBound
+        self = (value + 1)..<upperBound
+        return value
     }
 }
 
@@ -40,8 +41,8 @@ extension Int: Sequence {
     /// A type that provides the sequence's iteration interface and
     /// encapsulates its iteration state.
     public typealias Iterator = Range<Int>
-    /// Returns an iterator over the elements of this sequence.
+    /// Returns an iterator over `0..<self`, or an empty iterator if `self <= 0`.
     public func makeIterator() -> Range<Int> {
-        return -1..<self
+        return 0..<Swift.max(0, self)
     }
 }

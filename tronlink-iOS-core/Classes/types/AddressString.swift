@@ -50,23 +50,10 @@ public extension String {
         return String(base58CheckEncoding: data)
     }
         
+    /// Decodes one or more ASCII hex byte pairs with an optional 0x or 0X prefix.
     func hexDecodedData() -> Data? {
-        let hex: String
-        if hasPrefix("0x") || hasPrefix("0X") {
-            hex = String(dropFirst(2))
-        } else {
-            hex = self
-        }
-        guard !hex.isEmpty, hex.count % 2 == 0 else { return nil }
-
-        var data = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2)
-            guard let num = UInt8(hex[index..<next], radix: 16) else { return nil }
-            data.append(num)
-            index = next
-        }
+        let hex = hasPrefix("0X") ? "0x" + dropFirst(2) : self
+        guard let data = Data(hexString: hex), !data.isEmpty else { return nil }
         return data
     }
     

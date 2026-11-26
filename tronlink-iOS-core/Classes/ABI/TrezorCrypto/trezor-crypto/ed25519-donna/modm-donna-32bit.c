@@ -241,12 +241,16 @@ void mul256_modm(bignum256modm r, const bignum256modm x, const bignum256modm y) 
 	memzero(q1, sizeof(q1));
 }
 
-void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
+int expand256_modm_checked(bignum256modm out, const unsigned char *in, size_t len) {
 	unsigned char work[64] = {0};
 	bignum256modm_element_t x[16];
 	bignum256modm q1;
 
-	memcpy(work, in, len);
+	if (out == NULL) return 0;
+	if (len > sizeof(work) || (len && in == NULL)) {
+		return 0;
+	}
+	if (len) memcpy(work, in, len);
 	x[0] = U8TO32_LE(work +  0);
 	x[1] = U8TO32_LE(work +  4);
 	x[2] = U8TO32_LE(work +  8);
@@ -279,7 +283,7 @@ void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
 	if (len < 32) {
 		memzero(work, sizeof(work));
 		memzero(x, sizeof(x));
-		return;
+		return 1;
 	}
 
 	/* q1 = x >> 248 = 264 bits = 9 30 bit elements */
@@ -297,6 +301,11 @@ void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
 	memzero(work, sizeof(work));
 	memzero(x, sizeof(x));
 	memzero(q1, sizeof(q1));
+	return 1;
+}
+
+void expand256_modm(bignum256modm out, const unsigned char *in, size_t len) {
+	(void)expand256_modm_checked(out, in, len);
 }
 
 void expand_raw256_modm(bignum256modm out, const unsigned char in[32]) {
